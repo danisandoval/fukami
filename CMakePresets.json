@@ -1,0 +1,119 @@
+{
+  "version": 4,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "m0-assetfree",
+      "displayName": "M0 asset-free diagnostics",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/m0-assetfree",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "RRV_BUILD_DIAGNOSTIC_RUNTIME": "OFF",
+        "RRV_BUILD_ORACLE_F7": "OFF"
+      }
+    },
+    {
+      "name": "m0-macos-arm64",
+      "inherits": "m0-assetfree",
+      "displayName": "M0 macOS ARM64 asset-free diagnostics",
+      "binaryDir": "${sourceDir}/build/m0-macos-arm64",
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      }
+    },
+    {
+      "name": "m0-linux-x86_64",
+      "inherits": "m0-assetfree",
+      "displayName": "M0 Linux x86-64 asset-free diagnostics",
+      "binaryDir": "${sourceDir}/build/m0-linux-x86_64"
+    },
+    {
+      "name": "asan-ubsan-assetfree",
+      "inherits": "m0-macos-arm64",
+      "displayName": "Gate-9 S2: AddressSanitizer + UBSan, asset-free tests",
+      "binaryDir": "${sourceDir}/build/asan-ubsan-assetfree",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined",
+        "CMAKE_OBJCXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined"
+      }
+    },
+    {
+      "name": "tsan-assetfree",
+      "inherits": "m0-macos-arm64",
+      "displayName": "Gate-9 S2: ThreadSanitizer, asset-free tests",
+      "binaryDir": "${sourceDir}/build/tsan-assetfree",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
+        "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
+        "CMAKE_OBJCXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "m0-assetfree-tests",
+      "configurePreset": "m0-assetfree",
+      "targets": [
+        "rrv-asset-free-tests"
+      ]
+    },
+    {
+      "name": "asan-ubsan-assetfree",
+      "configurePreset": "asan-ubsan-assetfree"
+    },
+    {
+      "name": "tsan-assetfree",
+      "configurePreset": "tsan-assetfree"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "m0-assetfree-tests",
+      "configurePreset": "m0-assetfree",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "^portable-asset-free$"
+        }
+      }
+    },
+    {
+      "name": "asan-ubsan-assetfree",
+      "configurePreset": "asan-ubsan-assetfree",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "ASAN_OPTIONS": "halt_on_error=1:detect_leaks=0",
+        "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1",
+        "TSAN_OPTIONS": "halt_on_error=1:second_deadlock_stack=1"
+      }
+    },
+    {
+      "name": "tsan-assetfree",
+      "configurePreset": "tsan-assetfree",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "ASAN_OPTIONS": "halt_on_error=1:detect_leaks=0",
+        "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1",
+        "TSAN_OPTIONS": "halt_on_error=1:second_deadlock_stack=1"
+      }
+    }
+  ]
+}

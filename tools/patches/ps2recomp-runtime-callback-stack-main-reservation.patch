@@ -1,0 +1,256 @@
+diff --git a/ps2xRuntime/include/ps2_runtime.h b/ps2xRuntime/include/ps2_runtime.h
+index 0b9c07c..8c8a70e 100644
+--- a/ps2xRuntime/include/ps2_runtime.h
++++ b/ps2xRuntime/include/ps2_runtime.h
+@@ -730,6 +730,11 @@ public:
+     AsyncCallbackStackWatermarks asyncCallbackStackWatermarks() const;
+     bool restoreAsyncCallbackStackWatermarks(AsyncCallbackStackWatermarks watermarks);
+ 
++    // SetupThread declares the initial guest-thread stack.  Async callbacks
++    // allocate their private stacks from RAM, so this interval must be skipped
++    // before any callback can reserve its first frame.
++    bool reserveAsyncCallbackStackMainThread(uint32_t stackBase, uint32_t stackLimit);
++
+     uint32_t reserveAsyncCallbackStack(uint32_t size, uint32_t alignment = 16u);
+     void dispatchLoop(uint8_t *rdram, R5900Context *ctx);
+     bool shouldPreemptGuestExecution();
+@@ -868,6 +873,9 @@ private:
+     bool m_guestHeapConfigured = false;
+     uint32_t m_asyncCallbackStackFloor = 0x01F00000u;
+     uint32_t m_asyncCallbackStackTop = PS2_RAM_SIZE;
++    uint32_t m_asyncCallbackStackMainBase = 0u;
++    uint32_t m_asyncCallbackStackMainLimit = 0u;
++    bool m_asyncCallbackStackMainReserved = false;
+ 
+     std::unordered_map<uint32_t, RecompiledFunction> m_functionTable;
+     std::atomic<bool> m_stopRequested{false};
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
+index d7dc20e..5fdd705 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp
+@@ -767,6 +767,20 @@ namespace ps2_syscalls
+             }
+         }
+ 
++        // Only an explicit ordinary SetupThread interval is claimed here.
++        // The sentinel form has separate audited RAM-top semantics and remains unclaimed.
++        if (runtime != nullptr && stack != 0u && stack != 0xFFFFFFFFu && stackSizeSigned > 0)
++        {
++            const uint64_t declaredLimit = static_cast<uint64_t>(stack) +
++                                           static_cast<uint32_t>(stackSizeSigned);
++            if (declaredLimit <= PS2_RAM_SIZE && declaredLimit > stack &&
++                !runtime->reserveAsyncCallbackStackMainThread(stack, static_cast<uint32_t>(declaredLimit)))
++            {
++                std::cerr << "[SetupThread] async callback stack was already reserved" << std::endl;
++                runtime->requestStop();
++            }
++        }
++
+         sp &= ~0xFu;
+         setReturnU32(ctx, sp);
+     }
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/Interrupt.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/Interrupt.cpp
+index 78e0f5f..e73188b 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/Interrupt.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/Interrupt.cpp
+@@ -85,7 +85,7 @@ namespace ps2_syscalls
+ 
+         if (runtime == nullptr)
+         {
+-            return PS2_RAM_SIZE - 0x10u;
++            return 0u;
+         }
+ 
+         if (s_cachedRuntime != runtime || s_cachedStackTop == 0u)
+@@ -94,7 +94,7 @@ namespace ps2_syscalls
+             s_cachedStackTop = runtime->reserveAsyncCallbackStack(kAsyncHandlerStackSize, 16u);
+         }
+ 
+-        return (s_cachedStackTop != 0u) ? s_cachedStackTop : (PS2_RAM_SIZE - 0x10u);
++        return s_cachedStackTop;
+     }
+ 
+     static void dispatchIntcHandlersForCause(uint8_t *rdram, PS2Runtime *runtime, uint32_t cause)
+@@ -145,9 +145,16 @@ namespace ps2_syscalls
+ 
+             try
+             {
++                const uint32_t stackTop = getAsyncHandlerStackTop(runtime);
++                if (stackTop == 0u)
++                {
++                    std::cerr << "[INTC] async callback-stack reservation failed" << std::endl;
++                    runtime->requestStop();
++                    return;
++                }
+                 R5900Context irqCtx{};
+                 SET_GPR_U32(&irqCtx, 28, info.gp);
+-                SET_GPR_U32(&irqCtx, 29, getAsyncHandlerStackTop(runtime));
++                SET_GPR_U32(&irqCtx, 29, stackTop);
+                 SET_GPR_U32(&irqCtx, 31, 0u);
+                 SET_GPR_U32(&irqCtx, 4, cause);
+                 SET_GPR_U32(&irqCtx, 5, info.arg);
+@@ -333,9 +340,16 @@ namespace ps2_syscalls
+ 
+             try
+             {
++                const uint32_t stackTop = getAsyncHandlerStackTop(runtime);
++                if (stackTop == 0u)
++                {
++                    std::cerr << "[DMAC] async callback-stack reservation failed" << std::endl;
++                    runtime->requestStop();
++                    return;
++                }
+                 R5900Context irqCtx{};
+                 SET_GPR_U32(&irqCtx, 28, info.gp);
+-                SET_GPR_U32(&irqCtx, 29, getAsyncHandlerStackTop(runtime));
++                SET_GPR_U32(&irqCtx, 29, stackTop);
+                 SET_GPR_U32(&irqCtx, 31, 0u);
+                 SET_GPR_U32(&irqCtx, 4, cause);
+                 SET_GPR_U32(&irqCtx, 5, info.arg);
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/Runtime.h b/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/Runtime.h
+index 38d4e46..571dcf2 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/Runtime.h
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/Helpers/Runtime.h
+@@ -177,10 +177,16 @@ static void EnsureAlarmWorkerRunning()
+                         s_alarmStackTop = readyAlarm->runtime->reserveAsyncCallbackStack(kAlarmCallbackStackSize, 16u);
+                     }
+ 
++                    if (s_alarmStackTop == 0u)
++                    {
++                        std::cerr << "[SetAlarm] async callback-stack reservation failed" << std::endl;
++                        readyAlarm->runtime->requestStop();
++                        continue;
++                    }
++
+                     R5900Context callbackCtx{};
+                     setRegU32(&callbackCtx, 28, readyAlarm->gp);
+-                    setRegU32(&callbackCtx, 29,
+-                              (s_alarmStackTop != 0u) ? s_alarmStackTop : (PS2_RAM_SIZE - 0x10u));
++                    setRegU32(&callbackCtx, 29, s_alarmStackTop);
+                     setRegU32(&callbackCtx, 31, 0);
+                     setRegU32(&callbackCtx, 4, static_cast<uint32_t>(readyAlarm->id));
+                     setRegU32(&callbackCtx, 5, static_cast<uint32_t>(readyAlarm->ticks));
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp
+index 8b32550..ec8464a 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp
+@@ -35,11 +35,18 @@ namespace ps2_stubs
+                 }
+             }
+ 
++            if (stackTop == 0u)
++            {
++                std::cerr << "[CD] async callback-stack reservation failed" << std::endl;
++                runtime->requestStop();
++                return;
++            }
++
+             try
+             {
+                 R5900Context cbCtx{};
+                 SET_GPR_U32(&cbCtx, 28, g_cdReadCbGp.load(std::memory_order_relaxed));
+-                SET_GPR_U32(&cbCtx, 29, (stackTop != 0u) ? stackTop : (PS2_RAM_SIZE - 0x10u));
++                SET_GPR_U32(&cbCtx, 29, stackTop);
+                 SET_GPR_U32(&cbCtx, 31, 0u);
+                 SET_GPR_U32(&cbCtx, 4, static_cast<uint32_t>(reason));
+                 cbCtx.pc = cb;
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+index 85eba7b..4a68a5c 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp
+@@ -861,10 +861,17 @@ namespace ps2_stubs
+             }
+         }
+ 
++        if (callbackStackTop == 0u)
++        {
++            std::cerr << "[sceGsSyncVCallback] async callback-stack reservation failed" << std::endl;
++            runtime->requestStop();
++            return;
++        }
++
+         try
+         {
+             R5900Context callbackCtx{};
+             SET_GPR_U32(&callbackCtx, 28, gp);
+-            SET_GPR_U32(&callbackCtx, 29, (callbackStackTop != 0u) ? callbackStackTop : (PS2_RAM_SIZE - 0x10u));
++            SET_GPR_U32(&callbackCtx, 29, callbackStackTop);
+             SET_GPR_U32(&callbackCtx, 31, 0u);
+             SET_GPR_U32(&callbackCtx, 4, static_cast<uint32_t>(callbackTick));
+             callbackCtx.pc = callback;
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index b5f5baa..9b93b99 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1600,6 +1600,9 @@ void PS2Runtime::loadELF(const std::string &elfPath, uint32_t moduleBase)
+         const uint32_t hardLimit = std::min(kGuestHeapHardLimit, PS2_RAM_SIZE);
+         m_asyncCallbackStackFloor = std::min(std::max(hardLimit, suggestedHeapBase), PS2_RAM_SIZE);
+         m_asyncCallbackStackTop = PS2_RAM_SIZE;
++        m_asyncCallbackStackMainBase = 0u;
++        m_asyncCallbackStackMainLimit = 0u;
++        m_asyncCallbackStackMainReserved = false;
+     }
+ 
+     LoadedModule module;
+@@ -2580,6 +2580,39 @@ PS2Runtime::AsyncCallbackStackWatermarks PS2Runtime::asyncCallbackStackWatermar
+-    return {m_asyncCallbackStackTop, m_asyncCallbackStackFloor};
++    uint32_t snapshotTop = m_asyncCallbackStackTop;
++    if (m_asyncCallbackStackMainReserved && m_asyncCallbackStackMainLimit > m_asyncCallbackStackFloor &&
++        snapshotTop > m_asyncCallbackStackMainBase)
++    {
++        // The snapshot format carries only a top/floor pair. Cap the exported
++        // top below the main stack for a fresh-runtime restore.
++        snapshotTop = std::max(m_asyncCallbackStackFloor, m_asyncCallbackStackMainBase & ~(kGuestHeapDefaultAlignment - 1u));
++    }
++    return {snapshotTop, m_asyncCallbackStackFloor};
+ }
+ 
++bool PS2Runtime::reserveAsyncCallbackStackMainThread(uint32_t stackBase, uint32_t stackLimit)
++{
++    if (stackBase >= stackLimit || stackLimit > PS2_RAM_SIZE)
++    {
++        return false;
++    }
++
++    std::lock_guard<std::mutex> lock(m_asyncCallbackStackMutex);
++    // This is deliberately a startup declaration.  Existing callback frames
++    // have no relocation protocol, so never retroactively move their range.
++    if (m_asyncCallbackStackMainReserved)
++    {
++        return m_asyncCallbackStackMainBase == stackBase && m_asyncCallbackStackMainLimit == stackLimit;
++    }
++    if (m_asyncCallbackStackTop != PS2_RAM_SIZE)
++    {
++        return false;
++    }
++
++    m_asyncCallbackStackMainBase = stackBase;
++    m_asyncCallbackStackMainLimit = stackLimit;
++    m_asyncCallbackStackMainReserved = true;
++    return true;
++}
++
+ bool PS2Runtime::restoreAsyncCallbackStackWatermarks(AsyncCallbackStackWatermarks watermarks)
+ {
+     // reserveAsyncCallbackStack() aligns all reservations to at least 16 bytes.
+@@ -2643,6 +2664,20 @@ uint32_t PS2Runtime::reserveAsyncCallbackStack(uint32_t size, uint32_t alignmen
+ 
+     uint32_t base = top - allocSize;
+     base &= ~(normalizedAlignment - 1u);
++    if (m_asyncCallbackStackMainReserved &&
++        base < m_asyncCallbackStackMainLimit && top > m_asyncCallbackStackMainBase)
++    {
++        // A single callback frame cannot straddle the main-thread stack.
++        // Continue below the declared interval; space above it remains usable
++        // whenever the requested frame fit there without overlap.
++        top = m_asyncCallbackStackMainBase & ~(kGuestHeapDefaultAlignment - 1u);
++        if (top <= allocSize)
++        {
++            return 0u;
++        }
++        base = top - allocSize;
++        base &= ~(normalizedAlignment - 1u);
++    }
+     if (base < m_asyncCallbackStackFloor || base >= top)
+     {
+         return 0u;

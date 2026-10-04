@@ -1,0 +1,8 @@
+# SteamOS-like runtime check (SteamOS 3 is Arch-based): run the packaged
+# Fukami tarball here with no build deps, only what a Deck has, plus Xvfb and
+# Mesa lavapipe to stand in for the Deck's GPU.
+FROM --platform=linux/amd64 archlinux:latest
+RUN sed -i "s/^#DisableSandbox/DisableSandbox/; /^\[options\]/a DisableSandbox" /etc/pacman.conf && pacman -Syu --noconfirm --needed glibc gcc-libs sdl2 vulkan-icd-loader vulkan-swrast \
+    libx11 libxi libxrandr libxext libxcursor libxinerama libxfixes libxtst libxss libxcb libxkbcommon wayland libdecor dbus systemd-libs alsa-lib libpulse pipewire \
+    fontconfig freetype2 zlib curl expat libffi xorg-server-xvfb xorg-xauth which \
+    && pacman -Scc --noconfirm

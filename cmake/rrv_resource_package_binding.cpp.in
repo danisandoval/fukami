@@ -1,0 +1,16 @@
+#include "rrv_resource_package.h"
+
+namespace rrv::resource_package {
+namespace {
+constexpr InventoryEntry kInventory[] = {
+@RRV_RESOURCE_PACKAGE_ENTRIES@};
+}
+
+const Binding rrv_resource_package_binding{
+    "@RRV_RESOURCE_PACKAGE_VERSION@",
+    "@RRV_RESOURCE_PACKAGE_COMPOSITION@",
+    "@RRV_RESOURCE_PACKAGE_BRIDGE@",
+    kInventory,
+    sizeof(kInventory) / sizeof(kInventory[0]),
+};
+}  // namespace rrv::resource_package

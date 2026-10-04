@@ -1,0 +1,96 @@
+diff --git a/pcsx2/GS/GS.cpp b/pcsx2/GS/GS.cpp
+index 9655d33..270b94a 100644
+--- a/pcsx2/GS/GS.cpp
++++ b/pcsx2/GS/GS.cpp
+@@ -75,6 +75,18 @@ u64 GSRrvGetDirectPresentCount()
+ 	return s_rrv_direct_present_count.load(std::memory_order_relaxed);
+ }
+ 
++void GSRrvSetFieldOfyCanonical(u32 from_ofy, u32 to_ofy)
++{
++	GSState::s_rrv_ofy_from = from_ofy & 0xFFFFu;
++	GSState::s_rrv_ofy_to = to_ofy & 0xFFFFu;
++	GSState::s_rrv_ofy_canonical_count.store(0, std::memory_order_relaxed);
++}
++
++u64 GSRrvGetFieldOfyCanonicalCount()
++{
++	return GSState::s_rrv_ofy_canonical_count.load(std::memory_order_relaxed);
++}
++
+ static GSRendererType GSCurrentRenderer;
+ 
+ GSRendererType GSGetCurrentRenderer()
+diff --git a/pcsx2/GS/GS.h b/pcsx2/GS/GS.h
+index 5efe287..e650ffc 100644
+--- a/pcsx2/GS/GS.h
++++ b/pcsx2/GS/GS.h
+@@ -86,6 +86,13 @@ void GSgifTransfer3(u8* mem, u32 size);
+ void GSRrvResetDirectPresentCount();
+ void GSRrvRecordDirectPresent();
+ u64 GSRrvGetDirectPresentCount();
++// RRV Gate-6 full-frame extension. When from != to, every XYOFFSET_1/2 write
++// whose OFY equals `from` is stored with OFY = `to` before any draw, culling,
++// scissor or texture-cache decision uses it. The bridge uses this to put both
++// field parities of a half-line (sceGsSetHalfOffset-style) odd-field offset on
++// one progressive raster grid. from == to (the default) is a no-op.
++void GSRrvSetFieldOfyCanonical(u32 from_ofy, u32 to_ofy);
++u64 GSRrvGetFieldOfyCanonicalCount();
+ void GSvsync(u32 field, bool registers_written);
+ int GSfreeze(FreezeAction mode, freezeData* data);
+ std::string GSGetBaseSnapshotFilename();
+diff --git a/pcsx2/GS/GSState.cpp b/pcsx2/GS/GSState.cpp
+index be5fb0d..78826cc 100644
+--- a/pcsx2/GS/GSState.cpp
++++ b/pcsx2/GS/GSState.cpp
+@@ -22,6 +22,9 @@
+ u64 GSState::s_n = 0;
+ u64 GSState::s_last_transfer_draw_n = 0;
+ u64 GSState::s_transfer_n = 0;
++u32 GSState::s_rrv_ofy_from = 0;
++u32 GSState::s_rrv_ofy_to = 0;
++std::atomic<u64> GSState::s_rrv_ofy_canonical_count{0};
+ 
+ static __fi bool IsAutoFlushEnabled()
+ {
+@@ -1907,7 +1910,14 @@ void GSState::GIFRegHandlerXYOFFSET(const GIFReg* RESTRICT r)
+ {
+ 	GL_REG("XYOFFSET_%d = 0x%x_%x", i, r->U32[1], r->U32[0]);
+ 
+-	const u64 r_masked = r->U64 & XYOFFSET_REG_MASK;
++	u64 r_masked = r->U64 & XYOFFSET_REG_MASK;
++
++	// RRV Gate-6 full-frame extension: canonical field OFY (off unless set).
++	if (s_rrv_ofy_from != s_rrv_ofy_to && static_cast<u32>((r_masked >> 32) & 0xFFFFu) == s_rrv_ofy_from)
++	{
++		r_masked = (r_masked & 0x0000FFFFULL) | (static_cast<u64>(s_rrv_ofy_to) << 32);
++		s_rrv_ofy_canonical_count.fetch_add(1, std::memory_order_relaxed);
++	}
+ 
+ 	if (i == m_prev_env.PRIM.CTXT)
+ 	{
+diff --git a/pcsx2/GS/GSState.h b/pcsx2/GS/GSState.h
+index 8a2469b..786f015 100644
+--- a/pcsx2/GS/GSState.h
++++ b/pcsx2/GS/GSState.h
+@@ -14,6 +14,8 @@
+ #include "GS/GSVector.h"
+ #include "GSAlignedClass.h"
+ 
++#include <atomic>
++
+ class GSDumpBase;
+ 
+ class GSState : public GSAlignedClass<32>
+@@ -318,6 +320,11 @@ public:
+ 	static u64 s_last_transfer_draw_n;
+ 	static u64 s_transfer_n;
+ 
++	// RRV Gate-6 full-frame extension, see GSRrvSetFieldOfyCanonical().
++	static u32 s_rrv_ofy_from;
++	static u32 s_rrv_ofy_to;
++	static std::atomic<u64> s_rrv_ofy_canonical_count;
++
+ 	GSPerfMon m_perfmon_frame; // Track stat across a frame.
+ 	GSPerfMon m_perfmon_draw;  // Track stat across a draw.
+ 

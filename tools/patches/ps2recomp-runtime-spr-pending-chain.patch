@@ -1,0 +1,68 @@
+--- a/src/lib/ps2_memory.cpp
++++ b/src/lib/ps2_memory.cpp
+@@ -1527,6 +1527,7 @@
+                 const uint64_t bytes = static_cast<uint64_t>(qwc) * 16ull;
+                 uint32_t finalSadr = sadr;
+                 uint32_t finalMadr = madr;
++                uint32_t finalChcr = value;
+                 if (m_scratchpad && !toScratchpad && mode == 1u)
+                 {
+                     // fromSPR chain mode uses an inline chain in scratchpad. RRV's
+@@ -1542,7 +1543,25 @@
+                                      "[spr-from-chain] START chcr=%08x madr=%08x qwc=%08x sadr=%04x\n",
+                                      value, madr, qwc, tagOff);
+                     }
+-                    for (uint32_t tagCount = 0u; tagCount < 1024u; ++tagCount)
++                    // Ordering/termination follows PCSX2 2.8.2 pcsx2/SPR.cpp dmaSPR0 and
++                    // _dmaSPR0 (PCSX2 Dev Team, 2002-2026, GPL-3.0+).
++                    // Pending QWC describes payload at SADR, not a new tag. Only an
++                    // incoming END tag finishes this resumed burst; dmaSPR0 does
++                    // not use incoming IRQ/TIE to terminate pending fromSPR data.
++                    bool chainDone = qwc > 0u && ((value >> 28) & 0x7u) == 7u;
++                    if (qwc > 0u)
++                    {
++                        uint32_t ramOff = translateAddress(madr) & PS2_RAM_MASK;
++                        for (uint64_t i = 0u; i < bytes; ++i)
++                        {
++                            m_rdram[ramOff] = m_scratchpad[tagOff];
++                            ramOff = (ramOff + 1u) & PS2_RAM_MASK;
++                            tagOff = (tagOff + 1u) & (PS2_SCRATCHPAD_SIZE - 1u);
++                        }
++                        finalSadr = tagOff;
++                        finalMadr = static_cast<uint32_t>(madr + bytes);
++                    }
++                    for (uint32_t tagCount = 0u; !chainDone && tagCount < 1024u; ++tagCount)
+                     {
+                         uint64_t tagLo = 0u;
+                         for (uint32_t i = 0u; i < sizeof(tagLo); ++i)
+@@ -1550,6 +1569,10 @@
+                             reinterpret_cast<uint8_t *>(&tagLo)[i] =
+                                 m_scratchpad[(tagOff + i) & (PS2_SCRATCHPAD_SIZE - 1u)];
+                         }
++                        // DMACh::unsafeTransfer preserves the low CHCR controls and
++                        // replaces TAG with the fetched tag's upper 16 bits.
++                        finalChcr = (finalChcr & 0xFFFFu) |
++                                    (static_cast<uint32_t>(tagLo) & 0xFFFF0000u);
+                         const uint32_t tagQwc = static_cast<uint32_t>(tagLo & 0xFFFFu);
+                         const uint32_t tagId = static_cast<uint32_t>((tagLo >> 28) & 0x7u);
+                         const uint32_t dstAddr = static_cast<uint32_t>(tagLo >> 32) & 0x7FFFFFFFu;
+@@ -1586,8 +1609,8 @@
+                         tagOff = sprOff;
+                         finalSadr = tagOff;
+                         finalMadr = dstAddr + payloadBytes;
+-                        if (tagId == 7u) // END
+-                            break;
++                        chainDone = tagId == 7u || // END
++                                    ((finalChcr & 0x80u) != 0u && (tagLo & 0x80000000ull) != 0u);
+                     }
+                 }
+                 else if (m_scratchpad && qwc > 0u)
+@@ -1608,7 +1631,7 @@
+                                 (PS2_SCRATCHPAD_SIZE - 1u);
+                 }
+                 // Completion: STR clear, QWC drained, MADR/SADR advanced past the burst.
+-                m_ioRegisters[channelBase + 0x00] = value & ~0x100u;
++                m_ioRegisters[channelBase + 0x00] = finalChcr & ~0x100u;
+                 m_ioRegisters[channelBase + 0x10] = finalMadr;
+                 m_ioRegisters[channelBase + 0x20] = 0u;
+                 m_ioRegisters[channelBase + 0x80] = finalSadr;

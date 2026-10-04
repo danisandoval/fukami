@@ -1,0 +1,79 @@
+diff --git a/pcsx2/GS/Renderers/SW/GSDrawScanline.cpp b/pcsx2/GS/Renderers/SW/GSDrawScanline.cpp
+index f18adbd..451e707 100644
+--- a/pcsx2/GS/Renderers/SW/GSDrawScanline.cpp
++++ b/pcsx2/GS/Renderers/SW/GSDrawScanline.cpp
+@@ -10,8 +10,10 @@
+ 
+ #include <fstream>
+ 
+-// Comment to disable all dynamic code generation.
++// The GS-only RRV bridge does not initialize PCSX2's VM-wide JIT code map.
++#if !defined(RRV_PCSX2_GS_C_SCANLINE)
+ #define ENABLE_JIT_RASTERIZER
++#endif
+ 
+ #if MULTI_ISA_COMPILE_ONCE
+ // Lack of a better home
+@@ -30,13 +32,17 @@ GSDrawScanline::GSDrawScanline()
+ 	: m_sp_map("GSSetupPrim")
+ 	, m_ds_map("GSDrawScanline")
+ {
++#if !defined(RRV_PCSX2_GS_C_SCANLINE)
+ 	GSCodeReserve::ResetMemory();
++#endif
+ }
+ 
+ GSDrawScanline::~GSDrawScanline()
+ {
++#if !defined(RRV_PCSX2_GS_C_SCANLINE)
+ 	if (const size_t used = GSCodeReserve::GetMemoryUsed(); used > 0)
+ 		DevCon.WriteLn("SW JIT generated %zu bytes of code", used);
++#endif
+ }
+ 
+ bool GSDrawScanline::ShouldUseCDrawScanline(u64 key)
+@@ -115,10 +121,12 @@ void GSDrawScanline::BeginDraw(const GSRasterizerData& data, GSScanlineLocalData
+ 
+ void GSDrawScanline::ResetCodeCache()
+ {
++#if !defined(RRV_PCSX2_GS_C_SCANLINE)
+ 	Console.Warning("GS Software JIT cache overflow, resetting.");
+ 	m_sp_map.Clear();
+ 	m_ds_map.Clear();
+ 	GSCodeReserve::ResetMemory();
++#endif
+ }
+ 
+ bool GSDrawScanline::SetupDraw(GSRasterizerData& data)
+diff --git a/pcsx2/GS/Renderers/SW/GSDrawScanlineCodeGenerator.arm64.cpp b/pcsx2/GS/Renderers/SW/GSDrawScanlineCodeGenerator.arm64.cpp
+index c1602e4..d69d856 100644
+--- a/pcsx2/GS/Renderers/SW/GSDrawScanlineCodeGenerator.arm64.cpp
++++ b/pcsx2/GS/Renderers/SW/GSDrawScanlineCodeGenerator.arm64.cpp
+@@ -1800,7 +1800,9 @@ void GSDrawScanlineCodeGenerator::WriteZBuf()
+ 		armAsm->Smin(v1.V4S(), v1.V4S(), v7.V4S());
+ 	}
+ 
+-	bool fast = m_sel.ztest ? m_sel.zpsm < 2 : m_sel.zpsm == 0 && m_sel.notest;
++	// PSMZ24 shares a 32-bit storage lane whose high byte is not depth.  The
++	// ARM64 bulk path loses those preserved bits; use the per-pixel RMW path.
++	bool fast = m_sel.ztest ? m_sel.zpsm == 0 : m_sel.zpsm == 0 && m_sel.notest;
+ 
+ 	WritePixel(v1, w9, w1, true, fast, m_sel.zpsm, 1);
+ }
+diff --git a/pcsx2/GS/Renderers/SW/GSRendererSW.h b/pcsx2/GS/Renderers/SW/GSRendererSW.h
+index a1a2c34..2393863 100644
+--- a/pcsx2/GS/Renderers/SW/GSRendererSW.h
++++ b/pcsx2/GS/Renderers/SW/GSRendererSW.h
+@@ -68,6 +68,12 @@ protected:
+ 	void Draw() override;
+ 	void Queue(GSRingHeap::SharedPtr<GSRasterizerData>& item);
+ 	void Sync(int reason);
++
++public:
++	// RRV GS-bridge extension: see GSState::RrvSyncRasterizer.
++	void RrvSyncRasterizer() override { Sync(-1); }
++
++protected:
+ 	void InvalidateVideoMem(const GIFRegBITBLTBUF& BITBLTBUF, const GSVector4i& r) override;
+ 	void InvalidateLocalMem(const GIFRegBITBLTBUF& BITBLTBUF, const GSVector4i& r, bool clut = false) override;
+

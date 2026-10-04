@@ -1,0 +1,367 @@
+diff --git a/pcsx2/GS/Renderers/HW/GSTextureCache.cpp b/pcsx2/GS/Renderers/HW/GSTextureCache.cpp
+index 440e279..bf37073 100644
+--- a/pcsx2/GS/Renderers/HW/GSTextureCache.cpp
++++ b/pcsx2/GS/Renderers/HW/GSTextureCache.cpp
+@@ -11,6 +11,7 @@
+ #include "GS/GSXXH.h"
+ 
+ #include "common/Console.h"
++#include "common/AlignedMalloc.h"
+ #include "common/BitUtils.h"
+ #include "common/HashCombine.h"
+ #include "common/SmallString.h"
+@@ -18,6 +19,7 @@
+ #include "fmt/format.h"
+ 
+ #include <cinttypes>
++#include <limits>
+ #include <math.h>
+ 
+ #ifdef __APPLE__
+@@ -30,6 +32,51 @@ std::unique_ptr<GSTextureCache> g_texture_cache;
+ 
+ static u8* s_unswizzle_buffer;
+ 
++// ReadTexture expands every target pixel to u32, including 16/24-bit formats.
++// Check before aligning, multiplying by height, or narrowing to its int pitch.
++static bool GetTargetUpdateScratchLayout(size_t width, size_t height, int& pitch, size_t& required_size)
++{
++	constexpr size_t max_size = std::numeric_limits<size_t>::max();
++	constexpr size_t alignment_mask = VECTOR_ALIGNMENT - 1;
++	if (width == 0 || height == 0 || width > (max_size - alignment_mask) / sizeof(u32))
++		return false;
++
++	const size_t aligned_pitch = VectorAlign(width * sizeof(u32));
++	if (aligned_pitch > static_cast<size_t>(std::numeric_limits<int>::max()) || height > max_size / aligned_pitch)
++		return false;
++
++	pitch = static_cast<int>(aligned_pitch);
++	required_size = aligned_pitch * height;
++	return true;
++}
++
++static constexpr size_t s_unswizzle_buffer_size = 9 * 1024 * 1024;
++using UnswizzleScratchBuffer = std::unique_ptr<u8, decltype(&_aligned_free)>;
++
++// Readers write their complete aligned rectangle. Consumers can start within
++// it and advance one complete pitch per row, so both spans must fit.
++static bool GetUnswizzleScratch(size_t pitch, size_t write_height, size_t write_row_size, size_t consumer_offset, size_t consumer_size,
++	UnswizzleScratchBuffer& oversized_buffer, u8*& scratch)
++{
++	constexpr size_t max_size = std::numeric_limits<size_t>::max();
++	if (pitch == 0 || write_height == 0 || write_height > max_size / pitch || write_row_size > max_size - ((write_height - 1) * pitch) || consumer_offset > max_size - consumer_size)
++		return false;
++
++	const size_t write_size = ((write_height - 1) * pitch) + write_row_size;
++	const size_t required_size = std::max(write_size, consumer_offset + consumer_size);
++	oversized_buffer.reset();
++	scratch = s_unswizzle_buffer;
++	if (required_size <= s_unswizzle_buffer_size)
++		return true;
++
++	oversized_buffer.reset(static_cast<u8*>(_aligned_malloc(required_size, VECTOR_ALIGNMENT)));
++	if (!oversized_buffer)
++		return false;
++
++	scratch = oversized_buffer.get();
++	return true;
++}
++
+ /// List of candidates for purging when the hash cache gets too large.
+ static std::vector<std::pair<GSTextureCache::HashCacheMap::iterator, s32>> s_hash_cache_purge_list;
+ 
+@@ -7016,7 +7063,9 @@ GSTextureCache::HashCacheEntry* GSTextureCache::LookupHashCache(const GIFRegTEX0
+ 
+ 	// need the hash either for replacing, dumping or caching.
+ 	// if dumping/replacing is on, we compute the clut hash regardless, since replacements aren't indexed
+-	HashCacheKey key{HashCacheKey::Create(TEX0, TEXA, (dump || replace || !paltex) ? clut : nullptr, lod, region)};
++	HashCacheKey key;
++	if (!HashCacheKey::Create(TEX0, TEXA, (dump || replace || !paltex) ? clut : nullptr, lod, region, key))
++		return nullptr;
+ 
+ 	// handle dumping first, this is mostly isolated.
+ 	if (dump)
+@@ -7670,10 +7719,26 @@ void GSTextureCache::Source::Update(const GSVector4i& rect, int level)
+ 		}
+ 	}
+ 
++	if (m_write.failed)
++	{
++		m_write.failed = false;
++		m_write.count = 0;
++		m_valid.reset();
++		m_complete_layers &= ~(1u << level);
++		return;
++	}
++
+ 	if (blocks > 0)
+ 	{
+ 		g_perfmon.Put(GSPerfMon::Unswizzle, bs.x * bs.y * blocks << (m_palette ? 2 : 0));
+ 		Flush(m_write.count, level, off);
++		if (m_write.failed)
++		{
++			m_write.failed = false;
++			m_write.count = 0;
++			m_valid.reset();
++			m_complete_layers &= ~(1u << level);
++		}
+ 	}
+ }
+ 
+@@ -7703,6 +7768,9 @@ void GSTextureCache::Source::Write(const GSVector4i& r, int layer, const GSOffse
+ 	if (!m_write.rect)
+ 		m_write.rect = static_cast<GSVector4i*>(_aligned_malloc(3 * sizeof(GSVector4i), 16));
+ 
++	if (m_write.failed)
++		return;
++
+ 	m_write.rect[m_write.count++] = r;
+ 
+ 	while (m_write.count >= 2)
+@@ -7766,6 +7834,9 @@ void GSTextureCache::Source::Flush(u32 count, int layer, const GSOffset& off)
+ 
+ 	pitch = VectorAlign(pitch);
+ 
++	UnswizzleScratchBuffer oversized_buffer(nullptr, &_aligned_free);
++	u8* scratch = s_unswizzle_buffer;
++
+ 	for (u32 i = 0; i < count; i++)
+ 	{
+ 		const GSVector4i r(m_write.rect[i]);
+@@ -7787,11 +7858,30 @@ void GSTextureCache::Source::Flush(u32 count, int layer, const GSOffset& off)
+ 		if (rint.width() == 0 || rint.height() == 0)
+ 			continue;
+ 
+-		rtx(mem, off, r, s_unswizzle_buffer, pitch, m_TEXA);
++		const size_t row_offset = static_cast<size_t>(std::max(tex_r.top - r.top, 0)) * static_cast<size_t>(pitch);
++		const size_t column_offset = static_cast<size_t>(std::max(tex_r.left - r.left, 0)) << (m_palette ? 0 : 2);
++		if (row_offset > std::numeric_limits<size_t>::max() - column_offset ||
++			static_cast<size_t>(rint.height()) > std::numeric_limits<size_t>::max() / static_cast<size_t>(pitch))
++		{
++			Console.Error("Invalid scratch layout for source update");
++			m_write.failed = true;
++			return;
++		}
++		const size_t source_offset = row_offset + column_offset;
++		const size_t source_size = static_cast<size_t>(rint.height()) * static_cast<size_t>(pitch);
++		const size_t raw_row_size = static_cast<size_t>(r.width()) << (m_palette ? 0 : 2);
++		if (!GetUnswizzleScratch(static_cast<size_t>(pitch), static_cast<size_t>(r.height()), raw_row_size, source_offset, source_size,
++			oversized_buffer, scratch))
++		{
++			Console.Error("Failed to allocate scratch for source update");
++			m_write.failed = true;
++			return; // Source::Update invalidates the pending writes for a full retry.
++		}
++
++		rtx(mem, off, r, scratch, pitch, m_TEXA);
+ 
+ 		// need to offset if we're a region texture
+-		const u8* src = s_unswizzle_buffer + (pitch * static_cast<u32>(std::max(tex_r.top - r.top, 0))) +
+-		                (static_cast<u32>(std::max(tex_r.left - r.left, 0)) << (m_palette ? 0 : 2));
++		const u8* src = scratch + source_offset;
+ 		m_texture->Update(rint - tex_r.xyxy(), src, pitch, layer);
+ 	}
+ 
+@@ -7807,7 +7897,9 @@ void GSTextureCache::Source::Flush(u32 count, int layer, const GSOffset& off)
+ void GSTextureCache::Source::PreloadLevel(int level)
+ {
+ 	// m_TEX0 is adjusted for mips (messy, should be changed).
+-	const HashType hash = HashTexture(m_TEX0, m_TEXA, m_region);
++	HashType hash;
++	if (!HashTexture(m_TEX0, m_TEXA, m_region, hash))
++		return;
+ 
+ 	// Layer is complete again, regardless of whether the hash matches or not (and we reupload).
+ 	const u8 layer_bit = static_cast<u8>(1) << level;
+@@ -7983,15 +8075,44 @@ void GSTextureCache::Target::Update(bool cannot_scale)
+ 
+ 		const GSVector4i read_r = m_dirty.GetDirtyRect(i, m_TEX0, total_rect, true);
+ 		const GSVector4i t_r(read_r - t_offset);
++		int pitch = 0;
++		size_t required_size = 0;
++		std::unique_ptr<u8, decltype(&_aligned_free)> oversized_buffer(nullptr, &_aligned_free);
++		u8* scratch = s_unswizzle_buffer;
++		if (!mapped || ((m_TEX0.PSM & 0xf) != PSMCT24 && m_dirty[i].rgba.c.a && bpp >= 16))
++		{
++			if (!GetTargetUpdateScratchLayout(read_r.width(), read_r.height(), pitch, required_size)) [[unlikely]]
++			{
++				Console.Error("Invalid %dx%d scratch layout for target update", read_r.width(), read_r.height());
++				if (mapped)
++					t->Unmap();
++				g_gs_device->Recycle(t);
++				return; // Keep dirty rectangles for a later retry; nothing has been drawn to the target.
++			}
++
++			// Retain the existing 9 MiB scratch path for normal updates, without clipping larger reads.
++			if (required_size > 9 * 1024 * 1024)
++			{
++				oversized_buffer.reset(static_cast<u8*>(_aligned_malloc(required_size, VECTOR_ALIGNMENT)));
++				if (!oversized_buffer) [[unlikely]]
++				{
++					Console.Error("Failed to allocate %zu bytes of scratch for target update", required_size);
++					if (mapped)
++						t->Unmap();
++					g_gs_device->Recycle(t);
++					return;
++				}
++				scratch = oversized_buffer.get();
++			}
++		}
+ 		if (mapped)
+ 		{
+ 			if ((m_TEX0.PSM & 0xf) != PSMCT24 && m_dirty[i].rgba.c.a && bpp >= 16)
+ 			{
+ 				// TODO: Only read once in 32bit and copy to the mapped texture. Bit out of scope of this PR and not a huge impact.
+-				const int pitch = VectorAlign(read_r.width() * sizeof(u32));
+-				g_gs_renderer->m_mem.ReadTexture(off, read_r, s_unswizzle_buffer, pitch, TEXA);
++				g_gs_renderer->m_mem.ReadTexture(off, read_r, scratch, pitch, TEXA);
+ 
+-				std::pair<u8, u8> new_alpha_minmax = GSGetRGBA8AlphaMinMax(s_unswizzle_buffer, read_r.width(), read_r.height(), pitch);
++				std::pair<u8, u8> new_alpha_minmax = GSGetRGBA8AlphaMinMax(scratch, read_r.width(), read_r.height(), pitch);
+ 				alpha_minmax.first = std::min(alpha_minmax.first, new_alpha_minmax.first);
+ 				alpha_minmax.second = std::max(alpha_minmax.second, new_alpha_minmax.second);
+ 			}
+@@ -8001,17 +8122,16 @@ void GSTextureCache::Target::Update(bool cannot_scale)
+ 		}
+ 		else
+ 		{
+-			const int pitch = VectorAlign(read_r.width() * sizeof(u32));
+-			g_gs_renderer->m_mem.ReadTexture(off, read_r, s_unswizzle_buffer, pitch, TEXA);
++			g_gs_renderer->m_mem.ReadTexture(off, read_r, scratch, pitch, TEXA);
+ 
+ 			if ((m_TEX0.PSM & 0xf) != PSMCT24 && m_dirty[i].rgba.c.a && bpp >= 16)
+ 			{
+-				std::pair<u8, u8> new_alpha_minmax = GSGetRGBA8AlphaMinMax(s_unswizzle_buffer, read_r.width(), read_r.height(), pitch);
++				std::pair<u8, u8> new_alpha_minmax = GSGetRGBA8AlphaMinMax(scratch, read_r.width(), read_r.height(), pitch);
+ 				alpha_minmax.first = std::min(alpha_minmax.first, new_alpha_minmax.first);
+ 				alpha_minmax.second = std::max(alpha_minmax.second, new_alpha_minmax.second);
+ 			}
+ 
+-			t->Update(t_r, s_unswizzle_buffer, pitch);
++			t->Update(t_r, scratch, pitch);
+ 		}
+ 
+ 		GSDevice::MultiStretchRect& drect = drects[ndrects++];
+@@ -9013,7 +9133,7 @@ __fi static GSTextureCache::HashType FinishBlockHash(BlockHashState& st)
+ 	return GSXXH3_64bits_digest(&st);
+ }
+ 
+-static void HashTextureLevel(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, GSTextureCache::SourceRegion region, BlockHashState& hash_st, u8* temp)
++static bool HashTextureLevel(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, GSTextureCache::SourceRegion region, BlockHashState& hash_st)
+ {
+ 	const GSLocalMemory::psm_t& psm = GSLocalMemory::m_psm[TEX0.PSM];
+ 	const GSVector2i& bs = psm.bs;
+@@ -9041,6 +9161,19 @@ static void HashTextureLevel(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, GST
+ 		const u32 pitch = VectorAlign(static_cast<u32>(block_rect.z) << (palette ? 0 : 2));
+ 		const u32 row_size = static_cast<u32>(tw) << (palette ? 0 : 2);
+ 		const GSLocalMemory::readTexture rtx = palette ? psm.rtxP : psm.rtx;
++		const size_t source_offset = (static_cast<size_t>(pitch) * static_cast<u32>(rect.top - block_rect.top)) +
++			static_cast<u32>(rect.left - block_rect.left);
++		const size_t source_size = (pitch == row_size) ?
++			(static_cast<size_t>(pitch) * static_cast<u32>(th)) :
++			(static_cast<size_t>(pitch) * static_cast<u32>(th - 1) + row_size);
++		UnswizzleScratchBuffer oversized_buffer(nullptr, &_aligned_free);
++		u8* temp = s_unswizzle_buffer;
++		const size_t block_row_size = static_cast<size_t>(block_rect.width()) << (palette ? 0 : 2);
++		if (!GetUnswizzleScratch(pitch, static_cast<size_t>(block_rect.height()), block_row_size, source_offset, source_size, oversized_buffer, temp))
++		{
++			Console.Error("Failed to allocate scratch for texture hash");
++			return false;
++		}
+ 
+ 		// Use temp buffer for expanding, since we may not need to update.
+ 		rtx(mem, off, block_rect, temp, pitch, TEXA);
+@@ -9073,14 +9206,19 @@ static void HashTextureLevel(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, GST
+ 			}
+ 		}
+ 	}
++
++	return true;
+ }
+ 
+-GSTextureCache::HashType GSTextureCache::HashTexture(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, SourceRegion region)
++bool GSTextureCache::HashTexture(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, SourceRegion region, HashType& hash)
+ {
+ 	BlockHashState hash_st;
+ 	BlockHashReset(hash_st);
+-	HashTextureLevel(TEX0, TEXA, region, hash_st, s_unswizzle_buffer);
+-	return FinishBlockHash(hash_st);
++	if (!HashTextureLevel(TEX0, TEXA, region, hash_st))
++		return false;
++
++	hash = FinishBlockHash(hash_st);
++	return true;
+ }
+ 
+ void GSTextureCache::PreloadTexture(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, SourceRegion region, GSLocalMemory& mem,
+@@ -9144,11 +9282,11 @@ GSTextureCache::HashCacheKey::HashCacheKey()
+ 	TEXA.U64 = 0;
+ }
+ 
+-GSTextureCache::HashCacheKey GSTextureCache::HashCacheKey::Create(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, const u32* clut, const GSVector2i* lod, SourceRegion region)
++bool GSTextureCache::HashCacheKey::Create(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, const u32* clut, const GSVector2i* lod, SourceRegion region, HashCacheKey& ret)
+ {
+ 	const GSLocalMemory::psm_t& psm = GSLocalMemory::m_psm[TEX0.PSM];
+ 
+-	HashCacheKey ret;
++	ret = {};
+ 	ret.TEX0.U64 = TEX0.U64 & 0x00000003FFF00000ULL; // PSM, TW, TH
+ 	ret.TEXA.U64 = (psm.pal == 0 && psm.fmt > 0) ? (TEXA.U64 & 0x000000FF000080FFULL) : 0;
+ 	ret.CLUTHash = clut ? GSTextureCache::PaletteKeyHash{}({clut, psm.pal}) : 0;
+@@ -9159,7 +9297,8 @@ GSTextureCache::HashCacheKey GSTextureCache::HashCacheKey::Create(const GIFRegTE
+ 	BlockHashReset(hash_st);
+ 
+ 	// base level is always hashed
+-	HashTextureLevel(TEX0, TEXA, region, hash_st, s_unswizzle_buffer);
++	if (!HashTextureLevel(TEX0, TEXA, region, hash_st))
++		return false;
+ 
+ 	if (lod)
+ 	{
+@@ -9169,13 +9308,14 @@ GSTextureCache::HashCacheKey GSTextureCache::HashCacheKey::Create(const GIFRegTE
+ 		for (int i = 1; i < nmips; i++)
+ 		{
+ 			const GIFRegTEX0 MIP_TEX0{g_gs_renderer->GetTex0Layer(basemip + i)};
+-			HashTextureLevel(MIP_TEX0, TEXA, region.AdjustForMipmap(i), hash_st, s_unswizzle_buffer);
++			if (!HashTextureLevel(MIP_TEX0, TEXA, region.AdjustForMipmap(i), hash_st))
++				return false;
+ 		}
+ 	}
+ 
+ 	ret.TEX0Hash = FinishBlockHash(hash_st);
+ 
+-	return ret;
++	return true;
+ }
+ 
+ GSTextureCache::HashCacheKey GSTextureCache::HashCacheKey::WithRemovedCLUTHash() const
+diff --git a/pcsx2/GS/Renderers/HW/GSTextureCache.h b/pcsx2/GS/Renderers/HW/GSTextureCache.h
+index 605fe1d..485b1da 100644
+--- a/pcsx2/GS/Renderers/HW/GSTextureCache.h
++++ b/pcsx2/GS/Renderers/HW/GSTextureCache.h
+@@ -109,7 +109,7 @@ public:
+ 
+ 		HashCacheKey();
+ 
+-		static HashCacheKey Create(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, const u32* clut, const GSVector2i* lod, SourceRegion region);
++		static bool Create(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, const u32* clut, const GSVector2i* lod, SourceRegion region, HashCacheKey& key);
+ 
+ 		HashCacheKey WithRemovedCLUTHash() const;
+ 		void RemoveCLUTHash();
+@@ -295,6 +295,7 @@ public:
+ 		{
+ 			GSVector4i* rect;
+ 			u32 count;
++			bool failed;
+ 		} m_write = {};
+ 
+ 		void PreloadLevel(int level);
+@@ -480,7 +481,7 @@ protected:
+ 	void AgeHashCache();
+ 
+ 	static void PreloadTexture(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, SourceRegion region, GSLocalMemory& mem, bool paltex, GSTexture* tex, u32 level, std::pair<u8, u8>* alpha_minmax);
+-	static HashType HashTexture(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, SourceRegion region);
++	static bool HashTexture(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, SourceRegion region, HashType& hash);
+ 
+ 	// TODO: virtual void Write(Source* s, const GSVector4i& r) = 0;
+ 	// TODO: virtual void Write(Target* t, const GSVector4i& r) = 0;

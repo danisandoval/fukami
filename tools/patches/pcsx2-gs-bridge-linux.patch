@@ -1,0 +1,44 @@
+diff --git a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
+index d3dad7e..229ef8c 100644
+--- a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
++++ b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
+@@ -1206,8 +1206,14 @@ void GSDeviceVK::WaitForCommandBufferCompletion(u32 index)
+ 	m_completed_fence_counter = now_completed_counter;
+ }
+ 
++// RRV GS bridge (Linux/Vulkan): set by SubmitCommandBuffer when the
++// presentation engine accepted the swap-chain image; read by EndPresent.
++// Only the GS thread submits, so no synchronisation is needed.
++static bool s_rrv_present_accepted = false;
++
+ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
+ {
++	s_rrv_present_accepted = false;
+ 	FrameResources& resources = m_frame_resources[m_current_frame];
+ 
+ 	// End the current command buffer.
+@@ -1348,6 +1354,8 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
+ 			return;
+ 		}
+ 
++		s_rrv_present_accepted = true;
++
+ 		// Grab the next image as soon as possible, that way we spend less time blocked on the next
+ 		// submission. Don't care if it fails, we'll deal with that at the presentation call site.
+ 		// Credit to dxvk for the idea.
+@@ -2526,6 +2534,15 @@ void GSDeviceVK::EndPresent()
+ 	g_perfmon.Put(GSPerfMon::RenderPasses, 1);
+ 
+ 	SubmitCommandBuffer(m_swap_chain.get());
++	// RRV GS bridge (pcsx2-gs-bridge-linux.patch): the Vulkan counterpart of
++	// GSDeviceMTL::EndPresent's GSRrvRecordDirectPresent (target patch). Count
++	// a frame present only after vkQueuePresentKHR accepted the image, so
++	// skipped/out-of-date/lost presents and the swap chain's initial blank
++	// frame (RenderBlankFrame) do not inflate the bridge's present counter.
++	// A swap chain only exists for a real window, which in the bridge is
++	// always the RRV-supplied X11/Wayland surface.
++	if (s_rrv_present_accepted)
++		GSRrvRecordDirectPresent();
+ 	MoveToNextCommandBuffer();
+ 
+ 	InvalidateCachedState();

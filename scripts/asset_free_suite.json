@@ -1,0 +1,178 @@
+{
+  "schema_version": 1,
+  "label": "portable-asset-free",
+  "required": [
+    {
+      "name": "rrv-gs-worker",
+      "target": "rrv-gs-worker-tests"
+    },
+    {
+      "name": "rrv-gs-control",
+      "target": "rrv-gs-control-tests"
+    },
+    {
+      "name": "rrv-gs-control-stream",
+      "target": "rrv-gs-control-stream-tests"
+    },
+    {
+      "name": "rrv-gs-result-boundary",
+      "target": "rrv-gs-result-boundary-tests"
+    },
+    {
+      "name": "rrv-guest-terminal-outcome",
+      "target": "rrv-guest-terminal-outcome-tests"
+    },
+    {
+      "name": "rrv-gs-backend",
+      "target": "rrv-gs-backend-tests"
+    },
+    {
+      "name": "rrv-canonical-receipt",
+      "target": "rrv-canonical-receipt-tests"
+    },
+    {
+      "name": "rrv-asset-free-runner-self-test",
+      "kind": "python"
+    },
+    {
+      "name": "rrv-product-no-raylib-gate",
+      "kind": "python"
+    },
+    {
+      "name": "rrv-product-identity-receipt",
+      "kind": "python"
+    },
+    {
+      "name": "rrv-package-product-runtime",
+      "kind": "python"
+    },
+    {
+      "name": "rrv-canonical-receipt-fixture",
+      "target": "rrv-canonical-receipt-tests"
+    },
+    {
+      "name": "rrv-snapshot-container",
+      "target": "rrv-snapshot-tests"
+    },
+    {
+      "name": "rrv-product-locked-patch",
+      "kind": "python"
+    },
+    {
+      "name": "rrv-gate3-guest-time",
+      "target": "rrv-gate3-guest-time-tests"
+    },
+    {
+      "name": "rrv-gate3-ee-timers",
+      "target": "rrv-gate3-ee-timers-tests"
+    },
+    {
+      "name": "rrv-gate3-intc",
+      "target": "rrv-gate3-intc-tests"
+    },
+    {
+      "name": "rrv-gate3-guest-rtc",
+      "target": "rrv-gate3-guest-rtc-tests"
+    },
+    {
+      "name": "rrv-pad-rumble",
+      "kind": "python"
+    },
+    {
+      "name": "rrv-wait-idle",
+      "kind": "python"
+    },
+    {
+      "name": "rrv-vu-eatan",
+      "kind": "python"
+    },
+    {
+      "name": "rrv-vu-aot",
+      "kind": "python"
+    },
+    {
+      "name": "rrv-vu-prog",
+      "kind": "python"
+    },
+    {
+      "name": "rrv-launch-env-golden",
+      "kind": "python"
+    },
+    {
+      "name": "rrv-source-ownership",
+      "kind": "python"
+    },
+    {
+      "name": "rrv-ee-native-gen",
+      "kind": "python"
+    },
+    {
+      "name": "rrv-fp-rounding",
+      "target": "rrv-fp-rounding-tests"
+    },
+    {
+      "name": "rrv-ring-copy",
+      "target": "rrv-ring-copy-tests"
+    },
+    {
+      "name": "rrv-vu-codegen-writers",
+      "kind": "python"
+    },
+    {
+      "name": "rrv-pcsx2-patch-series",
+      "kind": "python"
+    },
+    {
+      "name": "rrv-fukami-settings",
+      "target": "rrv-fukami-settings-tests"
+    },
+    {
+      "name": "rrv-fukami-menu",
+      "target": "rrv-fukami-menu-tests"
+    }
+  ],
+  "input_dependent": [
+    {
+      "name": "rrv-product-elf-check",
+      "label": "input-dependent",
+      "requirement": "a built source-owned product binary (RRV_PRODUCT_BIN) and the user's ELF"
+    },
+    {
+      "name": "rrv-pcsx2-patch-series-tree",
+      "label": "input-dependent",
+      "requirement": "PCSX2 checkout at the locked revision (build-deps; CI fetches it)"
+    },
+    {
+      "name": "rrv-ee-fpclamp",
+      "label": "input-dependent",
+      "requirement": "locked sse2neon checkout (build-deps) on ARM hosts"
+    }
+  ],
+  "platform_native": [
+    {
+      "name": "rrv-resource-package",
+      "label": "g1-h1e-native",
+      "requirement": "native macOS ARM64 Ninja Release configure"
+    },
+    {
+      "name": "rrv-resource-package-build",
+      "label": "g1-h1e-native",
+      "requirement": "native macOS ARM64 Ninja Release configure"
+    },
+    {
+      "name": "rrv-resource-package-lifecycle",
+      "label": "g1-h1e-native",
+      "requirement": "native macOS ARM64 Ninja Release configure"
+    },
+    {
+      "name": "rrv-adr0006-feedback-fixture",
+      "label": "g1-h1e-native",
+      "requirement": "native macOS ARM64 Ninja Release configure"
+    },
+    {
+      "name": "rrv-disc-extract-tests",
+      "label": "needs-build-deps",
+      "requirement": "build-deps/pcsx2-2.8.2 libchdr and static zstd"
+    }
+  ]
+}

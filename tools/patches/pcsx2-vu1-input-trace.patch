@@ -1,0 +1,578 @@
+VU1 input trace, input INJECTION and per-instruction step trace for the pinned
+PCSX2 reference build.
+
+Why this patch exists
+---------------------
+Phase 7's environment renders at a fraction of hardware's brightness, and the
+defect narrowed to one wrong screen-space vertex out of a VU1 microprogram
+(docs/TESTING.md T-P7-VERTEX). Our runtime could dump what its VU1 was fed and
+what it did with it; the reference could not, so every claim about the reference
+side stayed an argument. This makes PCSX2 answer three questions directly:
+
+  1. what was the VU1 input?              RRV_VU1_INTRACE
+  2. what does PCSX2 do with OUR input?   RRV_VU1_INJECT
+  3. where exactly do the two diverge?    RRV_VU1_STEPTRACE
+
+(2) is the important one. The two engines are never at the same guest frame, so
+camera phase contaminates every direct comparison. Injecting our captured input
+removes it by construction rather than by matching: same input, same
+microprogram, and the only remaining variable is execution.
+
+Selection is by OUTPUT, not by ordinal: the input is held pending at the MSCAL
+and written only once that program's XGKICK emits the requested NLOOP/PRIM, so
+both engines dump the same invocation without sharing a frame index.
+
+  RRV_VU1_INTRACE=1                enable the input trace
+  RRV_VU1_INTRACE_ENTRY=0x20       microprogram start PC, in BYTES
+  RRV_VU1_INTRACE_PHASE=7          guest scene phase gate ([0x334E94]; -1 = any)
+  RRV_VU1_INTRACE_NLOOP=101        GIFtag NLOOP that identifies the packet
+  RRV_VU1_INTRACE_PRIM=0x4c        GIFtag PRIM that identifies the packet
+  RRV_VU1_INTRACE_N=8              maximum dumps
+  RRV_VU1_INTRACE_DIR=<dir>        output directory
+  RRV_VU1_INTRACE_LOG=<file|1>     census of every MSCAL and XGKICK in phase
+  RRV_VU1_INJECT=<file>            replace the whole VU1 input with a dump
+  RRV_VU1_INJECT_N=1               how many invocations to inject
+  RRV_VU1_STEPTRACE=<file>         one line per instruction, changed state only
+
+Each dump writes three files: the 17,000-byte input record (vf[32][4], vi[16],
+q, i, mac, status, clip, 16 KB of data memory, then a 20-byte trailer of magic
+'RRV1', entry, top, itop, data size), the 16 KB microprogram, and the GIF packet
+the invocation produced. Our runtime writes the identical layout and identical
+step-trace text, so the files diff directly.
+
+Purely observational unless RRV_VU1_INJECT is set: with the env unset every hook
+is a cached getenv and a return; it never writes guest memory and never changes
+GS state or timing. Hooks cover every VU1 dispatch and XGKICK path -- vu1ExecMicro,
+VU_Thread::ExecuteRingBuffer, mVU_XGKICK_, _vuXGKICKTransfermVU and
+_vuXGKICKTransfer -- so the trace works with MTVU and microVU both on. The step
+trace needs the VU1 interpreter (EnableVU1=false, vuThread=false); drive that
+from a scratch datapath rather than the user's ini.
+
+Applies to PCSX2 d5f75c9e42064a77036466f1f4594b0507888633 after
+pcsx2-gt-capture.patch and pcsx2-gt-guest-trace.patch.
+Build with scripts/build_pcsx2_gt_capture.sh.
+
+diff --git a/pcsx2/VU1micro.cpp b/pcsx2/VU1micro.cpp
+index 9e969d5e7..9d99588ca 100644
+--- a/pcsx2/VU1micro.cpp
++++ b/pcsx2/VU1micro.cpp
+@@ -8,6 +8,400 @@
+ #include <cmath>
+ #include "VUmicro.h"
+ #include "MTVU.h"
++#include "Memory.h"
++
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
++// ---------------------------------------------------------------------------
++// RRV VU1 input trace (observational, default off).
++//
++// Dumps the COMPLETE VU1 input state — 32 VF, 16 VI, Q, I, MAC, STATUS, CLIP and
++// all 16 KB of data memory — immediately before a chosen microprogram runs, in
++// the byte layout our runtime's RRV_VU_INTRACE writes, so the two engines can be
++// diffed directly.
++//
++// The invocation is selected by its OUTPUT, not by an ordinal: the input is held
++// pending at MSCAL and only written once that program's XGKICK is seen to emit a
++// GIF packet with the requested NLOOP/PRIM. That is what makes both engines dump
++// the same invocation without needing them to sit at the same frame index.
++//
++//   RRV_VU1_INTRACE=1                enable
++//   RRV_VU1_INTRACE_ENTRY=0x20       microprogram start PC, in BYTES
++//   RRV_VU1_INTRACE_PHASE=7          guest scene phase gate ([0x334E94]; -1=any)
++//   RRV_VU1_INTRACE_NLOOP=101        GIFtag NLOOP that identifies the packet
++//   RRV_VU1_INTRACE_PRIM=0x4c        GIFtag PRIM that identifies the packet
++//   RRV_VU1_INTRACE_N=8              maximum dumps
++//   RRV_VU1_INTRACE_DIR=<dir>        output directory
++//   RRV_VU1_INTRACE_LOG=<file|1>     census of every MSCAL and XGKICK in phase
++// ---------------------------------------------------------------------------
++namespace RRVVu1Trace
++{
++	static u32 EnvU32(const char* name, u32 fallback);
++
++	static bool s_init = false;
++	static bool s_enabled = false;
++	static u32 s_entry = 0x20;
++	static s32 s_phase = 7;
++	static u32 s_nloop = 101;
++	static u32 s_prim = 0x4c;
++	static u32 s_max = 8;
++	static u32 s_written = 0;
++	static u32 s_seq = 0;
++	static const char* s_dir = "/tmp";
++	static FILE* s_log = nullptr;
++
++	// One held input snapshot: 512 + 64 + 20 + 16384 = 16980 bytes on disk.
++	static float s_vf[32][4];
++	static u32 s_vi[16];
++	static float s_q, s_i;
++	static u32 s_mac, s_status, s_clip;
++	static u8 s_mem[0x4000];
++	static bool s_pending = false;
++	static u32 s_pendingSeq = 0;
++	static u32 s_pendTop = 0, s_pendItop = 0;
++
++	// --- injection ------------------------------------------------------------
++	// RRV_VU1_INJECT=<file> replaces the ENTIRE VU1 input with a dump taken from
++	// the other engine, immediately before the chosen microprogram runs: all 32
++	// VF, 16 VI, Q, I, MAC/STATUS/CLIP, the whole 16 KB of data memory, and TOP /
++	// ITOP from the trailer. The point is to remove camera phase from the
++	// comparison by construction rather than by matching: run OUR input through
++	// THIS engine and the only remaining variable is execution.
++	static bool s_injInit = false;
++	static bool s_injHave = false;
++	static u32 s_injDone = 0;
++	static u32 s_injMax = 1;
++	static float s_ivf[32][4];
++	static u32 s_ivi[16];
++	static float s_iq, s_ii;
++	static u32 s_imac, s_istatus, s_iclip;
++	static u8 s_imem[0x4000];
++	static u32 s_ientry = 0, s_itop = 0, s_iitop = 0;
++
++	// --- per-instruction step trace -------------------------------------------
++	// RRV_VU1_STEPTRACE=<file> writes one line per executed instruction for the
++	// selected microprogram, listing only the architectural state that CHANGED.
++	// Our runtime emits byte-identical text, so the two files diff directly and
++	// the first differing line is the first cross-engine execution divergence.
++	static FILE* s_step = nullptr;
++	static bool s_stepInit = false;
++	static bool s_stepActive = false;
++	static u32 s_stepN = 0;
++	struct StepSnap
++	{
++		u32 vf[32][4];
++		u32 vi[16];
++		u32 acc[4];
++		u32 q, i, p, mac, status, clip;
++		u8 mem[0x4000];
++	};
++	static StepSnap s_prev;
++	static bool s_havePrev = false;
++
++	void StepBegin()
++	{
++		if (!s_stepInit)
++		{
++			s_stepInit = true;
++			const char* v = std::getenv("RRV_VU1_STEPTRACE");
++			if (v && v[0] && v[0] != '0')
++			{
++				s_step = std::fopen(v, "w");
++				if (s_step)
++					std::setvbuf(s_step, nullptr, _IOFBF, 1 << 20);
++			}
++		}
++		if (!s_step)
++			return;
++		s_stepActive = true;
++		s_stepN = 0;
++		s_havePrev = false;
++	}
++
++	void StepEnd()
++	{
++		if (s_stepActive && s_step)
++			std::fflush(s_step);
++		s_stepActive = false;
++	}
++
++	bool StepActive() { return s_stepActive && s_step != nullptr; }
++
++	// Trace exactly one invocation: the selected entry, the first time we see it.
++	static bool s_stepUsed = false;
++	bool WantStep()
++	{
++		if (s_stepUsed)
++			return false;
++		const char* v = std::getenv("RRV_VU1_STEPTRACE");
++		if (!v || !v[0] || v[0] == '0')
++			return false;
++		if ((VU1.VI[REG_TPC].UL << 3) != EnvU32("RRV_VU1_INTRACE_ENTRY", 0x20))
++			return false;
++		s_stepUsed = true;
++		return true;
++	}
++
++	// Called from the VU1 interpreter before each instruction issues.
++	void StepNote(u32 pc, u32 upper, u32 lower)
++	{
++		if (!StepActive())
++			return;
++		StepSnap now;
++		for (u32 r = 0; r < 32u; ++r)
++			for (u32 c = 0; c < 4u; ++c)
++				now.vf[r][c] = VU1.VF[r].UL[c];
++		for (u32 r = 0; r < 16u; ++r)
++			now.vi[r] = VU1.VI[r].UL;
++		for (u32 c = 0; c < 4u; ++c)
++			now.acc[c] = VU1.ACC.UL[c];
++		now.q = VU1.VI[REG_Q].UL;
++		now.i = VU1.VI[REG_I].UL;
++		now.p = VU1.VI[REG_P].UL;
++		now.mac = VU1.VI[REG_MAC_FLAG].UL;
++		now.status = VU1.VI[REG_STATUS_FLAG].UL;
++		now.clip = VU1.VI[REG_CLIP_FLAG].UL;
++		std::memcpy(now.mem, VU1.Mem, sizeof(now.mem));
++
++		std::fprintf(s_step, "%05u pc=%04x U=%08x L=%08x", s_stepN, pc, upper, lower);
++		if (s_havePrev)
++		{
++			for (u32 r = 0; r < 32u; ++r)
++				if (std::memcmp(now.vf[r], s_prev.vf[r], 16) != 0)
++					std::fprintf(s_step, " vf%02u=%08x,%08x,%08x,%08x", r,
++						now.vf[r][0], now.vf[r][1], now.vf[r][2], now.vf[r][3]);
++			for (u32 r = 0; r < 16u; ++r)
++				if (now.vi[r] != s_prev.vi[r])
++					std::fprintf(s_step, " vi%02u=%08x", r, now.vi[r]);
++			if (std::memcmp(now.acc, s_prev.acc, 16) != 0)
++				std::fprintf(s_step, " acc=%08x,%08x,%08x,%08x",
++					now.acc[0], now.acc[1], now.acc[2], now.acc[3]);
++			if (now.q != s_prev.q) std::fprintf(s_step, " q=%08x", now.q);
++			if (now.i != s_prev.i) std::fprintf(s_step, " i=%08x", now.i);
++			if (now.p != s_prev.p) std::fprintf(s_step, " p=%08x", now.p);
++			if (now.mac != s_prev.mac) std::fprintf(s_step, " mac=%08x", now.mac);
++			if (now.status != s_prev.status) std::fprintf(s_step, " status=%08x", now.status);
++			if (now.clip != s_prev.clip) std::fprintf(s_step, " clip=%08x", now.clip);
++			for (u32 o = 0; o < 0x4000u; o += 16u)
++				if (std::memcmp(now.mem + o, s_prev.mem + o, 16) != 0)
++				{
++					const u32* w = reinterpret_cast<const u32*>(now.mem + o);
++					std::fprintf(s_step, " mem[%04x]=%08x,%08x,%08x,%08x", o, w[0], w[1], w[2], w[3]);
++				}
++		}
++		std::fputc('\n', s_step);
++		s_prev = now;
++		s_havePrev = true;
++		++s_stepN;
++	}
++
++	u32 EnvU32(const char* name, u32 fallback)
++	{
++		const char* v = std::getenv(name);
++		return (v && v[0]) ? static_cast<u32>(std::strtoul(v, nullptr, 0)) : fallback;
++	}
++
++	static void Init()
++	{
++		if (s_init)
++			return;
++		s_init = true;
++		const char* on = std::getenv("RRV_VU1_INTRACE");
++		s_enabled = on && on[0] && on[0] != '0';
++		if (!s_enabled)
++			return;
++		s_entry = EnvU32("RRV_VU1_INTRACE_ENTRY", 0x20);
++		s_phase = static_cast<s32>(EnvU32("RRV_VU1_INTRACE_PHASE", 7));
++		s_nloop = EnvU32("RRV_VU1_INTRACE_NLOOP", 101);
++		s_prim = EnvU32("RRV_VU1_INTRACE_PRIM", 0x4c);
++		s_max = EnvU32("RRV_VU1_INTRACE_N", 8);
++		const char* dir = std::getenv("RRV_VU1_INTRACE_DIR");
++		if (dir && dir[0])
++			s_dir = dir;
++		const char* log = std::getenv("RRV_VU1_INTRACE_LOG");
++		if (log && log[0] && log[0] != '0')
++		{
++			s_log = (std::strcmp(log, "1") == 0) ? stderr : std::fopen(log, "w");
++			if (s_log)
++				std::setvbuf(s_log, nullptr, _IOLBF, 0);
++		}
++	}
++
++	static bool PhaseActive()
++	{
++		return s_phase < 0 || memRead32(0x334E94u) == static_cast<u32>(s_phase);
++	}
++
++	// Called from vu1ExecMicro once the start PC is known, before execution.
++	void NoteMscal(u32 top, u32 itop)
++	{
++		Init();
++		if (!s_enabled || s_written >= s_max || !PhaseActive())
++			return;
++		const u32 entry = VU1.VI[REG_TPC].UL << 3;
++		if (s_log)
++		{
++			std::fprintf(s_log, "[rrv-vu1] mscal seq=%u entry=%04x top=%03x itop=%03x\n",
++				s_seq, entry, top, itop);
++		}
++		++s_seq;
++		if (entry != s_entry)
++		{
++			s_pending = false;
++			return;
++		}
++		std::memcpy(s_vf, &VU1.VF[0], sizeof(s_vf));
++		for (u32 n = 0; n < 16u; ++n)
++			s_vi[n] = VU1.VI[n].UL;
++		s_q = VU1.VI[REG_Q].F;
++		s_i = VU1.VI[REG_I].F;
++		s_mac = VU1.VI[REG_MAC_FLAG].UL;
++		s_status = VU1.VI[REG_STATUS_FLAG].UL;
++		s_clip = VU1.VI[REG_CLIP_FLAG].UL;
++		std::memcpy(s_mem, VU1.Mem, sizeof(s_mem));
++		s_pending = true;
++		s_pendingSeq = s_seq - 1u;
++		s_pendTop = top;
++		s_pendItop = itop;
++	}
++
++	// Load the injection dump once. Layout is the 16,980-byte input record the
++	// two engines share, plus a 20-byte trailer: magic 'RRV1', entry, top, itop,
++	// data size.
++	static void InjectInit()
++	{
++		if (s_injInit)
++			return;
++		s_injInit = true;
++		const char* path = std::getenv("RRV_VU1_INJECT");
++		if (!path || !path[0])
++			return;
++		s_injMax = EnvU32("RRV_VU1_INJECT_N", 1);
++		FILE* f = std::fopen(path, "rb");
++		if (!f)
++		{
++			std::fprintf(stderr, "[rrv-vu1] inject: cannot open %s\n", path);
++			return;
++		}
++		u32 trailer[5] = {};
++		bool ok = std::fread(s_ivf, 1, sizeof(s_ivf), f) == sizeof(s_ivf);
++		ok = ok && std::fread(s_ivi, 1, sizeof(s_ivi), f) == sizeof(s_ivi);
++		ok = ok && std::fread(&s_iq, 1, sizeof(s_iq), f) == sizeof(s_iq);
++		ok = ok && std::fread(&s_ii, 1, sizeof(s_ii), f) == sizeof(s_ii);
++		ok = ok && std::fread(&s_imac, 1, sizeof(s_imac), f) == sizeof(s_imac);
++		ok = ok && std::fread(&s_istatus, 1, sizeof(s_istatus), f) == sizeof(s_istatus);
++		ok = ok && std::fread(&s_iclip, 1, sizeof(s_iclip), f) == sizeof(s_iclip);
++		ok = ok && std::fread(s_imem, 1, sizeof(s_imem), f) == sizeof(s_imem);
++		ok = ok && std::fread(trailer, 1, sizeof(trailer), f) == sizeof(trailer);
++		std::fclose(f);
++		if (!ok || trailer[0] != 0x31565252u) // 'RRV1'
++		{
++			std::fprintf(stderr, "[rrv-vu1] inject: %s is not a v1 input record\n", path);
++			return;
++		}
++		s_ientry = trailer[1];
++		s_itop = trailer[2];
++		s_iitop = trailer[3];
++		s_injHave = true;
++		std::fprintf(stderr, "[rrv-vu1] inject: loaded %s entry=%04x top=%03x itop=%03x\n",
++			path, s_ientry, s_itop, s_iitop);
++	}
++
++	// Returns true when this MSCAL was overwritten with the injected input.
++	bool MaybeInject(u32& top, u32& itop)
++	{
++		InjectInit();
++		if (!s_injHave || s_injDone >= s_injMax)
++			return false;
++		if ((VU1.VI[REG_TPC].UL << 3) != s_ientry)
++			return false;
++		std::memcpy(&VU1.VF[0], s_ivf, sizeof(s_ivf));
++		for (u32 n = 0; n < 16u; ++n)
++			VU1.VI[n].UL = s_ivi[n];
++		VU1.VI[REG_Q].F = s_iq;
++		VU1.VI[REG_I].F = s_ii;
++		VU1.VI[REG_MAC_FLAG].UL = s_imac;
++		VU1.VI[REG_STATUS_FLAG].UL = s_istatus;
++		VU1.VI[REG_CLIP_FLAG].UL = s_iclip;
++		std::memcpy(VU1.Mem, s_imem, sizeof(s_imem));
++		top = s_itop;
++		itop = s_iitop;
++		++s_injDone;
++		std::fprintf(stderr, "[rrv-vu1] inject: APPLIED at entry=%04x (use %u of %u)\n",
++			s_ientry, s_injDone, s_injMax);
++		return true;
++	}
++
++	// Called wherever a new GIFtag is picked up at an XGKICK address.
++	void NoteXgkick(u32 addr)
++	{
++		Init();
++		if (!s_enabled || s_written >= s_max || !PhaseActive())
++			return;
++		const u8* tag = VU1.Mem + (addr & 0x3FF0u);
++		u64 lo;
++		std::memcpy(&lo, tag, sizeof(lo));
++		const u32 nloop = static_cast<u32>(lo & 0x7FFFu);
++		const u32 eop = static_cast<u32>((lo >> 15) & 1u);
++		const u32 pre = static_cast<u32>((lo >> 46) & 1u);
++		const u32 prim = static_cast<u32>((lo >> 47) & 0x7FFu);
++		const u32 flg = static_cast<u32>((lo >> 58) & 3u);
++		const u32 nreg = static_cast<u32>((lo >> 60) & 0xFu);
++		if (s_log)
++		{
++			std::fprintf(s_log,
++				"[rrv-vu1] xgk seq=%u entry=%04x addr=%04x nloop=%u eop=%u pre=%u prim=%03x flg=%u nreg=%u pending=%d\n",
++				s_seq, VU1.VI[REG_TPC].UL << 3, addr & 0x3FFFu, nloop, eop, pre, prim, flg, nreg,
++				s_pending ? 1 : 0);
++		}
++		if (!s_pending || nloop != s_nloop || prim != s_prim)
++			return;
++
++		char path[512];
++		std::snprintf(path, sizeof(path), "%s/pcsx2_in_%04x_%u.bin", s_dir, s_entry, s_written);
++		if (FILE* f = std::fopen(path, "wb"))
++		{
++			std::fwrite(s_vf, 1, sizeof(s_vf), f);
++			std::fwrite(s_vi, 1, sizeof(s_vi), f);
++			std::fwrite(&s_q, 1, sizeof(s_q), f);
++			std::fwrite(&s_i, 1, sizeof(s_i), f);
++			std::fwrite(&s_mac, 1, sizeof(s_mac), f);
++			std::fwrite(&s_status, 1, sizeof(s_status), f);
++			std::fwrite(&s_clip, 1, sizeof(s_clip), f);
++			std::fwrite(s_mem, 1, sizeof(s_mem), f);
++			const u32 trailer[5] = {0x31565252u, s_entry, s_pendTop, s_pendItop, 0x4000u};
++			std::fwrite(trailer, 1, sizeof(trailer), f);
++			std::fclose(f);
++			// The microprogram itself, so the two engines' code can be compared
++			// rather than assumed equal.
++			std::snprintf(path, sizeof(path), "%s/pcsx2_micro_%04x_%u.bin", s_dir, s_entry, s_written);
++			if (FILE* m = std::fopen(path, "wb"))
++			{
++				std::fwrite(VU1.Micro, 1, 0x4000, m);
++				std::fclose(m);
++			}
++			// The GIF packet this invocation produced, as the VU wrote it.
++			std::snprintf(path, sizeof(path), "%s/pcsx2_out_%04x_%u.bin", s_dir, s_entry, s_written);
++			if (FILE* o = std::fopen(path, "wb"))
++			{
++				const u32 base = addr & 0x3FF0u;
++				const u32 bytes = (nloop * (nreg ? nreg : 16u) + 1u) * 16u;
++				for (u32 n = 0; n < bytes; ++n)
++					std::fputc(VU1.Mem[(base + n) & 0x3FFFu], o);
++				std::fclose(o);
++			}
++			if (s_log)
++			{
++				std::fprintf(s_log, "[rrv-vu1] DUMP %s (mscal seq=%u, xgkick addr=%04x nloop=%u prim=%03x)\n",
++					path, s_pendingSeq, addr & 0x3FFFu, nloop, prim);
++			}
++		}
++		++s_written;
++		s_pending = false;
++	}
++} // namespace RRVVu1Trace
+ 
+ #ifdef PCSX2_DEBUG
+ u32 vudump = 0;
+@@ -72,11 +466,25 @@ void vu1ExecMicro(u32 addr)
+ 	if ((s32)addr != -1) VU1.VI[REG_TPC].UL = addr & 0x7FF;
+ 
+ 	CpuVU1->SetStartPC(VU1.VI[REG_TPC].UL << 3);
++	{
++		u32 rrvTop = vif1Regs.top, rrvItop = vif1Regs.itop;
++		if (RRVVu1Trace::MaybeInject(rrvTop, rrvItop))
++		{
++			vif1Regs.top = rrvTop;
++			vif1Regs.itop = rrvItop;
++		}
++		RRVVu1Trace::NoteMscal(rrvTop, rrvItop);
++	}
+ 	_vuExecMicroDebug(VU1);
++	const bool rrvStep = RRVVu1Trace::WantStep();
++	if (rrvStep)
++		RRVVu1Trace::StepBegin();
+ 	if(!INSTANT_VU1)
+ 		CpuVU1->ExecuteBlock(1);
+ 	else
+ 		CpuVU1->Execute(vu1RunCycles);
++	if (rrvStep)
++		RRVVu1Trace::StepEnd();
+ }
+ 
+ void MTVUInterrupt()
+diff --git a/pcsx2/VUops.cpp b/pcsx2/VUops.cpp
+index 22046df62..eb92aab5b 100644
+--- a/pcsx2/VUops.cpp
++++ b/pcsx2/VUops.cpp
+@@ -1815,6 +1815,8 @@ static __ri void _vuXITOP(VURegs* VU)
+ 		VU->VI[_It_].US[0] = VU->GetVifRegs().itop;
+ }
+ 
++namespace RRVVu1Trace { void NoteXgkick(u32 addr); }
++
+ void _vuXGKICKTransfer(s32 cycles, bool flush)
+ {
+ 	if (!VU1.xgkickenable)
+@@ -1831,6 +1833,7 @@ void _vuXGKICKTransfer(s32 cycles, bool flush)
+ 
+ 		if (VU1.xgkicksizeremaining == 0)
+ 		{
++			RRVVu1Trace::NoteXgkick(VU1.xgkickaddr);
+ 			VUM_LOG("XGKICK reading new tag from %x", VU1.xgkickaddr);
+ 			u32 size = gifUnit.GetGSPacketSize(GIF_PATH_1, vuRegs[1].Mem, VU1.xgkickaddr, ~0u, flush);
+ 			VU1.xgkicksizeremaining = size & 0xFFFF;
+diff --git a/pcsx2/x86/microVU_Lower.inl b/pcsx2/x86/microVU_Lower.inl
+index 672195c22..a2314ffe7 100644
+--- a/pcsx2/x86/microVU_Lower.inl
++++ b/pcsx2/x86/microVU_Lower.inl
+@@ -1695,9 +1695,12 @@ mVUop(mVU_XITOP)
+ // XGkick
+ //------------------------------------------------------------------
+ 
++namespace RRVVu1Trace { void NoteXgkick(u32 addr); }
++
+ void mVU_XGKICK_(u32 addr)
+ {
+ 	addr = (addr & 0x3ff) * 16;
++	RRVVu1Trace::NoteXgkick(addr);
+ 	u32 diff = 0x4000 - addr;
+ 	u32 size = gifUnit.GetGSPacketSize(GIF_PATH_1, vuRegs[1].Mem, addr, ~0u, true);
+ 
+@@ -1721,6 +1724,7 @@ void _vuXGKICKTransfermVU(bool flush)
+ 
+ 		if (VU1.xgkicksizeremaining == 0)
+ 		{
++			RRVVu1Trace::NoteXgkick(VU1.xgkickaddr);
+ 			//VUM_LOG("XGKICK reading new tag from %x", VU1.xgkickaddr);
+ 			u32 size = gifUnit.GetGSPacketSize(GIF_PATH_1, vuRegs[1].Mem, VU1.xgkickaddr, ~0u, flush);
+ 			VU1.xgkicksizeremaining = size & 0xFFFF;
+--- a/pcsx2/MTVU.cpp
++++ b/pcsx2/MTVU.cpp
+@@ -9,6 +9,8 @@
+ 
+ #include <thread>
+ 
++namespace RRVVu1Trace { void NoteMscal(u32 top, u32 itop); bool MaybeInject(u32& top, u32& itop); }
++
+ VU_Thread vu1Thread;
+ 
+ #define MTVU_ALWAYS_KICK 0
+@@ -150,6 +152,15 @@
+ 					if (addr != -1)
+ 						VU1.VI[REG_TPC].UL = addr & 0x7FF;
+ 					CpuVU1->SetStartPC(VU1.VI[REG_TPC].UL << 3);
++					{
++						u32 rrvTop = vifRegs.top, rrvItop = vifRegs.itop;
++						if (RRVVu1Trace::MaybeInject(rrvTop, rrvItop))
++						{
++							vifRegs.top = rrvTop;
++							vifRegs.itop = rrvItop;
++						}
++						RRVVu1Trace::NoteMscal(rrvTop, rrvItop);
++					}
+ 					CpuVU1->Execute(vu1RunCycles);
+ 					gifUnit.gifPath[GIF_PATH_1].FinishGSPacketMTVU();
+ 					semaXGkick.Post(); // Tell MTGS a path1 packet is complete
+--- a/pcsx2/VU1microInterp.cpp
++++ b/pcsx2/VU1microInterp.cpp
+@@ -9,6 +9,8 @@
+ #include "MTVU.h"
+ 
+ #include <cfenv>
++
++namespace RRVVu1Trace { void StepNote(u32 pc, u32 upper, u32 lower); }
+ 
+ extern void _vuFlushAll(VURegs* VU);
+ extern void _vuXGKICKFlush(VURegs* VU);
+@@ -36,6 +38,8 @@
+ 	u32* ptr;
+ 
+ 	ptr = (u32*)&VU->Micro[VU->VI[REG_TPC].UL];
++	if (VU == &VU1)
++		RRVVu1Trace::StepNote(VU->VI[REG_TPC].UL, ptr[1], ptr[0]);
+ 	VU->VI[REG_TPC].UL += 8;
+ 
+ 	if (ptr[1] & 0x40000000) // E flag

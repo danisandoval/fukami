@@ -1,0 +1,1165 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 815b32e..5e325f3 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -49,16 +49,15 @@ add_subdirectory(common)
+ add_subdirectory(pcsx2)
+ 
+ if(DEFINED RRV_PCSX2_GS_BRIDGE_SOURCE_DIR)
+-    # Escape hatch only. Forcing PCSX2's C reference scanline was the bridge's
+-    # original workaround for not owning PCSX2's code reserve, and on ARM64 that
+-    # reference path does NOT match the JIT rasterizer the reference runner uses
+-    # (measured: dark 0.083 vs 0.014 on the same stream) -- it was the whole of
+-    # KNOWN_ISSUES #21. The bridge now allocates the code reserve itself, so the
+-    # JIT is the default and this stays OFF.
+-    option(RRV_PCSX2_GS_BRIDGE_C_SCANLINE
+-           "Force PCSX2's C reference scanline instead of the SW JIT rasterizer" OFF)
+-    if(RRV_PCSX2_GS_BRIDGE_C_SCANLINE)
+-        target_compile_definitions(PCSX2 PRIVATE RRV_PCSX2_GS_C_SCANLINE=1)
++    # The SW rasterizer (CPU sprite rendering in the Metal profile) draws with
++    # ahead-of-time specialised C functions (GSDrawScanlineStaticKeys.inc),
++    # verified pixel-identical to the ARM64 JIT; no code is generated at run
++    # time and no JIT memory is mapped. ON restores PCSX2's runtime JIT, for
++    # the differential check (RRV_PCSX2_GS_SW_DIFF) only.
++    option(RRV_PCSX2_GS_BRIDGE_SW_JIT
++           "Diagnostic: use PCSX2's runtime SW rasterizer JIT instead of the static functions" OFF)
++    if(RRV_PCSX2_GS_BRIDGE_SW_JIT)
++        target_compile_definitions(PCSX2 PUBLIC RRV_PCSX2_GS_SW_JIT=1)
+     endif()
+     add_subdirectory("${RRV_PCSX2_GS_BRIDGE_SOURCE_DIR}" pcsx2-gs-bridge)
+ endif()
+diff --git a/pcsx2/GS/Renderers/SW/GSDrawScanline.cpp b/pcsx2/GS/Renderers/SW/GSDrawScanline.cpp
+index 451e707..1940823 100644
+--- a/pcsx2/GS/Renderers/SW/GSDrawScanline.cpp
++++ b/pcsx2/GS/Renderers/SW/GSDrawScanline.cpp
+@@ -8,10 +8,18 @@
+ 
+ #include "common/Console.h"
+ 
++#include <cstdio>
++#include <cstdlib>
+ #include <fstream>
+-
+-// The GS-only RRV bridge does not initialize PCSX2's VM-wide JIT code map.
+-#if !defined(RRV_PCSX2_GS_C_SCANLINE)
++#include <map>
++#include <mutex>
++#include <string>
++
++// RRV bridge: the runtime JIT rasterizer is a diagnostic opt-in
++// (RRV_PCSX2_GS_BRIDGE_SW_JIT=ON). The product build draws with
++// ahead-of-time specialised C functions (GSDrawScanlineStaticKeys.inc) and
++// the generic C functions for any selector not in that table.
++#if defined(RRV_PCSX2_GS_SW_JIT)
+ #define ENABLE_JIT_RASTERIZER
+ #endif
+ 
+@@ -29,17 +37,19 @@ static __forceinline const GSScanlineGlobalData& GlobalFromLocal(const GSScanlin
+ }
+ 
+ GSDrawScanline::GSDrawScanline()
++#if defined(ENABLE_JIT_RASTERIZER)
+ 	: m_sp_map("GSSetupPrim")
+ 	, m_ds_map("GSDrawScanline")
++#endif
+ {
+-#if !defined(RRV_PCSX2_GS_C_SCANLINE)
++#if defined(ENABLE_JIT_RASTERIZER)
+ 	GSCodeReserve::ResetMemory();
+ #endif
+ }
+ 
+ GSDrawScanline::~GSDrawScanline()
+ {
+-#if !defined(RRV_PCSX2_GS_C_SCANLINE)
++#if defined(ENABLE_JIT_RASTERIZER)
+ 	if (const size_t used = GSCodeReserve::GetMemoryUsed(); used > 0)
+ 		DevCon.WriteLn("SW JIT generated %zu bytes of code", used);
+ #endif
+@@ -121,7 +131,7 @@ void GSDrawScanline::BeginDraw(const GSRasterizerData& data, GSScanlineLocalData
+ 
+ void GSDrawScanline::ResetCodeCache()
+ {
+-#if !defined(RRV_PCSX2_GS_C_SCANLINE)
++#if defined(ENABLE_JIT_RASTERIZER)
+ 	Console.Warning("GS Software JIT cache overflow, resetting.");
+ 	m_sp_map.Clear();
+ 	m_ds_map.Clear();
+@@ -133,6 +143,8 @@ bool GSDrawScanline::SetupDraw(GSRasterizerData& data)
+ {
+ 	const GSScanlineGlobalData& global = data.global;
+ 
++	RrvNoteSelector(global.sel);
++
+ #ifdef ENABLE_JIT_RASTERIZER
+ 	data.draw_scanline = m_ds_map[global.sel];
+ 	if (!data.draw_scanline) [[unlikely]]
+@@ -175,21 +187,23 @@ bool GSDrawScanline::SetupDraw(GSRasterizerData& data)
+ 
+ 	return (data.setup_prim = m_sp_map[sel]) != nullptr;
+ #else
+-	data.setup_prim = &GSDrawScanline::CSetupPrim;
+-	data.draw_scanline = &GSDrawScanline::CDrawScanline;
+-	data.draw_edge = global.sel.aa1 ? &GSDrawScanline::CDrawEdge : nullptr;
++	GetStaticFunctions(global.sel, data.setup_prim, data.draw_scanline, data.draw_edge);
+ 	return true;
+ #endif
+ }
+ 
+ void GSDrawScanline::UpdateDrawStats(u64 frame, u64 ticks, int actual, int total, int prims)
+ {
++#if defined(ENABLE_JIT_RASTERIZER)
+ 	m_ds_map.UpdateStats(frame, ticks, actual, total, prims);
++#endif
+ }
+ 
+ void GSDrawScanline::PrintStats()
+ {
++#if defined(ENABLE_JIT_RASTERIZER)
+ 	m_ds_map.PrintStats();
++#endif
+ }
+ 
+ #if _M_SSE >= 0x501
+@@ -204,8 +218,11 @@ typedef GSVector4  VectorF;
+ 
+ void GSDrawScanline::CSetupPrim(const GSVertexSW* vertex, const u16* index, const GSVertexSW& dscan, GSScanlineLocalData& local)
+ {
+-	const GSScanlineGlobalData& global = GlobalFromLocal(local);
+-	GSScanlineSelector sel = global.sel;
++	CSetupPrim(vertex, index, dscan, local, GlobalFromLocal(local).sel);
++}
++
++__ri void GSDrawScanline::CSetupPrim(const GSVertexSW* vertex, const u16* index, const GSVertexSW& dscan, GSScanlineLocalData& local, GSScanlineSelector sel)
++{
+ 
+ 	bool has_z = sel.zb != 0;
+ 	bool has_f = sel.fb && sel.fge;
+@@ -345,10 +362,15 @@ void GSDrawScanline::CSetupPrim(const GSVertexSW* vertex, const u16* index, cons
+ 			VectorF dr = dc.xxxx();
+ 			VectorF db = dc.zzzz();
+ 
++			// RRV: pack the masked 16-bit steps with UNSIGNED saturation (pu32,
++			// i.e. keep the low 16 bits), as both SW JITs do (x86 packusdw,
++			// ARM64 trn1). Signed saturation (ps32) turned every negative colour
++			// step into +0x7fff, so gouraud colours that decrease across a span
++			// wrapped to black: the dark-tick lattice of KNOWN_ISSUES #21.
+ 			for (int i = 0; i < vlen; i++)
+ 			{
+-				VectorI r = (VectorI(dr * load_shift(i)) & mask16).ps32();
+-				VectorI b = (VectorI(db * load_shift(i)) & mask16).ps32();
++				VectorI r = (VectorI(dr * load_shift(i)) & mask16).pu32();
++				VectorI b = (VectorI(db * load_shift(i)) & mask16).pu32();
+ 
+ 				local.d[i].rb = r.upl16(b);
+ 			}
+@@ -358,8 +380,8 @@ void GSDrawScanline::CSetupPrim(const GSVertexSW* vertex, const u16* index, cons
+ 
+ 			for (int i = 0; i < vlen; i++)
+ 			{
+-				VectorI g = (VectorI(dg * load_shift(i)) & mask16).ps32();
+-				VectorI a = (VectorI(da * load_shift(i)) & mask16).ps32();
++				VectorI g = (VectorI(dg * load_shift(i)) & mask16).pu32();
++				VectorI a = (VectorI(da * load_shift(i)) & mask16).pu32();
+ 
+ 				local.d[i].ga = g.upl16(a);
+ 			}
+@@ -475,6 +497,31 @@ __ri static bool TestAlpha(T& test, T& fm, T& zm, const T& ga, const GSScanlineG
+ 
+ static const int s_offsets[] = {0, 2, 8, 10, 16, 18, 24, 26}; // columnTable16[0]
+ 
++#if defined(ARCH_ARM64) && _M_SSE < 0x501
++// RRV: per-pixel mipmap LOD, (-log2(Q) * (1 << L) + K) * 0x10000 clamped to
++// [0, mxl], computed with the same instruction sequence as
++// GSDrawScanlineCodeGenerator::SampleTextureLOD (ARM64): degree-2 log2
++// polynomial and the final scale by FMA, then FMINNM/FMAXNM and FCVTZS.
++__ri static GSVector4i RrvArm64PerPixelLod(const GSVector4& q, const GSScanlineGlobalData& global)
++{
++	const uint32x4_t qu = vreinterpretq_u32_f32(q.v4s);
++	const int32x4_t exp = vsubq_s32(vreinterpretq_s32_u32(vshrq_n_u32(vshlq_n_u32(qu, 1), 24)), vdupq_n_s32(127));
++	const float32x4_t e = vcvtq_f32_s32(exp);
++	const float32x4_t one = vdupq_n_f32(global.const_log2_coef[3]);
++	const float32x4_t m = vreinterpretq_f32_u32(vorrq_u32(vshrq_n_u32(vshlq_n_u32(qu, 9), 9), vreinterpretq_u32_f32(one)));
++	const float32x4_t c0 = vdupq_n_f32(global.const_log2_coef[0]);
++	const float32x4_t c1 = vdupq_n_f32(global.const_log2_coef[1]);
++	const float32x4_t c2 = vdupq_n_f32(global.const_log2_coef[2]);
++	const float32x4_t p1 = vfmaq_f32(c1, m, c0); // c0 * m + c1
++	const float32x4_t p2 = vfmaq_f32(c2, p1, m); // (c0 * m + c1) * m + c2
++	const float32x4_t lg = vfmaq_f32(e, vsubq_f32(m, one), p2); // log2(q)
++	float32x4_t lod = vfmaq_f32(global.k.v4s, lg, global.l.v4s); // k + log2(q) * l
++	lod = vminnmq_f32(lod, global.mxl.v4s);
++	lod = vmaxnmq_f32(lod, vdupq_n_f32(0.0f));
++	return GSVector4i(vcvtq_s32_f32(lod));
++}
++#endif
++
+ template <class T>
+ __ri static void WritePixel(const T& src, int addr, int i, u32 psm, const GSScanlineGlobalData& global)
+ {
+@@ -754,9 +801,17 @@ __ri void GSDrawScanline::CDrawScanline(int pixels, int left, int top, const GSV
+ 
+ 					if (!sel.lcm)
+ 					{
++#if defined(ARCH_ARM64) && _M_SSE < 0x501
++						// RRV: the ARM64 SW JIT evaluates the LOD with fused multiply-adds
++						// and a truncating convert; do exactly the same so the C path is
++						// bit-identical to it (the unfused, rounded form differed by one
++						// LOD fraction step: +-1 in a channel of trilinear texels).
++						VectorI lod = RrvArm64PerPixelLod(q, global);
++#else
+ 						VectorF tmp = q.log2(3) * global.l + global.k; // (-log2(Q) * (1 << L) + K) * 0x10000
+ 
+ 						VectorI lod = VectorI(tmp.sat(VectorF::zero(), global.mxl), false);
++#endif
+ 
+ 						if (sel.mmin == 1) // round-off mode
+ 						{
+@@ -1991,3 +2046,199 @@ void GSDrawScanline::DrawRect(const GSVector4i& r, const GSVertexSW& v, GSScanli
+ 		}
+ 	}
+ }
++
++// ---------------------------------------------------------------------------
++// RRV bridge: ahead-of-time specialised rasterizer functions.
++//
++// The generic C functions above take the selector at run time. Instantiating
++// them with the selector as a compile-time constant lets the compiler fold
++// every `sel.*` branch, which is what the runtime JIT does by generating code
++// per selector. GSDrawScanlineStaticKeys.inc lists the selectors to
++// instantiate (selector keys only: no game data). Selectors that are not in
++// the table use the generic C functions, which draw the same pixels.
++// ---------------------------------------------------------------------------
++
++template <u64 KEY>
++void GSDrawScanline::CDrawScanlineT(int pixels, int left, int top, const GSVertexSW& scan, GSScanlineLocalData& local)
++{
++	CDrawScanline(pixels, left, top, scan, local, GSScanlineSelector(KEY));
++}
++
++template <u64 KEY>
++void GSDrawScanline::CSetupPrimT(const GSVertexSW* vertex, const u16* index, const GSVertexSW& dscan, GSScanlineLocalData& local)
++{
++	CSetupPrim(vertex, index, dscan, local, GSScanlineSelector(KEY));
++}
++
++u64 GSDrawScanline::SetupPrimKey(GSScanlineSelector global_sel)
++{
++	// The fields CSetupPrim / the SetupPrim JIT read (same subset as the JIT
++	// function map key in SetupDraw).
++	GSScanlineSelector sel;
++	sel.key = 0;
++	sel.iip = global_sel.iip;
++	sel.tfx = global_sel.tfx;
++	sel.tcc = global_sel.tcc;
++	sel.fst = global_sel.fst;
++	sel.fge = global_sel.fge;
++	sel.prim = global_sel.prim;
++	sel.fb = global_sel.fb;
++	sel.zb = global_sel.zb;
++	sel.zoverflow = global_sel.zoverflow;
++	sel.zequal = global_sel.zequal;
++	sel.notest = global_sel.notest;
++	return sel.key;
++}
++
++u64 GSDrawScanline::EdgeKey(GSScanlineSelector global_sel)
++{
++	GSScanlineSelector sel = global_sel;
++	sel.zwrite = 0;
++	sel.edge = 1;
++	return sel.key;
++}
++
++namespace
++{
++	struct RrvStaticDrawScanline
++	{
++		u64 key;
++		GSDrawScanline::DrawScanlinePtr fn;
++	};
++
++	struct RrvStaticSetupPrim
++	{
++		u64 key;
++		GSDrawScanline::SetupPrimPtr fn;
++	};
++} // namespace
++
++#define RRV_SW_DS_KEY(k) {UINT64_C(k), &GSDrawScanline::CDrawScanlineT<UINT64_C(k)>},
++#define RRV_SW_SP_KEY(k)
++static const RrvStaticDrawScanline s_rrv_static_ds[] = {
++#include "GS/Renderers/SW/GSDrawScanlineStaticKeys.inc"
++	{~UINT64_C(0), nullptr}, // sentinel, sorts last
++};
++#undef RRV_SW_DS_KEY
++#undef RRV_SW_SP_KEY
++
++#define RRV_SW_DS_KEY(k)
++#define RRV_SW_SP_KEY(k) {UINT64_C(k), &GSDrawScanline::CSetupPrimT<UINT64_C(k)>},
++static const RrvStaticSetupPrim s_rrv_static_sp[] = {
++#include "GS/Renderers/SW/GSDrawScanlineStaticKeys.inc"
++	{~UINT64_C(0), nullptr}, // sentinel, sorts last
++};
++#undef RRV_SW_DS_KEY
++#undef RRV_SW_SP_KEY
++
++template <class T, size_t N>
++static decltype(T::fn) RrvLookupStatic(const T (&table)[N], u64 key)
++{
++	// Tables are emitted sorted by key (the generator sorts them; checked once).
++	size_t lo = 0, hi = N - 1; // exclude the sentinel
++	while (lo < hi)
++	{
++		const size_t mid = (lo + hi) / 2;
++		if (table[mid].key < key)
++			lo = mid + 1;
++		else
++			hi = mid;
++	}
++	return (lo < N - 1 && table[lo].key == key) ? table[lo].fn : nullptr;
++}
++
++template <class T, size_t N>
++static bool RrvTableSorted(const T (&table)[N])
++{
++	for (size_t i = 1; i < N; i++)
++	{
++		if (!(table[i - 1].key < table[i].key))
++			return false;
++	}
++	return true;
++}
++
++void GSDrawScanline::GetStaticFunctions(GSScanlineSelector sel, SetupPrimPtr& setup_prim, DrawScanlinePtr& draw_scanline, DrawScanlinePtr& draw_edge)
++{
++	static const bool s_sorted = [] {
++		const bool ok = RrvTableSorted(s_rrv_static_ds) && RrvTableSorted(s_rrv_static_sp);
++		if (!ok)
++			std::fprintf(stderr, "[pcsx2-sw] static rasterizer table is not sorted; using generic C functions only\n");
++		return ok;
++	}();
++
++	DrawScanlinePtr ds = s_sorted ? RrvLookupStatic(s_rrv_static_ds, sel.key) : nullptr;
++	SetupPrimPtr sp = s_sorted ? RrvLookupStatic(s_rrv_static_sp, SetupPrimKey(sel)) : nullptr;
++
++	draw_scanline = ds ? ds : static_cast<DrawScanlinePtr>(&GSDrawScanline::CDrawScanline);
++	setup_prim = sp ? sp : static_cast<SetupPrimPtr>(&GSDrawScanline::CSetupPrim);
++
++	if (sel.aa1)
++	{
++		DrawScanlinePtr de = s_sorted ? RrvLookupStatic(s_rrv_static_ds, EdgeKey(sel)) : nullptr;
++		draw_edge = de ? de : &GSDrawScanline::CDrawEdge;
++	}
++	else
++	{
++		draw_edge = nullptr;
++	}
++}
++
++size_t GSDrawScanline::StaticTableSize()
++{
++	return std::size(s_rrv_static_ds) - 1;
++}
++
++// RRV_PCSX2_GS_SW_KEYS=<path>: record every rasterizer selector used (the
++// draw key, its edge key for AA1 draws, and the SetupPrim key), rewriting
++// <path> whenever a new one appears. This is how the static table is
++// harvested. Keys are GS register-state bit fields, not game data.
++void GSDrawScanline::RrvNoteSelector(GSScanlineSelector sel)
++{
++	static const char* const s_path = [] {
++		const char* p = std::getenv("RRV_PCSX2_GS_SW_KEYS");
++		return (p && p[0]) ? p : nullptr;
++	}();
++	if (!s_path)
++		return;
++
++	static std::mutex s_mutex;
++	static std::map<u64, u64> s_ds; // key -> draws
++	static std::map<u64, u64> s_sp;
++	static u64 s_total = 0;
++
++	std::lock_guard<std::mutex> lock(s_mutex);
++	bool added = false;
++	auto note = [&added](std::map<u64, u64>& m, u64 k) {
++		auto [it, inserted] = m.try_emplace(k, 0);
++		it->second++;
++		added |= inserted;
++	};
++	note(s_ds, sel.key);
++	if (sel.aa1)
++		note(s_ds, EdgeKey(sel));
++	note(s_sp, SetupPrimKey(sel));
++	s_total++;
++
++	if (!added && (s_total & 4095) != 0)
++		return;
++
++	const std::string tmp = std::string(s_path) + ".tmp";
++	FILE* f = std::fopen(tmp.c_str(), "w");
++	if (!f)
++		return;
++	std::fprintf(f, "# rrv pcsx2 sw rasterizer selectors: draws=%llu static_table=%zu\n",
++		static_cast<unsigned long long>(s_total), StaticTableSize());
++	for (const auto& [k, n] : s_ds)
++	{
++		std::fprintf(f, "ds %016llX %llu %s %s\n", static_cast<unsigned long long>(k), static_cast<unsigned long long>(n),
++			RrvLookupStatic(s_rrv_static_ds, k) ? "static" : "generic", GSScanlineSelector(k).to_string().c_str());
++	}
++	for (const auto& [k, n] : s_sp)
++	{
++		std::fprintf(f, "sp %016llX %llu %s\n", static_cast<unsigned long long>(k), static_cast<unsigned long long>(n),
++			RrvLookupStatic(s_rrv_static_sp, k) ? "static" : "generic");
++	}
++	std::fclose(f);
++	std::rename(tmp.c_str(), s_path);
++}
+diff --git a/pcsx2/GS/Renderers/SW/GSDrawScanline.h b/pcsx2/GS/Renderers/SW/GSDrawScanline.h
+index 48612d3..5fbb349 100644
+--- a/pcsx2/GS/Renderers/SW/GSDrawScanline.h
++++ b/pcsx2/GS/Renderers/SW/GSDrawScanline.h
+@@ -5,6 +5,9 @@
+ 
+ #include "GS/GSState.h"
+ 
++// RRV bridge: the SW JIT is compiled only into diagnostic builds
++// (RRV_PCSX2_GS_BRIDGE_SW_JIT=ON defines RRV_PCSX2_GS_SW_JIT).
++#if defined(RRV_PCSX2_GS_SW_JIT)
+ #ifdef ARCH_X86
+ #include "GS/Renderers/SW/GSSetupPrimCodeGenerator.all.h"
+ #include "GS/Renderers/SW/GSDrawScanlineCodeGenerator.all.h"
+@@ -13,6 +16,9 @@
+ #include "GS/Renderers/SW/GSSetupPrimCodeGenerator.arm64.h"
+ #include "GS/Renderers/SW/GSDrawScanlineCodeGenerator.arm64.h"
+ #endif
++#endif
++#include "GS/Renderers/SW/GSScanlineEnvironment.h"
++#include "GS/Renderers/SW/GSVertexSW.h"
+ 
+ struct GSScanlineLocalData;
+ 
+@@ -22,8 +28,10 @@ class GSRasterizerData;
+ 
+ class GSDrawScanline : public GSVirtualAlignedClass<32>
+ {
++#if defined(RRV_PCSX2_GS_SW_JIT)
+ 	friend GSSetupPrimCodeGenerator;
+ 	friend GSDrawScanlineCodeGenerator;
++#endif
+ 
+ public:
+ 	GSDrawScanline();
+@@ -51,13 +59,30 @@ public:
+ 	void UpdateDrawStats(u64 frame, u64 ticks, int actual, int total, int prims);
+ 	void PrintStats();
+ 
+-private:
+-	GSCodeGeneratorFunctionMap<GSSetupPrimCodeGenerator, u64, SetupPrimPtr> m_sp_map;
+-	GSCodeGeneratorFunctionMap<GSDrawScanlineCodeGenerator, u64, DrawScanlinePtr> m_ds_map;
++	/// RRV bridge: the ahead-of-time specialised functions for a selector,
++	/// falling back to the generic C functions (see GSDrawScanlineStaticKeys.inc).
++	static void GetStaticFunctions(GSScanlineSelector sel, SetupPrimPtr& setup_prim, DrawScanlinePtr& draw_scanline, DrawScanlinePtr& draw_edge);
++	static size_t StaticTableSize();
++	static u64 SetupPrimKey(GSScanlineSelector sel);
++	static u64 EdgeKey(GSScanlineSelector sel);
++	static void RrvNoteSelector(GSScanlineSelector sel);
++
++	template <u64 KEY>
++	static void CDrawScanlineT(int pixels, int left, int top, const GSVertexSW& scan, GSScanlineLocalData& local);
++	template <u64 KEY>
++	static void CSetupPrimT(const GSVertexSW* vertex, const u16* index, const GSVertexSW& dscan, GSScanlineLocalData& local);
+ 
+ 	static void CSetupPrim(const GSVertexSW* vertex, const u16* index, const GSVertexSW& dscan, GSScanlineLocalData& local);
+ 	static void CDrawScanline(int pixels, int left, int top, const GSVertexSW& scan, GSScanlineLocalData& local);
+ 	static void CDrawEdge(int pixels, int left, int top, const GSVertexSW& scan, GSScanlineLocalData& local);
++
++private:
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	GSCodeGeneratorFunctionMap<GSSetupPrimCodeGenerator, u64, SetupPrimPtr> m_sp_map;
++	GSCodeGeneratorFunctionMap<GSDrawScanlineCodeGenerator, u64, DrawScanlinePtr> m_ds_map;
++#endif
++
++	__ri static void CSetupPrim(const GSVertexSW* vertex, const u16* index, const GSVertexSW& dscan, GSScanlineLocalData& local, GSScanlineSelector sel);
+ 	__ri static void CDrawScanline(int pixels, int left, int top, const GSVertexSW& scan, GSScanlineLocalData& local, GSScanlineSelector sel);
+ };
+ 
+diff --git a/pcsx2/GS/Renderers/SW/GSDrawScanlineStaticKeys.inc b/pcsx2/GS/Renderers/SW/GSDrawScanlineStaticKeys.inc
+new file mode 100644
+index 0000000..0d0ce8c
+--- /dev/null
++++ b/pcsx2/GS/Renderers/SW/GSDrawScanlineStaticKeys.inc
+@@ -0,0 +1,149 @@
++// RRV bridge: rasterizer selectors specialised ahead of time.
++// Generated by scripts/pcsx2_sw_static_keys.py from selector keys harvested
++// with RRV_PCSX2_GS_SW_KEYS (GS register-state bit fields only).
++// RRV_SW_DS_KEY(k): GSDrawScanline selector; RRV_SW_SP_KEY(k): SetupPrim key.
++// Keep each list sorted ascending.
++// 103 draw selectors, 40 setup selectors
++RRV_SW_DS_KEY(0x000090013FC0404C)
++RRV_SW_DS_KEY(0x000110013FC0404C)
++RRV_SW_DS_KEY(0x0001101511204064)
++RRV_SW_DS_KEY(0x000110193FC84064)
++RRV_SW_DS_KEY(0x0001181711304064)
++RRV_SW_DS_KEY(0x0001301511204064)
++RRV_SW_DS_KEY(0x000190013FC0404C)
++RRV_SW_DS_KEY(0x000190052120404D)
++RRV_SW_DS_KEY(0x000190053FC0404C)
++RRV_SW_DS_KEY(0x000190153FC04074)
++RRV_SW_DS_KEY(0x000910193FCE8064)
++RRV_SW_DS_KEY(0x000910193FCE8864)
++RRV_SW_DS_KEY(0x0009101F112E8364)
++RRV_SW_DS_KEY(0x0009101F112E8B64)
++RRV_SW_DS_KEY(0x000912993FCE8864)
++RRV_SW_DS_KEY(0x0009179F112E8364)
++RRV_SW_DS_KEY(0x0009179F112E8B64)
++RRV_SW_DS_KEY(0x000D101716378064)
++RRV_SW_DS_KEY(0x000D10193FCE8064)
++RRV_SW_DS_KEY(0x000D10193FCE8864)
++RRV_SW_DS_KEY(0x000D101D16278064)
++RRV_SW_DS_KEY(0x000D101D1A278064)
++RRV_SW_DS_KEY(0x000D101F112E8364)
++RRV_SW_DS_KEY(0x000D101F16378064)
++RRV_SW_DS_KEY(0x000D12993FCE8064)
++RRV_SW_DS_KEY(0x000D12993FCE8864)
++RRV_SW_DS_KEY(0x000D129F112E8364)
++RRV_SW_DS_KEY(0x000D301D1A278064)
++RRV_SW_DS_KEY(0x0011101F112E8364)
++RRV_SW_DS_KEY(0x0011101F12378064)
++RRV_SW_DS_KEY(0x0011101F12378864)
++RRV_SW_DS_KEY(0x001112993FCE8064)
++RRV_SW_DS_KEY(0x001112993FCE8864)
++RRV_SW_DS_KEY(0x0011129F112E8B64)
++RRV_SW_DS_KEY(0x001510193FCE8064)
++RRV_SW_DS_KEY(0x001510193FCE8864)
++RRV_SW_DS_KEY(0x0015101D19278864)
++RRV_SW_DS_KEY(0x0015101D1A2A0864)
++RRV_SW_DS_KEY(0x0015101F11278764)
++RRV_SW_DS_KEY(0x0015101F11278F64)
++RRV_SW_DS_KEY(0x0015101F112E8364)
++RRV_SW_DS_KEY(0x0015121F113E9064)
++RRV_SW_DS_KEY(0x001512993FCE8064)
++RRV_SW_DS_KEY(0x001512993FCE8864)
++RRV_SW_DS_KEY(0x0015129F112E8364)
++RRV_SW_DS_KEY(0x0015129F112E8B64)
++RRV_SW_DS_KEY(0x001514051127904C)
++RRV_SW_DS_KEY(0x001517993FCE8864)
++RRV_SW_DS_KEY(0x0015301F19278F64)
++RRV_SW_DS_KEY(0x0019101712378864)
++RRV_SW_DS_KEY(0x0019101D19278864)
++RRV_SW_DS_KEY(0x0019101F11278F64)
++RRV_SW_DS_KEY(0x0019101F112E8364)
++RRV_SW_DS_KEY(0x001912851125804C)
++RRV_SW_DS_KEY(0x00191295112C8064)
++RRV_SW_DS_KEY(0x00191295122C8064)
++RRV_SW_DS_KEY(0x001912993FCE8064)
++RRV_SW_DS_KEY(0x001912993FCE8864)
++RRV_SW_DS_KEY(0x0019129F112C8364)
++RRV_SW_DS_KEY(0x0019129F112C8B64)
++RRV_SW_DS_KEY(0x0019129F112E8364)
++RRV_SW_DS_KEY(0x0019129F112E8B64)
++RRV_SW_DS_KEY(0x0019301D19278864)
++RRV_SW_DS_KEY(0x0019301F11278B64)
++RRV_SW_DS_KEY(0x001D101F112E8364)
++RRV_SW_DS_KEY(0x001D12993FCE8064)
++RRV_SW_DS_KEY(0x001D12993FCE8864)
++RRV_SW_DS_KEY(0x001D129D112E8864)
++RRV_SW_DS_KEY(0x001D129F112E8364)
++RRV_SW_DS_KEY(0x001D129F112E8B64)
++RRV_SW_DS_KEY(0x001D179F112E8364)
++RRV_SW_DS_KEY(0x001D92851523904C)
++RRV_SW_DS_KEY(0x001D92851A21004C)
++RRV_SW_DS_KEY(0x001D92853FC1004C)
++RRV_SW_DS_KEY(0x001D92853FC3904C)
++RRV_SW_DS_KEY(0x007512993FCE8064)
++RRV_SW_DS_KEY(0x007512993FCE8864)
++RRV_SW_DS_KEY(0x007517993FCE8864)
++RRV_SW_DS_KEY(0x009512993FCE8064)
++RRV_SW_DS_KEY(0x009512993FCE8864)
++RRV_SW_DS_KEY(0x009517993FCE8864)
++RRV_SW_DS_KEY(0x010190013FC0404C)
++RRV_SW_DS_KEY(0x010590013FC3804C)
++RRV_SW_DS_KEY(0x011190051127904C)
++RRV_SW_DS_KEY(0x011192851127904C)
++RRV_SW_DS_KEY(0x011193853FC5104C)
++RRV_SW_DS_KEY(0x011197853FC5104C)
++RRV_SW_DS_KEY(0x011D92851A21004C)
++RRV_SW_DS_KEY(0x011D92853FC1004C)
++RRV_SW_DS_KEY(0x020110193FC04864)
++RRV_SW_DS_KEY(0x0201101D12204864)
++RRV_SW_DS_KEY(0x020190093FC04054)
++RRV_SW_DS_KEY(0x020190153FC04074)
++RRV_SW_DS_KEY(0x020D128D1A258054)
++RRV_SW_DS_KEY(0x020D128D1A258854)
++RRV_SW_DS_KEY(0x020D129511268864)
++RRV_SW_DS_KEY(0x021512993FCE8864)
++RRV_SW_DS_KEY(0x0219129F112E8364)
++RRV_SW_DS_KEY(0x021D129511268064)
++RRV_SW_DS_KEY(0x021D12993FCE8864)
++RRV_SW_DS_KEY(0x021D129F11268364)
++RRV_SW_DS_KEY(0x021D129F11268B64)
++RRV_SW_DS_KEY(0x027512993FCE8864)
++RRV_SW_SP_KEY(0x0000800100004000)
++RRV_SW_SP_KEY(0x0001000100004000)
++RRV_SW_SP_KEY(0x0001000100018000)
++RRV_SW_SP_KEY(0x0001000100019000)
++RRV_SW_SP_KEY(0x0001001100004000)
++RRV_SW_SP_KEY(0x0001001100088000)
++RRV_SW_SP_KEY(0x0001001300004000)
++RRV_SW_SP_KEY(0x0001001300018000)
++RRV_SW_SP_KEY(0x0001001300018800)
++RRV_SW_SP_KEY(0x0001001900018000)
++RRV_SW_SP_KEY(0x0001001900018800)
++RRV_SW_SP_KEY(0x0001001900080800)
++RRV_SW_SP_KEY(0x0001001900084000)
++RRV_SW_SP_KEY(0x0001001900088000)
++RRV_SW_SP_KEY(0x0001001900088800)
++RRV_SW_SP_KEY(0x0001001B00018000)
++RRV_SW_SP_KEY(0x0001001B00018800)
++RRV_SW_SP_KEY(0x0001001B00088000)
++RRV_SW_SP_KEY(0x0001001B00088800)
++RRV_SW_SP_KEY(0x0001001B00089000)
++RRV_SW_SP_KEY(0x0001800100004000)
++RRV_SW_SP_KEY(0x0001800100010000)
++RRV_SW_SP_KEY(0x0001800100019000)
++RRV_SW_SP_KEY(0x0001801100004000)
++RRV_SW_SP_KEY(0x0101800100004000)
++RRV_SW_SP_KEY(0x0101800100010000)
++RRV_SW_SP_KEY(0x0101800100011000)
++RRV_SW_SP_KEY(0x0101800100018000)
++RRV_SW_SP_KEY(0x0101800100019000)
++RRV_SW_SP_KEY(0x0201000900018000)
++RRV_SW_SP_KEY(0x0201000900018800)
++RRV_SW_SP_KEY(0x0201001100008000)
++RRV_SW_SP_KEY(0x0201001100008800)
++RRV_SW_SP_KEY(0x0201001900004800)
++RRV_SW_SP_KEY(0x0201001900088800)
++RRV_SW_SP_KEY(0x0201001B00008000)
++RRV_SW_SP_KEY(0x0201001B00008800)
++RRV_SW_SP_KEY(0x0201001B00088000)
++RRV_SW_SP_KEY(0x0201800900004000)
++RRV_SW_SP_KEY(0x0201801100004000)
+diff --git a/pcsx2/GS/Renderers/SW/GSRasterizer.cpp b/pcsx2/GS/Renderers/SW/GSRasterizer.cpp
+index ab36957..60fda7f 100644
+--- a/pcsx2/GS/Renderers/SW/GSRasterizer.cpp
++++ b/pcsx2/GS/Renderers/SW/GSRasterizer.cpp
+@@ -4,6 +4,12 @@
+ // TODO: JIT Draw* (flags: depth, texture, color (+iip), scissor)
+ 
+ #include "GS/Renderers/SW/GSRasterizer.h"
++
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <map>
++#include <string>
+ #include "GS/Renderers/SW/GSDrawScanline.h"
+ #include "GS/GSExtra.h"
+ #include "PerformanceMetrics.h"
+@@ -33,6 +39,289 @@ static int compute_best_thread_height(int threads)
+ 		return 4;
+ }
+ 
++#if defined(RRV_PCSX2_GS_SW_JIT)
++// ---------------------------------------------------------------------------
++// RRV_PCSX2_GS_SW_DIFF=<summary path>: differential check of the ahead-of-time
++// rasterizer functions against PCSX2's runtime JIT (diagnostic builds only).
++// The JIT draws into GS local memory as usual; the static (or generic C)
++// functions draw the same spans into a shadow copy taken at the start of the
++// draw. Each span's frame/Z pixels are compared (and the shadow resynced on a
++// mismatch, so spans are judged independently); a whole-memory compare at the
++// end of the draw catches writes outside the spans. Per-selector counts go to
++// the summary file; the first mismatches of each selector go to stderr.
++// ---------------------------------------------------------------------------
++namespace
++{
++	struct RrvSwDiffKeyStats
++	{
++		u64 draws = 0;
++		u64 spans = 0;
++		u64 bad_spans = 0;
++		u64 bad_pixels = 0;
++		u64 bad_draws_full = 0;
++		u64 reported = 0;
++		bool dirty = false;
++	};
++
++	struct RrvSwDiffState
++	{
++		const char* path = nullptr;
++		std::map<u64, RrvSwDiffKeyStats> keys;
++		u64 draws = 0;
++		u64 spans = 0;
++		u64 bad_spans = 0;
++		u64 bad_draws_full = 0;
++		u64 full_reported = 0;
++	};
++
++	void RrvDiffWriteSummary(const RrvSwDiffState& st);
++
++	RrvSwDiffState& RrvDiffState()
++	{
++		static RrvSwDiffState s_state = [] {
++			RrvSwDiffState st;
++			const char* p = std::getenv("RRV_PCSX2_GS_SW_DIFF");
++			st.path = (p && p[0]) ? p : nullptr;
++			if (st.path)
++				std::fprintf(stderr, "[pcsx2-sw-diff] enabled: JIT vs static rasterizer, summary %s (static table %zu keys)\n",
++					st.path, GSDrawScanline::StaticTableSize());
++			return st;
++		}();
++		// Registered after s_state is constructed, so it runs before s_state is destroyed.
++		static const bool s_final_summary = [] {
++			if (s_state.path)
++				std::atexit([] { RrvDiffWriteSummary(s_state); });
++			return true;
++		}();
++		(void)s_final_summary;
++		return s_state;
++	}
++
++	void RrvDiffWriteSummary(const RrvSwDiffState& st)
++	{
++		const std::string tmp = std::string(st.path) + ".tmp";
++		FILE* f = std::fopen(tmp.c_str(), "w");
++		if (!f)
++			return;
++		std::fprintf(f, "# rrv pcsx2 sw diff: draws=%llu spans=%llu bad_spans=%llu bad_draws_full=%llu keys=%zu\n",
++			static_cast<unsigned long long>(st.draws), static_cast<unsigned long long>(st.spans),
++			static_cast<unsigned long long>(st.bad_spans), static_cast<unsigned long long>(st.bad_draws_full), st.keys.size());
++		for (const auto& [k, v] : st.keys)
++		{
++			std::fprintf(f, "key %016llX draws %llu spans %llu bad_spans %llu bad_pixels %llu bad_draws_full %llu %s\n",
++				static_cast<unsigned long long>(k), static_cast<unsigned long long>(v.draws),
++				static_cast<unsigned long long>(v.spans), static_cast<unsigned long long>(v.bad_spans),
++				static_cast<unsigned long long>(v.bad_pixels), static_cast<unsigned long long>(v.bad_draws_full),
++				GSScanlineSelector(k).to_string().c_str());
++		}
++		std::fclose(f);
++		std::rename(tmp.c_str(), st.path);
++	}
++
++	static const int s_rrv_offsets[] = {0, 2, 8, 10}; // columnTable16[0], as GSDrawScanline.cpp s_offsets
++
++	void RrvDumpVec(const char* name, const void* p)
++	{
++		u32 v[4];
++		std::memcpy(v, p, sizeof(v));
++		std::fprintf(stderr, " %s=%08x,%08x,%08x,%08x", name, v[0], v[1], v[2], v[3]);
++	}
++
++	void RrvDumpLocal(const char* who, const GSScanlineLocalData& l)
++	{
++#if _M_SSE < 0x501
++		std::fprintf(stderr, "[pcsx2-sw-diff]   %s:", who);
++		RrvDumpVec("d0.z", &l.d[0].z);
++		RrvDumpVec("d0.s", &l.d[0].s);
++		RrvDumpVec("d0.t", &l.d[0].t);
++		RrvDumpVec("d0.q", &l.d[0].q);
++		RrvDumpVec("d0.rb", &l.d[0].rb);
++		RrvDumpVec("d0.ga", &l.d[0].ga);
++		RrvDumpVec("d0.f", &l.d[0].f);
++		RrvDumpVec("d1.s", &l.d[1].s);
++		RrvDumpVec("d3.s", &l.d[3].s);
++		RrvDumpVec("d4.z", &l.d4.z);
++		RrvDumpVec("d4.stq", &l.d4.stq);
++		RrvDumpVec("d4.c", &l.d4.c);
++		RrvDumpVec("d4.f", &l.d4.f);
++		RrvDumpVec("c.rb", &l.c.rb);
++		RrvDumpVec("c.ga", &l.c.ga);
++		RrvDumpVec("p.z", &l.p.z);
++		RrvDumpVec("p.f", &l.p.f);
++		std::fprintf(stderr, "\n");
++#else
++		(void)who;
++		(void)l;
++#endif
++	}
++} // namespace
++
++struct alignas(32) GSRasterizer::RrvTwin
++{
++	GSScanlineLocalData local = {};
++	GSScanlineGlobalData global;
++	GSDrawScanline::SetupPrimPtr sp = nullptr;
++	GSDrawScanline::DrawScanlinePtr ds = nullptr;
++	GSDrawScanline::DrawScanlinePtr de = nullptr;
++	u8* shadow = nullptr;
++	RrvSwDiffKeyStats* stats = nullptr;
++	u64 key = 0;
++	int primclass = 0;
++};
++
++void GSRasterizer::RrvTwinBegin(const GSRasterizerData& data)
++{
++	RrvSwDiffState& st = RrvDiffState();
++	m_rrv_twin = nullptr;
++	if (!st.path || m_threads != 1)
++		return;
++
++	if (!m_rrv_twin_store)
++	{
++		m_rrv_twin_store = new RrvTwin();
++		m_rrv_twin_store->shadow = static_cast<u8*>(_aligned_malloc(VM_SIZE + 4096, 64));
++		std::memset(m_rrv_twin_store->shadow, 0, VM_SIZE + 4096);
++	}
++
++	RrvTwin* t = m_rrv_twin_store;
++	std::memcpy(t->shadow, data.global.vm, VM_SIZE);
++	t->global = data.global;
++	t->global.vm = t->shadow;
++	GSDrawScanline::GetStaticFunctions(data.global.sel, t->sp, t->ds, t->de);
++	t->local = {};
++	t->local.gd = &t->global;
++	t->local.temp.uv_minmax[0] = m_local.temp.uv_minmax[0];
++	t->local.temp.uv_minmax[1] = m_local.temp.uv_minmax[1];
++	t->key = data.global.sel.key;
++	t->primclass = data.primclass;
++	t->stats = &st.keys[t->key];
++	t->stats->draws++;
++	m_rrv_twin = t;
++}
++
++void GSRasterizer::RrvTwinSpan(int pixels, int left, int top, const GSVertexSW& scan, bool edge)
++{
++	RrvTwin* t = m_rrv_twin;
++	RrvSwDiffState& st = RrvDiffState();
++	(edge ? t->de : t->ds)(pixels, left, top, scan, t->local);
++
++	GSScanlineSelector sel(edge ? GSDrawScanline::EdgeKey(t->global.sel) : t->global.sel.key);
++	t->stats->spans++;
++	st.spans++;
++
++	const u8* vm = static_cast<const u8*>(m_local.gd->vm);
++	u8* sh = t->shadow;
++	const GSVector2i* fzbr = t->global.fzbr;
++	const GSVector2i* fzbc = t->global.fzbc;
++
++	int bad = 0;
++	struct BadPixel { int x; u32 jf, cf, jz, cz; };
++	BadPixel list[8];
++	for (int x = left; x < left + pixels; x++)
++	{
++		const int i = x & 3;
++		bool pixel_bad = false;
++		BadPixel b = {x, 0, 0, 0, 0};
++		if (sel.fwrite)
++		{
++			const u32 fa = static_cast<u32>(fzbr[top].x + fzbc[x >> 2].x) & (HALF_VM_SIZE - 1);
++			const size_t off = static_cast<size_t>(fa) * 2 + s_rrv_offsets[i] * 2;
++			const size_t n = sel.fpsm == 2 ? 2 : 4;
++			std::memcpy(&b.jf, vm + off, n);
++			std::memcpy(&b.cf, sh + off, n);
++			if (b.jf != b.cf)
++			{
++				pixel_bad = true;
++				std::memcpy(sh + off, vm + off, n);
++			}
++		}
++		if (sel.zwrite)
++		{
++			const u32 za = static_cast<u32>(fzbr[top].y + fzbc[x >> 2].y) & (HALF_VM_SIZE - 1);
++			const size_t off = static_cast<size_t>(za) * 2 + s_rrv_offsets[i] * 2;
++			const size_t n = sel.zpsm == 2 ? 2 : 4;
++			std::memcpy(&b.jz, vm + off, n);
++			std::memcpy(&b.cz, sh + off, n);
++			if (b.jz != b.cz)
++			{
++				pixel_bad = true;
++				std::memcpy(sh + off, vm + off, n);
++			}
++		}
++		if (pixel_bad)
++		{
++			if (bad < 8)
++				list[bad] = b;
++			bad++;
++		}
++	}
++
++	if (bad == 0)
++		return;
++
++	t->stats->bad_spans++;
++	t->stats->bad_pixels += bad;
++	t->stats->dirty = true;
++	st.bad_spans++;
++	if (t->stats->reported++ < 4)
++	{
++		std::fprintf(stderr, "[pcsx2-sw-diff] MISMATCH key=%016llX%s prim=%d span pixels=%d left=%d top=%d bad=%d sel{%s}\n",
++			static_cast<unsigned long long>(t->key), edge ? " (edge)" : "", t->primclass, pixels, left, top, bad,
++			sel.to_string().c_str());
++		std::fprintf(stderr, "[pcsx2-sw-diff]   scan p=%.9g,%.9g,%.9g,%.9g t=%.9g,%.9g,%.9g,%.9g c=%.9g,%.9g,%.9g,%.9g\n",
++			scan.p.x, scan.p.y, scan.p.z, scan.p.w, scan.t.x, scan.t.y, scan.t.z, scan.t.w,
++			scan.c.x, scan.c.y, scan.c.z, scan.c.w);
++		for (int k = 0; k < std::min(bad, 8); k++)
++		{
++			std::fprintf(stderr, "[pcsx2-sw-diff]   x=%d frame jit=%08x c=%08x z jit=%08x c=%08x\n",
++				list[k].x, list[k].jf, list[k].cf, list[k].jz, list[k].cz);
++		}
++		RrvDumpLocal("jit-local", m_local);
++		RrvDumpLocal("c-local  ", t->local);
++	}
++}
++
++void GSRasterizer::RrvTwinEnd(const GSRasterizerData& data)
++{
++	RrvTwin* t = m_rrv_twin;
++	if (!t)
++		return;
++	m_rrv_twin = nullptr;
++	RrvSwDiffState& st = RrvDiffState();
++	st.draws++;
++
++	const u8* vm = static_cast<const u8*>(data.global.vm);
++	if (std::memcmp(vm, t->shadow, VM_SIZE) != 0)
++	{
++		st.bad_draws_full++;
++		t->stats->bad_draws_full++;
++		if (st.full_reported++ < 16)
++		{
++			size_t first = 0, count = 0;
++			for (size_t o = 0; o < VM_SIZE; o += 4)
++			{
++				if (std::memcmp(vm + o, t->shadow + o, 4) != 0)
++				{
++					if (count++ == 0)
++						first = o;
++				}
++			}
++			u32 jv, cv;
++			std::memcpy(&jv, vm + first, 4);
++			std::memcpy(&cv, t->shadow + first, 4);
++			std::fprintf(stderr, "[pcsx2-sw-diff] OUTSIDE-SPAN key=%016llX prim=%d words=%zu first=0x%zx jit=%08x c=%08x\n",
++				static_cast<unsigned long long>(t->key), t->primclass, count, first, jv, cv);
++		}
++	}
++
++	if ((st.draws & 255) == 0 || t->stats->draws == 1 || t->stats->dirty || t->stats->bad_draws_full == 1)
++	{
++		t->stats->dirty = false;
++		RrvDiffWriteSummary(st);
++	}
++}
++#endif
++
+ GSRasterizer::GSRasterizer(GSDrawScanline* ds, int id, int threads)
+ 	: m_ds(ds)
+ 	, m_id(id)
+@@ -60,6 +349,13 @@ GSRasterizer::GSRasterizer(GSDrawScanline* ds, int id, int threads)
+ 
+ GSRasterizer::~GSRasterizer()
+ {
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	if (m_rrv_twin_store)
++	{
++		_aligned_free(m_rrv_twin_store->shadow);
++		delete m_rrv_twin_store;
++	}
++#endif
+ 	_aligned_free(m_scanline);
+ 	_aligned_free(m_edge.buff);
+ }
+@@ -139,6 +435,9 @@ void GSRasterizer::Draw(GSRasterizerData& data)
+ 	m_draw_scanline = data.draw_scanline;
+ 	m_draw_edge = data.draw_edge;
+ 	GSDrawScanline::BeginDraw(data, m_local);
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	RrvTwinBegin(data);
++#endif
+ 
+ 	const GSVertexSW* vertex = data.vertex;
+ 	const GSVertexSW* vertex_end = data.vertex + data.vertex_count;
+@@ -245,6 +544,10 @@ void GSRasterizer::Draw(GSRasterizerData& data)
+ 
+ 	m_pixels.sum += m_pixels.actual;
+ 
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	RrvTwinEnd(data);
++#endif
++
+ 	if constexpr (ENABLE_DRAW_STATS)
+ 		m_ds->UpdateDrawStats(data.frame, GetCPUTicks() - data.start, m_pixels.actual, m_pixels.total, m_primcount);
+ }
+@@ -266,7 +569,7 @@ void GSRasterizer::DrawPoint(const GSVertexSW* vertex, int vertex_count, const u
+ 			{
+ 				if (IsOneOfMyScanlines(p.y))
+ 				{
+-					m_setup_prim(vertex, index, GSVertexSW::zero(), m_local);
++					SetupPrim(vertex, index, GSVertexSW::zero());
+ 
+ 					DrawScanline(1, p.x, p.y, v);
+ 				}
+@@ -287,7 +590,7 @@ void GSRasterizer::DrawPoint(const GSVertexSW* vertex, int vertex_count, const u
+ 			{
+ 				if (IsOneOfMyScanlines(p.y))
+ 				{
+-					m_setup_prim(vertex, tmp_index, GSVertexSW::zero(), m_local);
++					SetupPrim(vertex, tmp_index, GSVertexSW::zero());
+ 
+ 					DrawScanline(1, p.x, p.y, v);
+ 				}
+@@ -1116,7 +1419,7 @@ void GSRasterizer::DrawSprite(const GSVertexSW* vertex, const u16* index)
+ 	{
+ 		if (m_threads == 1)
+ 		{
+-			GSDrawScanline::DrawRect(r, scan, m_local);
++			DrawRect(r, scan);
+ 
+ 			int pixels = r.width() * r.height();
+ 
+@@ -1133,7 +1436,7 @@ void GSRasterizer::DrawSprite(const GSVertexSW* vertex, const u16* index)
+ 				r.top = top;
+ 				r.bottom = std::min<int>((top + (1 << m_thread_height)) & ~((1 << m_thread_height) - 1), bottom);
+ 
+-				GSDrawScanline::DrawRect(r, scan, m_local);
++				DrawRect(r, scan);
+ 
+ 				int pixels = r.width() * r.height();
+ 
+@@ -1162,7 +1465,7 @@ void GSRasterizer::DrawSprite(const GSVertexSW* vertex, const u16* index)
+ 
+ 	scan.t = (scan.t + dt * prestep).xyzw(scan.t);
+ 
+-	m_setup_prim(vertex, index, dscan, m_local);
++	SetupPrim(vertex, index, dscan);
+ 
+ 	while (1)
+ 	{
+@@ -1391,7 +1694,7 @@ void GSRasterizer::Flush(const GSVertexSW* vertex, const u16* index, const GSVer
+ 
+ 	if (count > 0)
+ 	{
+-		m_setup_prim(vertex, index, dscan, m_local);
++		SetupPrim(vertex, index, dscan);
+ 
+ 		const GSVertexSW* RESTRICT e = m_edge.buff;
+ 		const GSVertexSW* RESTRICT ee = e + count;
+@@ -1439,6 +1742,10 @@ void GSRasterizer::DrawScanline(int pixels, int left, int top, const GSVertexSW&
+ 	pxAssert(m_pixels.actual <= m_pixels.total);
+ 
+ 	m_draw_scanline(pixels, left, top, scan, m_local);
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	if (m_rrv_twin)
++		RrvTwinSpan(pixels, left, top, scan, false);
++#endif
+ }
+ 
+ void GSRasterizer::DrawEdge(int pixels, int left, int top, const GSVertexSW& scan)
+@@ -1450,6 +1757,28 @@ void GSRasterizer::DrawEdge(int pixels, int left, int top, const GSVertexSW& sca
+ 	pxAssert(m_pixels.actual <= m_pixels.total);
+ 
+ 	m_draw_edge(pixels, left, top, scan, m_local);
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	if (m_rrv_twin)
++		RrvTwinSpan(pixels, left, top, scan, true);
++#endif
++}
++
++void GSRasterizer::SetupPrim(const GSVertexSW* vertex, const u16* index, const GSVertexSW& dscan)
++{
++	m_setup_prim(vertex, index, dscan, m_local);
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	if (m_rrv_twin)
++		m_rrv_twin->sp(vertex, index, dscan, m_rrv_twin->local);
++#endif
++}
++
++void GSRasterizer::DrawRect(const GSVector4i& r, const GSVertexSW& scan)
++{
++	GSDrawScanline::DrawRect(r, scan, m_local);
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	if (m_rrv_twin)
++		GSDrawScanline::DrawRect(r, scan, m_rrv_twin->local);
++#endif
+ }
+ 
+ //
+@@ -1466,8 +1795,47 @@ void GSSingleRasterizer::Queue(const GSRingHeap::SharedPtr<GSRasterizerData>& da
+ 	Draw(*data.get());
+ }
+ 
++namespace
++{
++	// RRV_PCSX2_GS_SW_TIMING=1: cumulative time spent in GSSingleRasterizer::Draw
++	// (selector lookup or JIT code generation, plus rasterization), printed
++	// every 4096 draws and at exit.
++	struct RrvSwTiming
++	{
++		u64 draws = 0, ticks = 0, pixels = 0;
++		void Print() const
++		{
++			std::fprintf(stderr, "[pcsx2-sw] timing draws=%llu pixels=%llu ns=%llu (%s)\n",
++				static_cast<unsigned long long>(draws), static_cast<unsigned long long>(pixels),
++				static_cast<unsigned long long>(ticks * 1000000000ull / GetTickFrequency()),
++#if defined(RRV_PCSX2_GS_SW_JIT)
++				"jit"
++#else
++				"static"
++#endif
++			);
++		}
++	};
++	RrvSwTiming s_rrv_sw_timing;
++
++	bool RrvSwTimingEnabled()
++	{
++		static const bool s_enabled = [] {
++			const char* v = std::getenv("RRV_PCSX2_GS_SW_TIMING");
++			const bool on = v && v[0] == '1';
++			if (on)
++				std::atexit([] { s_rrv_sw_timing.Print(); });
++			return on;
++		}();
++		return s_enabled;
++	}
++} // namespace
++
+ void GSSingleRasterizer::Draw(GSRasterizerData& data)
+ {
++	const bool timing = RrvSwTimingEnabled();
++	const u64 t0 = timing ? GetCPUTicks() : 0;
++
+ 	if (!m_ds.SetupDraw(data)) [[unlikely]]
+ 	{
+ 		m_ds.ResetCodeCache();
+@@ -1475,6 +1843,14 @@ void GSSingleRasterizer::Draw(GSRasterizerData& data)
+ 	}
+ 
+ 	m_r.Draw(data);
++
++	if (timing)
++	{
++		s_rrv_sw_timing.ticks += GetCPUTicks() - t0;
++		s_rrv_sw_timing.pixels += static_cast<u64>(data.pixels);
++		if ((++s_rrv_sw_timing.draws & 4095) == 0)
++			s_rrv_sw_timing.Print();
++	}
+ }
+ 
+ void GSSingleRasterizer::Sync()
+diff --git a/pcsx2/GS/Renderers/SW/GSRasterizer.h b/pcsx2/GS/Renderers/SW/GSRasterizer.h
+index 1d0d844..22ea27d 100644
+--- a/pcsx2/GS/Renderers/SW/GSRasterizer.h
++++ b/pcsx2/GS/Renderers/SW/GSRasterizer.h
+@@ -124,6 +124,21 @@ protected:
+ 	__forceinline void DrawScanline(int pixels, int left, int top, const GSVertexSW& scan);
+ 	__forceinline void DrawEdge(int pixels, int left, int top, const GSVertexSW& scan);
+ 
++	__forceinline void SetupPrim(const GSVertexSW* vertex, const u16* index, const GSVertexSW& dscan);
++	__forceinline void DrawRect(const GSVector4i& r, const GSVertexSW& scan);
++
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	// RRV differential check (RRV_PCSX2_GS_SW_DIFF): every span drawn by the JIT
++	// is also drawn by the static/generic C functions into a shadow copy of
++	// local memory, and the span's pixels are compared.
++	struct RrvTwin;
++	RrvTwin* m_rrv_twin = nullptr; // non-null while the current draw is checked
++	RrvTwin* m_rrv_twin_store = nullptr;
++	void RrvTwinBegin(const GSRasterizerData& data);
++	void RrvTwinEnd(const GSRasterizerData& data);
++	void RrvTwinSpan(int pixels, int left, int top, const GSVertexSW& scan, bool edge);
++#endif
++
+ public:
+ 	GSRasterizer(GSDrawScanline* ds, int id, int threads);
+ 	~GSRasterizer();

@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "manifest_name": "RRV d52-compatible PS2Recomp producer v2",
+  "purpose": "M2V VIS-001: R5900 signed-zero branch predicates consume signed 64-bit GPRs.",
+  "base_revision": "cf9d22b9793ab0e0591c7c23e6a50bba07fd393b",
+  "compatible_revision": "bdbdede9c98b7796cff76c130177cc3fccb93f9b",
+  "compatible_tree": "88f6378c0502a22ba55ab4d01dfcce4af7cb0d36",
+  "cumulative_patch": "tools/patches/ps2recomp-d52-compatible-v2.patch",
+  "cumulative_patch_sha256": "281cfcd7f8635dc2ae32f01d5be6bec86942260ec3f53c92e0c9f5663c4e9f8f",
+  "inherited_classification": {
+    "manifest": "config/ps2recomp-d52-compatible-v1.manifest.json",
+    "revision": "3edaba449a3c5cba39d0d907a02b006809ed22ae",
+    "unchanged_historical_evidence": true
+  },
+  "delta": {
+    "path": "ps2xRecomp/src/lib/code_generator.cpp",
+    "replacements": 12,
+    "before": "GPR_S32(ctx, {})",
+    "after": "GPR_S64(ctx, {})",
+    "forms": [
+      "BLEZ",
+      "BGTZ",
+      "BLEZL",
+      "BGTZL",
+      "BLTZ",
+      "BGEZ",
+      "BLTZL",
+      "BGEZL",
+      "BLTZAL",
+      "BGEZAL",
+      "BLTZALL",
+      "BGEZALL"
+    ],
+    "delay_slot_and_link_emission": "unchanged",
+    "runtime_and_renderer_sources": "unchanged from v1"
+  },
+  "evidence": "docs/evidence/M2V_VIS001_FIRST_DIVERGENCE.md",
+  "game_material_included": false
+}

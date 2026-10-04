@@ -1,0 +1,79 @@
+diff --git a/pcsx2/GS/GS.cpp b/pcsx2/GS/GS.cpp
+index 5332cd0..dab6413 100644
+--- a/pcsx2/GS/GS.cpp
++++ b/pcsx2/GS/GS.cpp
+@@ -92,6 +92,17 @@ void GSRrvSetRoundSpriteUOnly(bool u_only)
+ 	GSState::s_rrv_round_sprite_u_only = u_only;
+ }
+ 
++void GSRrvSetDropLargeSTTriangles(bool drop)
++{
++	GSState::s_rrv_drop_large_st_triangles = drop;
++	GSState::s_rrv_dropped_large_st_triangles.store(0, std::memory_order_relaxed);
++}
++
++u64 GSRrvGetDroppedLargeSTTriangles()
++{
++	return GSState::s_rrv_dropped_large_st_triangles.load(std::memory_order_relaxed);
++}
++
+ static GSRendererType GSCurrentRenderer;
+ 
+ GSRendererType GSGetCurrentRenderer()
+diff --git a/pcsx2/GS/GS.h b/pcsx2/GS/GS.h
+index 310b0be..30838bd 100644
+--- a/pcsx2/GS/GS.h
++++ b/pcsx2/GS/GS.h
+@@ -100,6 +100,10 @@ u64 GSRrvGetFieldOfyCanonicalCount();
+ // rows, so rounding V to the native field texel grid would drop the rows the
+ // other field shows. 1:1 sprites (post-processing page strips) keep V rounding.
+ void GSRrvSetRoundSpriteUOnly(bool u_only);
++// RRV Gate-6 extension: when set, UserHacks_RewriteLargeST also collapses
++// every triangle whose ST it had to rewrite (degenerate Q), so it draws nothing.
++void GSRrvSetDropLargeSTTriangles(bool drop);
++u64 GSRrvGetDroppedLargeSTTriangles();
+ void GSvsync(u32 field, bool registers_written);
+ int GSfreeze(FreezeAction mode, freezeData* data);
+ std::string GSGetBaseSnapshotFilename();
+diff --git a/pcsx2/GS/GSState.cpp b/pcsx2/GS/GSState.cpp
+index adc99bc..ca7a11a 100644
+--- a/pcsx2/GS/GSState.cpp
++++ b/pcsx2/GS/GSState.cpp
+@@ -26,6 +26,8 @@ u32 GSState::s_rrv_ofy_from = 0;
+ u32 GSState::s_rrv_ofy_to = 0;
+ std::atomic<u64> GSState::s_rrv_ofy_canonical_count{0};
+ bool GSState::s_rrv_round_sprite_u_only = false;
++bool GSState::s_rrv_drop_large_st_triangles = false;
++std::atomic<u64> GSState::s_rrv_dropped_large_st_triangles{0};
+ 
+ static __fi bool IsAutoFlushEnabled()
+ {
+@@ -7018,6 +7020,15 @@ void GSState::RewriteVerticesIfLargeSTImpl(const GSVector4& large_val, bool chec
+ 					vertex_copy[i + j].m[1] = vertex[index[i + j]].m[1];
+ 					index[i + j] = i + j;
+ 				}
++
++				// RRV Gate-6 diagnostic (GSRrvSetDropLargeSTTriangles): collapse a
++				// triangle whose ST had to be rewritten, so it rasterizes nothing.
++				if (primclass == GS_TRIANGLE_CLASS && s_rrv_drop_large_st_triangles && (rewrite.mask() & 3) != 0)
++				{
++					for (int j = 1; j < n; j++)
++						vertex_copy[i + j].m[1] = vertex_copy[i].m[1];
++					s_rrv_dropped_large_st_triangles.fetch_add(1, std::memory_order_relaxed);
++				}
+ 			}
+ 
+ 			std::swap(m_vertex->buff, m_vertex->buff_copy);
+diff --git a/pcsx2/GS/GSState.h b/pcsx2/GS/GSState.h
+index 655330a..1c73d15 100644
+--- a/pcsx2/GS/GSState.h
++++ b/pcsx2/GS/GSState.h
+@@ -325,6 +325,8 @@ public:
+ 	static u32 s_rrv_ofy_to;
+ 	static std::atomic<u64> s_rrv_ofy_canonical_count;
+ 	static bool s_rrv_round_sprite_u_only;
++	static bool s_rrv_drop_large_st_triangles;
++	static std::atomic<u64> s_rrv_dropped_large_st_triangles;
+ 
+ 	GSPerfMon m_perfmon_frame; // Track stat across a frame.
+ 	GSPerfMon m_perfmon_draw;  // Track stat across a draw.

@@ -1,0 +1,643 @@
+{
+  "schema": "rrv-vu-prog-catalogue-v1",
+  "catalogue_id": "35ede581923dc62b",
+  "generator": "tools/vu-aot/vu_prog_gen.py",
+  "elf_chains": 7,
+  "operand_analysis": true,
+  "vu0_images": 2,
+  "entries": [
+    {
+      "image": 1,
+      "entry": 0,
+      "program": 0,
+      "slots": 2,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 1,
+      "entry": 16,
+      "same_as_program": 0
+    },
+    {
+      "image": 1,
+      "entry": 32,
+      "same_as_program": 0
+    },
+    {
+      "image": 1,
+      "entry": 48,
+      "program": 1,
+      "slots": 17,
+      "segments": 2,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 1,
+      "entry": 64,
+      "same_as_program": 0
+    },
+    {
+      "image": 1,
+      "entry": 80,
+      "same_as_program": 0
+    },
+    {
+      "image": 1,
+      "entry": 96,
+      "program": 2,
+      "slots": 70,
+      "segments": 9,
+      "generic_slots": 1,
+      "hand_over_points": 0
+    },
+    {
+      "image": 1,
+      "entry": 112,
+      "program": 3,
+      "slots": 83,
+      "segments": 9,
+      "generic_slots": 1,
+      "hand_over_points": 0
+    },
+    {
+      "image": 1,
+      "entry": 128,
+      "program": 4,
+      "slots": 70,
+      "segments": 9,
+      "generic_slots": 1,
+      "hand_over_points": 0
+    },
+    {
+      "image": 1,
+      "entry": 144,
+      "program": 5,
+      "slots": 83,
+      "segments": 9,
+      "generic_slots": 1,
+      "hand_over_points": 0
+    },
+    {
+      "image": 1,
+      "entry": 160,
+      "program": 6,
+      "slots": 161,
+      "segments": 35,
+      "generic_slots": 16,
+      "hand_over_points": 0
+    },
+    {
+      "image": 1,
+      "entry": 176,
+      "same_as_program": 0
+    },
+    {
+      "image": 1,
+      "entry": 192,
+      "program": 7,
+      "slots": 110,
+      "segments": 8,
+      "generic_slots": 1,
+      "hand_over_points": 0
+    },
+    {
+      "image": 1,
+      "entry": 208,
+      "program": 8,
+      "slots": 15,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 1,
+      "entry": 224,
+      "program": 9,
+      "slots": 13,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 1,
+      "entry": 240,
+      "program": 10,
+      "slots": 11,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 2,
+      "entry": 0,
+      "same_as_program": 0
+    },
+    {
+      "image": 2,
+      "entry": 16,
+      "same_as_program": 0
+    },
+    {
+      "image": 2,
+      "entry": 32,
+      "same_as_program": 0
+    },
+    {
+      "image": 2,
+      "entry": 48,
+      "program": 11,
+      "slots": 14,
+      "segments": 2,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 2,
+      "entry": 64,
+      "same_as_program": 0
+    },
+    {
+      "image": 2,
+      "entry": 80,
+      "same_as_program": 0
+    },
+    {
+      "image": 2,
+      "entry": 96,
+      "program": 12,
+      "slots": 413,
+      "segments": 61,
+      "generic_slots": 2,
+      "hand_over_points": 1
+    },
+    {
+      "image": 2,
+      "entry": 112,
+      "program": 13,
+      "slots": 436,
+      "segments": 61,
+      "generic_slots": 2,
+      "hand_over_points": 1
+    },
+    {
+      "image": 2,
+      "entry": 128,
+      "program": 14,
+      "slots": 73,
+      "segments": 9,
+      "generic_slots": 1,
+      "hand_over_points": 0
+    },
+    {
+      "image": 2,
+      "entry": 144,
+      "program": 15,
+      "slots": 86,
+      "segments": 9,
+      "generic_slots": 1,
+      "hand_over_points": 0
+    },
+    {
+      "image": 2,
+      "entry": 160,
+      "program": 16,
+      "slots": 161,
+      "segments": 35,
+      "generic_slots": 16,
+      "hand_over_points": 0
+    },
+    {
+      "image": 2,
+      "entry": 176,
+      "same_as_program": 0
+    },
+    {
+      "image": 2,
+      "entry": 192,
+      "program": 17,
+      "slots": 112,
+      "segments": 8,
+      "generic_slots": 1,
+      "hand_over_points": 1
+    },
+    {
+      "image": 2,
+      "entry": 208,
+      "program": 18,
+      "slots": 2,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 1
+    },
+    {
+      "image": 2,
+      "entry": 224,
+      "program": 19,
+      "slots": 12,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 2,
+      "entry": 240,
+      "program": 20,
+      "slots": 10,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 3,
+      "entry": 0,
+      "same_as_program": 0
+    },
+    {
+      "image": 3,
+      "entry": 16,
+      "same_as_program": 0
+    },
+    {
+      "image": 3,
+      "entry": 32,
+      "same_as_program": 0
+    },
+    {
+      "image": 3,
+      "entry": 48,
+      "program": 21,
+      "slots": 19,
+      "segments": 2,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 3,
+      "entry": 64,
+      "same_as_program": 0
+    },
+    {
+      "image": 3,
+      "entry": 80,
+      "same_as_program": 0
+    },
+    {
+      "image": 3,
+      "entry": 96,
+      "program": 22,
+      "slots": 253,
+      "segments": 16,
+      "generic_slots": 2,
+      "hand_over_points": 0
+    },
+    {
+      "image": 3,
+      "entry": 112,
+      "program": 23,
+      "slots": 17,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 3,
+      "entry": 128,
+      "program": 24,
+      "slots": 15,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 3,
+      "entry": 144,
+      "program": 25,
+      "slots": 13,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 3,
+      "entry": 160,
+      "program": 26,
+      "slots": 11,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 3,
+      "entry": 176,
+      "program": 27,
+      "slots": 9,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 3,
+      "entry": 192,
+      "program": 28,
+      "slots": 7,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 3,
+      "entry": 208,
+      "program": 29,
+      "slots": 5,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 3,
+      "entry": 224,
+      "program": 30,
+      "slots": 3,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 3,
+      "entry": 240,
+      "program": 31,
+      "slots": 252,
+      "segments": 15,
+      "generic_slots": 2,
+      "hand_over_points": 0
+    },
+    {
+      "image": 4,
+      "entry": 0,
+      "same_as_program": 0
+    },
+    {
+      "image": 4,
+      "entry": 16,
+      "same_as_program": 0
+    },
+    {
+      "image": 4,
+      "entry": 32,
+      "same_as_program": 0
+    },
+    {
+      "image": 4,
+      "entry": 48,
+      "program": 32,
+      "slots": 15,
+      "segments": 2,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 4,
+      "entry": 64,
+      "same_as_program": 0
+    },
+    {
+      "image": 4,
+      "entry": 80,
+      "same_as_program": 0
+    },
+    {
+      "image": 4,
+      "entry": 96,
+      "program": 33,
+      "slots": 97,
+      "segments": 17,
+      "generic_slots": 1,
+      "hand_over_points": 0
+    },
+    {
+      "image": 4,
+      "entry": 112,
+      "program": 34,
+      "slots": 121,
+      "segments": 19,
+      "generic_slots": 1,
+      "hand_over_points": 0
+    },
+    {
+      "image": 4,
+      "entry": 128,
+      "program": 35,
+      "slots": 13,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 4,
+      "entry": 144,
+      "program": 36,
+      "slots": 11,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 4,
+      "entry": 160,
+      "program": 37,
+      "slots": 9,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 4,
+      "entry": 176,
+      "program": 38,
+      "slots": 7,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 4,
+      "entry": 192,
+      "program": 39,
+      "slots": 5,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 4,
+      "entry": 208,
+      "program": 40,
+      "slots": 3,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 4,
+      "entry": 224,
+      "program": 41,
+      "slots": 96,
+      "segments": 16,
+      "generic_slots": 1,
+      "hand_over_points": 0
+    },
+    {
+      "image": 4,
+      "entry": 240,
+      "program": 42,
+      "slots": 94,
+      "segments": 16,
+      "generic_slots": 1,
+      "hand_over_points": 0
+    },
+    {
+      "image": 5,
+      "entry": 0,
+      "same_as_program": 0
+    },
+    {
+      "image": 5,
+      "entry": 16,
+      "program": 43,
+      "slots": 21,
+      "segments": 2,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 5,
+      "entry": 32,
+      "program": 44,
+      "slots": 56,
+      "segments": 9,
+      "generic_slots": 1,
+      "hand_over_points": 0
+    },
+    {
+      "image": 5,
+      "entry": 48,
+      "program": 45,
+      "slots": 61,
+      "segments": 9,
+      "generic_slots": 1,
+      "hand_over_points": 0
+    },
+    {
+      "image": 5,
+      "entry": 64,
+      "program": 46,
+      "slots": 19,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 5,
+      "entry": 80,
+      "program": 47,
+      "slots": 17,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 5,
+      "entry": 96,
+      "program": 48,
+      "slots": 15,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 5,
+      "entry": 112,
+      "program": 49,
+      "slots": 13,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 5,
+      "entry": 128,
+      "program": 50,
+      "slots": 11,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 5,
+      "entry": 144,
+      "program": 51,
+      "slots": 9,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 5,
+      "entry": 160,
+      "program": 52,
+      "slots": 7,
+      "segments": 1,
+      "generic_slots": 0,
+      "hand_over_points": 0
+    },
+    {
+      "image": 5,
+      "entry": 176,
+      "same_as_program": 29
+    },
+    {
+      "image": 5,
+      "entry": 192,
+      "same_as_program": 30
+    },
+    {
+      "image": 5,
+      "entry": 208,
+      "program": 53,
+      "slots": 55,
+      "segments": 8,
+      "generic_slots": 1,
+      "hand_over_points": 0
+    },
+    {
+      "image": 5,
+      "entry": 224,
+      "program": 54,
+      "slots": 53,
+      "segments": 8,
+      "generic_slots": 1,
+      "hand_over_points": 0
+    },
+    {
+      "image": 5,
+      "entry": 240,
+      "program": 55,
+      "slots": 51,
+      "segments": 8,
+      "generic_slots": 1,
+      "hand_over_points": 0
+    }
+  ],
+  "programs": 56,
+  "slots": 3417,
+  "segments": 441,
+  "generic_slots": 57,
+  "hand_over_points": 4,
+  "clamps": 1676,
+  "clamps_skipped": 924,
+  "input_elf_sha256": "fb5b4d3f6d74384cee9da4c8b954b40a0205da0a9ae7db9e68d670156f5e706f",
+  "programs_inc_sha256": "90c88f4fedf66dc25664203e843caac73964f48e476bdc51f8a40f65b42db4ac"
+}

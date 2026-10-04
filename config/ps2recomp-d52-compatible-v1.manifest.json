@@ -1,0 +1,4305 @@
+{
+  "schema_version": 1,
+  "manifest_name": "ps2recomp-d52-compatible-v1",
+  "purpose": "Classify the clean compatible PS2Recomp reconstruction against cf9d22b at zero-context hunk granularity. This reconstruction is not asserted to be the historical d52 dirty tree.",
+  "comparison": {
+    "base_commit": "cf9d22b9793ab0e0591c7c23e6a50bba07fd393b",
+    "candidate_commit": "3edaba449a3c5cba39d0d907a02b006809ed22ae",
+    "candidate_tree": "b1804608ed1925a2fd246e0ce1e19af946aad227",
+    "candidate_patch_sha256": "4a719642928c616733992fef669d46c4e589e30a298b660d07c61fba53fe8ba7",
+    "diff_format": "git diff --unified=0 cf9d22b9793ab0e0591c7c23e6a50bba07fd393b 3edaba449a3c5cba39d0d907a02b006809ed22ae",
+    "expected_hunk_count": 304
+  },
+  "categories": [
+    "required by d52 consumer contract",
+    "required by ABI 4",
+    "required by existing EE/R5900/COP1/COP2/VU semantics",
+    "required by an existing test",
+    "product-independent tooling",
+    "later P3/F7-only",
+    "uncertain"
+  ],
+  "dispositions": [
+    "retained",
+    "excluded",
+    "compile-excluded"
+  ],
+  "candidate_construction_evidence": [
+    {
+      "commit": "30c4002d0b7509c235aa0079ffffe11475c81cfe",
+      "subject": "RRV d52-compatible PS2Recomp producer v1 candidate (unclassified)"
+    },
+    {
+      "commit": "bc57581a6f1702db4e24e9c401587adb4ee80cf7",
+      "subject": "m0r: add ABI4 field-only producer profile"
+    },
+    {
+      "commit": "69077d85a1a6ebf927d3d4207734a3b865e1fdf8",
+      "subject": "m0r: pin compatible producer source dependencies"
+    },
+    {
+      "commit": "df1eb64619a97c0a3c535bf25c073308de58cb56",
+      "subject": "m0r: exclude post-d52 P3 producer artifacts"
+    },
+    {
+      "commit": "206b040f7e853622e031b12a6d49cd0d2db30d21",
+      "subject": "runtime: add field-only headless diagnostic presentation"
+    },
+    {
+      "commit": "d2d6820913a872b920ad979ee064f43c5f98e62e",
+      "subject": "RRV d52-compatible PS2Recomp producer v1 (content-addressed promotion with headless diagnostic)"
+    },
+    {
+      "commit": "33b232a824dbd1bd9f2aa8cfd7690c771c9422d2",
+      "subject": "runtime: preserve diagnostic host cadence without a display"
+    },
+    {
+      "commit": "fd1505eb72a272186b327e222743d6c5f7b4f61b",
+      "subject": "RRV d52-compatible PS2Recomp producer v1 (content-addressed promotion with cadence-controlled headless diagnostic)"
+    },
+    {
+      "commit": "27bd7b42ba43b753cb114a2ba78d7f04cfda623b",
+      "subject": "RRV d52-compatible PS2Recomp producer v1"
+    },
+    {
+      "commit": "b23efd1f6721116b1be6711cc6f939aa8198ef17",
+      "subject": "RRV d52-compatible PS2Recomp producer v1 (M1 portable SDL direct-presentation host injection)"
+    },
+    {
+      "commit": "3edaba449a3c5cba39d0d907a02b006809ed22ae",
+      "subject": "RRV d52-compatible PS2Recomp producer v1 (serialized direct capture and SDL product input injection)"
+    }
+  ],
+  "known_later_p3_f7_exclusions": [
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "symbol": "HookUpload::firstChunkOfTransfer",
+      "historical_commit": "0e2ce7b0b20f3fb5e8ed4a43323549fe92cb824c",
+      "category": "later P3/F7-only",
+      "disposition": "excluded",
+      "candidate_presence": false,
+      "reason": "Later P3 upload-provenance field. It is physically absent from the candidate and must not be restored with a compatibility shim."
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_gs_gpu.h",
+      "symbol": "m_colclamp",
+      "historical_commit": "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+      "category": "later P3/F7-only",
+      "disposition": "excluded",
+      "candidate_presence": false,
+      "reason": "Later P3 exact COLCLAMP producer state is physically absent from the candidate."
+    },
+    {
+      "files": [
+        "ps2xRuntime/src/lib/ps2_memory.cpp",
+        "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp",
+        "ps2xRuntime/src/lib/ps2_vu1.cpp"
+      ],
+      "symbols": [
+        "rrvNoteP3Boundary",
+        "RRV_P3_VIF_DUMP",
+        "RRV_P3_TOPS_DIAG",
+        "RRV_P3_VU_DUMP",
+        "RRV_P3_BOUNDARY_DIAG"
+      ],
+      "historical_commit": "dfb26ad1aaa1e818b22c144ca65a1621ea3fb085",
+      "category": "later P3/F7-only",
+      "disposition": "excluded",
+      "candidate_presence": false,
+      "reason": "Post-d52 P3 renderer diagnostics are physically absent from the candidate."
+    }
+  ],
+  "field_only_rule": {
+    "macro": "PS2X_RRV_FIELD_ONLY",
+    "required_behavior": "The ABI-4 producer uses PCSX2 field mode and does not construct or link IR or FullFrame paths.",
+    "manifest_interpretation": "A compile-excluded hunk is retained in compatible source for provenance but omitted by the field-only compilation profile. It is not product behavior."
+  },
+  "path3_disambiguation": {
+    "term": "PATH3",
+    "classification": "Existing PS2 GIF DMA behavior and its phase39 diagnostics are not P3 renderer work. Retained PATH3 hunks are classified as semantics or product-independent tooling, never as later P3/F7-only merely by name."
+  },
+  "hunks": [
+    {
+      "file": "CMakeLists.txt",
+      "old_start": 20,
+      "new_start": 21,
+      "header": "20,0 +21,3 @@ option(PS2X_BUILD_STUDIO \"Build ps2xStudio\" ON)",
+      "category": "required by ABI 4",
+      "disposition": "retained",
+      "evidence": [
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "PS2X_RRV_FIELD_ONLY selects the ABI-4 field-only producer",
+      "id": "CMakeLists.txt:20->21"
+    },
+    {
+      "file": "CMakeLists.txt",
+      "old_start": 43,
+      "new_start": 46,
+      "header": "43 +46 @@ if(PS2X_IS_ARM_TARGET)",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "69077d85a1a6ebf927d3d4207734a3b865e1fdf8"
+      ],
+      "reason": "immutable source dependency pin/build configuration",
+      "id": "CMakeLists.txt:43->46"
+    },
+    {
+      "file": "ps2xAnalyzer/CMakeLists.txt",
+      "old_start": 12,
+      "new_start": 12,
+      "header": "12 +12 @@ FetchContent_Declare(",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "69077d85a1a6ebf927d3d4207734a3b865e1fdf8"
+      ],
+      "reason": "immutable source dependency pin/build configuration",
+      "id": "ps2xAnalyzer/CMakeLists.txt:12->12"
+    },
+    {
+      "file": "ps2xRecomp/CMakeLists.txt",
+      "old_start": 15,
+      "new_start": 15,
+      "header": "15 +15 @@ FetchContent_Declare(",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "69077d85a1a6ebf927d3d4207734a3b865e1fdf8"
+      ],
+      "reason": "immutable source dependency pin/build configuration",
+      "id": "ps2xRecomp/CMakeLists.txt:15->15"
+    },
+    {
+      "file": "ps2xRecomp/CMakeLists.txt",
+      "old_start": 23,
+      "new_start": 23,
+      "header": "23 +23 @@ FetchContent_Declare(",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "69077d85a1a6ebf927d3d4207734a3b865e1fdf8"
+      ],
+      "reason": "immutable source dependency pin/build configuration",
+      "id": "ps2xRecomp/CMakeLists.txt:23->23"
+    },
+    {
+      "file": "ps2xRecomp/CMakeLists.txt",
+      "old_start": 30,
+      "new_start": 30,
+      "header": "30 +30 @@ FetchContent_Declare(",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "69077d85a1a6ebf927d3d4207734a3b865e1fdf8"
+      ],
+      "reason": "immutable source dependency pin/build configuration",
+      "id": "ps2xRecomp/CMakeLists.txt:30->30"
+    },
+    {
+      "file": "ps2xRecomp/CMakeLists.txt",
+      "old_start": 37,
+      "new_start": 37,
+      "header": "37 +37 @@ FetchContent_Declare(",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "69077d85a1a6ebf927d3d4207734a3b865e1fdf8"
+      ],
+      "reason": "immutable source dependency pin/build configuration",
+      "id": "ps2xRecomp/CMakeLists.txt:37->37"
+    },
+    {
+      "file": "ps2xRecomp/CMakeLists.txt",
+      "old_start": 44,
+      "new_start": 44,
+      "header": "44 +44 @@ FetchContent_Declare(",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "69077d85a1a6ebf927d3d4207734a3b865e1fdf8"
+      ],
+      "reason": "immutable source dependency pin/build configuration",
+      "id": "ps2xRecomp/CMakeLists.txt:44->44"
+    },
+    {
+      "file": "ps2xRecomp/CMakeLists.txt",
+      "old_start": 62,
+      "new_start": 62,
+      "header": "62 +62 @@ FetchContent_Declare(",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "69077d85a1a6ebf927d3d4207734a3b865e1fdf8"
+      ],
+      "reason": "immutable source dependency pin/build configuration",
+      "id": "ps2xRecomp/CMakeLists.txt:62->62"
+    },
+    {
+      "file": "ps2xRecomp/src/lib/code_generator.cpp",
+      "old_start": 1824,
+      "new_start": 1824,
+      "header": "1824,4 +1824,6 @@ namespace ps2recomp",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRecomp/src/lib/code_generator.cpp:1824->1824"
+    },
+    {
+      "file": "ps2xRecomp/src/lib/code_generator.cpp",
+      "old_start": 1829,
+      "new_start": 1831,
+      "header": "1829 +1831,5 @@ namespace ps2recomp",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRecomp/src/lib/code_generator.cpp:1829->1831"
+    },
+    {
+      "file": "ps2xRecomp/src/lib/code_generator.cpp",
+      "old_start": 1847,
+      "new_start": 1853,
+      "header": "1847 +1853,4 @@ namespace ps2recomp",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRecomp/src/lib/code_generator.cpp:1847->1853"
+    },
+    {
+      "file": "ps2xRecomp/src/lib/code_generator.cpp",
+      "old_start": 2567,
+      "new_start": 2576,
+      "header": "2567 +2576,11 @@ namespace ps2recomp",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRecomp/src/lib/code_generator.cpp:2567->2576"
+    },
+    {
+      "file": "ps2xRecomp/src/lib/code_generator.cpp",
+      "old_start": 2569,
+      "new_start": 2588,
+      "header": "2569 +2588,16 @@ namespace ps2recomp",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRecomp/src/lib/code_generator.cpp:2569->2588"
+    },
+    {
+      "file": "ps2xRecomp/src/lib/code_generator.cpp",
+      "old_start": 3599,
+      "new_start": 3634,
+      "header": "3599,0 +3634 @@ namespace ps2recomp",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRecomp/src/lib/code_generator.cpp:3599->3634"
+    },
+    {
+      "file": "ps2xRecomp/src/lib/code_generator.cpp",
+      "old_start": 3601,
+      "new_start": 3637,
+      "header": "3601,0 +3637,2 @@ namespace ps2recomp",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRecomp/src/lib/code_generator.cpp:3601->3637"
+    },
+    {
+      "file": "ps2xRecomp/src/lib/code_generator.cpp",
+      "old_start": 3604,
+      "new_start": 3641,
+      "header": "3604,2 +3641,5 @@ namespace ps2recomp",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRecomp/src/lib/code_generator.cpp:3604->3641"
+    },
+    {
+      "file": "ps2xRecomp/src/lib/code_generator.cpp",
+      "old_start": 3612,
+      "new_start": 3653,
+      "header": "3612,0 +3653 @@ namespace ps2recomp",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRecomp/src/lib/code_generator.cpp:3612->3653"
+    },
+    {
+      "file": "ps2xRecomp/src/lib/code_generator.cpp",
+      "old_start": 3614,
+      "new_start": 3656,
+      "header": "3614,0 +3656,2 @@ namespace ps2recomp",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRecomp/src/lib/code_generator.cpp:3614->3656"
+    },
+    {
+      "file": "ps2xRecomp/src/lib/code_generator.cpp",
+      "old_start": 3617,
+      "new_start": 3660,
+      "header": "3617,2 +3660,5 @@ namespace ps2recomp",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRecomp/src/lib/code_generator.cpp:3617->3660"
+    },
+    {
+      "file": "ps2xRecomp/src/lib/code_generator.cpp",
+      "old_start": 3625,
+      "new_start": 3672,
+      "header": "3625,0 +3672 @@ namespace ps2recomp",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRecomp/src/lib/code_generator.cpp:3625->3672"
+    },
+    {
+      "file": "ps2xRecomp/src/lib/code_generator.cpp",
+      "old_start": 3627,
+      "new_start": 3675,
+      "header": "3627,0 +3675,2 @@ namespace ps2recomp",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRecomp/src/lib/code_generator.cpp:3627->3675"
+    },
+    {
+      "file": "ps2xRecomp/src/lib/code_generator.cpp",
+      "old_start": 3629,
+      "new_start": 3678,
+      "header": "3629,2 +3678,5 @@ namespace ps2recomp",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRecomp/src/lib/code_generator.cpp:3629->3678"
+    },
+    {
+      "file": "ps2xRuntime/CMakeLists.txt",
+      "old_start": 7,
+      "new_start": 8,
+      "header": "7,0 +8,5 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host input/platform build wiring",
+      "id": "ps2xRuntime/CMakeLists.txt:7->8"
+    },
+    {
+      "file": "ps2xRuntime/CMakeLists.txt",
+      "old_start": 59,
+      "new_start": 64,
+      "header": "59 +64 @@ else()",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host input/platform build wiring",
+      "id": "ps2xRuntime/CMakeLists.txt:59->64"
+    },
+    {
+      "file": "ps2xRuntime/CMakeLists.txt",
+      "old_start": 183,
+      "new_start": 189,
+      "header": "183,0 +189,11 @@ add_library(ps2_runtime STATIC",
+      "category": "required by ABI 4",
+      "disposition": "retained",
+      "evidence": [
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "field-only runtime compile definition and ABI-4 extension integration",
+      "id": "ps2xRuntime/CMakeLists.txt:183->189"
+    },
+    {
+      "file": "ps2xRuntime/CMakeLists.txt",
+      "old_start": 240,
+      "new_start": 257,
+      "header": "240,0 +257,16 @@ target_include_directories(ps2_runtime PUBLIC",
+      "category": "required by ABI 4",
+      "disposition": "retained",
+      "evidence": [
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "field-only runtime compile definition and ABI-4 extension integration",
+      "id": "ps2xRuntime/CMakeLists.txt:240->257"
+    },
+    {
+      "file": "ps2xRuntime/CMakeLists.txt",
+      "old_start": 241,
+      "new_start": 274,
+      "header": "241,0 +274,5 @@ target_link_libraries(ps2_runtime PUBLIC ps2_host_backend)",
+      "category": "required by ABI 4",
+      "disposition": "retained",
+      "evidence": [
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "field-only runtime compile definition and ABI-4 extension integration",
+      "id": "ps2xRuntime/CMakeLists.txt:241->274"
+    },
+    {
+      "file": "ps2xRuntime/include/ps2_runtime.h",
+      "old_start": 8,
+      "new_start": 9,
+      "header": "8,0 +9,2 @@",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "path-watch/function-address diagnostics",
+      "id": "ps2xRuntime/include/ps2_runtime.h:8->9"
+    },
+    {
+      "file": "ps2xRuntime/include/ps2_runtime.h",
+      "old_start": 288,
+      "new_start": 291,
+      "header": "288,0 +291,55 @@ inline bool ps2PathWatchIntersects(uint32_t writeAddr, uint32_t writeSize)",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "path-watch/function-address diagnostics",
+      "id": "ps2xRuntime/include/ps2_runtime.h:288->291"
+    },
+    {
+      "file": "ps2xRuntime/include/ps2_runtime.h",
+      "old_start": 341,
+      "new_start": 399,
+      "header": "341,0 +399,6 @@ inline void ps2TraceGuestWrite(uint8_t *rdram,",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "path-watch/function-address diagnostics",
+      "id": "ps2xRuntime/include/ps2_runtime.h:341->399"
+    },
+    {
+      "file": "ps2xRuntime/include/ps2_runtime.h",
+      "old_start": 539,
+      "new_start": 603,
+      "header": "539,0 +603,6 @@ public:",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "FullFrame API/state behind PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/include/ps2_runtime.h:539->603"
+    },
+    {
+      "file": "ps2xRuntime/include/ps2_runtime.h",
+      "old_start": 542,
+      "new_start": 611,
+      "header": "542 +611,3 @@ public:",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "FullFrame API/state behind PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/include/ps2_runtime.h:542->611"
+    },
+    {
+      "file": "ps2xRuntime/include/ps2_runtime.h",
+      "old_start": 608,
+      "new_start": 680,
+      "header": "608,0 +680,13 @@ public:",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "path-watch/function-address diagnostics",
+      "id": "ps2xRuntime/include/ps2_runtime.h:608->680"
+    },
+    {
+      "file": "ps2xRuntime/include/ps2_runtime.h",
+      "old_start": 767,
+      "new_start": 852,
+      "header": "767,0 +852,5 @@ private:",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "FullFrame API/state behind PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/include/ps2_runtime.h:767->852"
+    },
+    {
+      "file": "ps2xRuntime/include/ps2_runtime_macros.h",
+      "old_start": 551,
+      "new_start": 552,
+      "header": "551,0 +552,68 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRuntime/include/ps2_runtime_macros.h:551->552"
+    },
+    {
+      "file": "ps2xRuntime/include/ps2_runtime_macros.h",
+      "old_start": 553,
+      "new_start": 621,
+      "header": "553,3 +621,8 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRuntime/include/ps2_runtime_macros.h:553->621"
+    },
+    {
+      "file": "ps2xRuntime/include/ps2_runtime_macros.h",
+      "old_start": 557,
+      "new_start": 630,
+      "header": "557 +630,4 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRuntime/include/ps2_runtime_macros.h:557->630"
+    },
+    {
+      "file": "ps2xRuntime/include/ps2_runtime_macros.h",
+      "old_start": 571,
+      "new_start": 647,
+      "header": "571 +647 @@ inline __m128i ps2_u64_to_epi64_pair(uint64_t value)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "c0a4e887b471b94e3643ca09499dc18776b97379",
+        "ps2recomp-recompiler-r5900-math-correctness.patch"
+      ],
+      "reason": "R5900 COP1 and VU operation lowering/helpers",
+      "id": "ps2xRuntime/include/ps2_runtime_macros.h:571->647"
+    },
+    {
+      "file": "ps2xRuntime/include/ps2_syscalls.h",
+      "old_start": 10,
+      "new_start": 11,
+      "header": "10,0 +11 @@",
+      "category": "required by d52 consumer contract",
+      "disposition": "retained",
+      "evidence": [
+        "bb33c9a57c93c03c4397876dee8458ac9062dfd5"
+      ],
+      "reason": "d52-era guest boot argc/argv contract",
+      "id": "ps2xRuntime/include/ps2_syscalls.h:10->11"
+    },
+    {
+      "file": "ps2xRuntime/include/ps2_syscalls.h",
+      "old_start": 32,
+      "new_start": 34,
+      "header": "32,0 +34,3 @@ namespace ps2_syscalls",
+      "category": "required by d52 consumer contract",
+      "disposition": "retained",
+      "evidence": [
+        "bb33c9a57c93c03c4397876dee8458ac9062dfd5"
+      ],
+      "reason": "d52-era guest boot argc/argv contract",
+      "id": "ps2xRuntime/include/ps2_syscalls.h:32->34"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/host_pad.h",
+      "old_start": 0,
+      "new_start": 1,
+      "header": "0,0 +1,72 @@",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/include/runtime/host_pad.h:0->1"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_gs_gpu.h",
+      "old_start": 303,
+      "new_start": 304,
+      "header": "303,0 +304,4 @@ public:",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "FullFrame presentation fields or later P3 COLCLAMP capture are inactive in field-only mode",
+      "id": "ps2xRuntime/include/runtime/ps2_gs_gpu.h:303->304"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_gs_gpu.h",
+      "old_start": 427,
+      "new_start": 432,
+      "header": "427,0 +432,2 @@ private:",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "FullFrame presentation fields or later P3 COLCLAMP capture are inactive in field-only mode",
+      "id": "ps2xRuntime/include/runtime/ps2_gs_gpu.h:427->432"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_memory.h",
+      "old_start": 59,
+      "new_start": 59,
+      "header": "59 +59,18 @@ struct RrvGifPathLatencyConfig",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "54478d554f05baa7c24870127b56fa19471b5af2",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "08d51ef7136a9a43ea804413c55528b431ddc8c3"
+      ],
+      "reason": "GIF frame flush, timers, or guest CD callback semantics",
+      "id": "ps2xRuntime/include/runtime/ps2_memory.h:59->59"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_memory.h",
+      "old_start": 540,
+      "new_start": 558,
+      "header": "540,0 +558,27 @@ public:",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "54478d554f05baa7c24870127b56fa19471b5af2",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "08d51ef7136a9a43ea804413c55528b431ddc8c3"
+      ],
+      "reason": "GIF frame flush, timers, or guest CD callback semantics",
+      "id": "ps2xRuntime/include/runtime/ps2_memory.h:540->558"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_memory.h",
+      "old_start": 596,
+      "new_start": 641,
+      "header": "596,0 +641,18 @@ public:",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "54478d554f05baa7c24870127b56fa19471b5af2",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "08d51ef7136a9a43ea804413c55528b431ddc8c3"
+      ],
+      "reason": "GIF frame flush, timers, or guest CD callback semantics",
+      "id": "ps2xRuntime/include/runtime/ps2_memory.h:596->641"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_pad.h",
+      "old_start": 5,
+      "new_start": 6,
+      "header": "5,0 +6,3 @@",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/include/runtime/ps2_pad.h:5->6"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_pad.h",
+      "old_start": 10,
+      "new_start": 13,
+      "header": "10,2 +13,12 @@ public:",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/include/runtime/ps2_pad.h:10->13"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_pad.h",
+      "old_start": 13,
+      "new_start": 26,
+      "header": "13 +26,8 @@ public:",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/include/runtime/ps2_pad.h:13->26"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_pad.h",
+      "old_start": 15,
+      "new_start": 36,
+      "header": "15,0 +36,4 @@ public:",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/include/runtime/ps2_pad.h:15->36"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_vu1.h",
+      "old_start": 4,
+      "new_start": 5,
+      "header": "4,0 +5 @@",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU Q-latency/EFU and VU runtime interfaces",
+      "id": "ps2xRuntime/include/runtime/ps2_vu1.h:4->5"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_vu1.h",
+      "old_start": 11,
+      "new_start": 13,
+      "header": "11,0 +13,5 @@ class PS2Memory;",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU Q-latency/EFU and VU runtime interfaces",
+      "id": "ps2xRuntime/include/runtime/ps2_vu1.h:11->13"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_vu1.h",
+      "old_start": 53,
+      "new_start": 60,
+      "header": "53,0 +60,2 @@ public:",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU Q-latency/EFU and VU runtime interfaces",
+      "id": "ps2xRuntime/include/runtime/ps2_vu1.h:53->60"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_vu1.h",
+      "old_start": 96,
+      "new_start": 104,
+      "header": "96 +104,10 @@ private:",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU Q-latency/EFU and VU runtime interfaces",
+      "id": "ps2xRuntime/include/runtime/ps2_vu1.h:96->104"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_vu1.h",
+      "old_start": 99,
+      "new_start": 115,
+      "header": "99 +115,0 @@ private:",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU Q-latency/EFU and VU runtime interfaces",
+      "id": "ps2xRuntime/include/runtime/ps2_vu1.h:99->115"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_vu1.h",
+      "old_start": 100,
+      "new_start": 117,
+      "header": "100,0 +117,2 @@ private:",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU Q-latency/EFU and VU runtime interfaces",
+      "id": "ps2xRuntime/include/runtime/ps2_vu1.h:100->117"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_vu1.h",
+      "old_start": 136,
+      "new_start": 155,
+      "header": "136,0 +155,26 @@ private:",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU Q-latency/EFU and VU runtime interfaces",
+      "id": "ps2xRuntime/include/runtime/ps2_vu1.h:136->155"
+    },
+    {
+      "file": "ps2xRuntime/include/runtime/ps2_vu1.h",
+      "old_start": 153,
+      "new_start": 198,
+      "header": "153,0 +198,43 @@ private:",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU Q-latency/EFU and VU runtime interfaces",
+      "id": "ps2xRuntime/include/runtime/ps2_vu1.h:153->198"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp",
+      "old_start": 72,
+      "new_start": 73,
+      "header": "72,0 +73,22 @@ namespace ps2_stubs",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "54478d554f05baa7c24870127b56fa19471b5af2",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "08d51ef7136a9a43ea804413c55528b431ddc8c3"
+      ],
+      "reason": "GIF frame flush, timers, or guest CD callback semantics",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp:72->73"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp",
+      "old_start": 82,
+      "new_start": 104,
+      "header": "82,7 +104,2 @@ namespace ps2_stubs",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "54478d554f05baa7c24870127b56fa19471b5af2",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "08d51ef7136a9a43ea804413c55528b431ddc8c3"
+      ],
+      "reason": "GIF frame flush, timers, or guest CD callback semantics",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/CD.cpp:82->104"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp",
+      "old_start": 5,
+      "new_start": 6,
+      "header": "5,0 +6 @@",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "Renderer-IR guest-frame hook guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp:5->6"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp",
+      "old_start": 6,
+      "new_start": 8,
+      "header": "6,0 +8 @@",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "Renderer-IR guest-frame hook guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp:6->8"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp",
+      "old_start": 1815,
+      "new_start": 1818,
+      "header": "1815,0 +1818,11 @@ namespace ps2_stubs",
+      "category": "required by ABI 4",
+      "disposition": "retained",
+      "evidence": [
+        "54478d554f05baa7c24870127b56fa19471b5af2",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "field boundary handoff to the ABI-4 producer",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp:1815->1818"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp",
+      "old_start": 1838,
+      "new_start": 1852,
+      "header": "1838,0 +1852 @@ namespace ps2_stubs",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "Renderer-IR guest-frame hook guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp:1838->1852"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp",
+      "old_start": 1844,
+      "new_start": 1859,
+      "header": "1844,0 +1859 @@ namespace ps2_stubs",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "Renderer-IR guest-frame hook guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/GS.cpp:1844->1859"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 2,
+      "new_start": 3,
+      "header": "2,0 +3,4 @@",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:2->3"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 9,
+      "new_start": 14,
+      "header": "9,0 +14 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:9->14"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 41,
+      "new_start": 47,
+      "header": "41,0 +47,2 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:41->47"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 51,
+      "new_start": 59,
+      "header": "51,0 +59,2 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:51->59"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 55,
+      "new_start": 65,
+      "header": "55,0 +65 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:55->65"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 59,
+      "new_start": 69,
+      "header": "59,2 +69,3 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:59->69"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 63,
+      "new_start": 75,
+      "header": "63,0 +75,4 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:63->75"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 68,
+      "new_start": 83,
+      "header": "68 +83 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:68->83"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 70,
+      "new_start": 85,
+      "header": "70,5 +85,3 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:70->85"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 76,
+      "new_start": 89,
+      "header": "76 +89 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:76->89"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 78,
+      "new_start": 91,
+      "header": "78,8 +91,8 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:78->91"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 88,
+      "new_start": 101,
+      "header": "88 +101 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:88->101"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 90,
+      "new_start": 103,
+      "header": "90,40 +103,3 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:90->103"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 132,
+      "new_start": 108,
+      "header": "132 +108,2 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:132->108"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 134,
+      "new_start": 111,
+      "header": "134,50 +111,26 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:134->111"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 214,
+      "new_start": 168,
+      "header": "214,0 +168,16 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:214->168"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 226,
+      "new_start": 196,
+      "header": "226,0 +196,8 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:226->196"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 233,
+      "new_start": 210,
+      "header": "233 +210,2 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:233->210"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 285,
+      "new_start": 263,
+      "header": "285,2 +263 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:285->263"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 288,
+      "new_start": 265,
+      "header": "288,5 +265,15 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:288->265"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 294,
+      "new_start": 281,
+      "header": "294 +281 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:294->281"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 296,
+      "new_start": 283,
+      "header": "296,2 +283,12 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:296->283"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 325,
+      "new_start": 321,
+      "header": "325 +321,0 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:325->321"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 336,
+      "new_start": 333,
+      "header": "336,0 +333,2 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:336->333"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 342,
+      "new_start": 339,
+      "header": "342 +339,0 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:342->339"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 353,
+      "new_start": 351,
+      "header": "353,0 +351,2 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:353->351"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 360,
+      "new_start": 358,
+      "header": "360 +358,0 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:360->358"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 371,
+      "new_start": 368,
+      "header": "371 +368,0 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:371->368"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 405,
+      "new_start": 401,
+      "header": "405 +401,0 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:405->401"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 426,
+      "new_start": 422,
+      "header": "426,4 +422,11 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:426->422"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 551,
+      "new_start": 555,
+      "header": "551,0 +555,2 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:551->555"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 576,
+      "new_start": 582,
+      "header": "576,0 +582,2 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:576->582"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 604,
+      "new_start": 610,
+      "header": "604,19 +610,0 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:604->610"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 646,
+      "new_start": 634,
+      "header": "646,2 +634,12 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:646->634"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 653,
+      "new_start": 651,
+      "header": "653,2 +651,12 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:653->651"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 668,
+      "new_start": 677,
+      "header": "668,0 +677,3 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:668->677"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 687,
+      "new_start": 699,
+      "header": "687,0 +699,3 @@ namespace ps2_stubs",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:687->699"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp",
+      "old_start": 166,
+      "new_start": 167,
+      "header": "166,0 +167,12 @@ namespace ps2_stubs",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU Q-latency/EFU and VU runtime interfaces",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/VU.cpp:166->167"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp",
+      "old_start": 2,
+      "new_start": 3,
+      "header": "2,0 +3,4 @@",
+      "category": "required by d52 consumer contract",
+      "disposition": "retained",
+      "evidence": [
+        "bb33c9a57c93c03c4397876dee8458ac9062dfd5"
+      ],
+      "reason": "d52-era guest boot argc/argv contract",
+      "id": "ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp:2->3"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp",
+      "old_start": 631,
+      "new_start": 636,
+      "header": "631,0 +636,84 @@ namespace ps2_syscalls",
+      "category": "required by d52 consumer contract",
+      "disposition": "retained",
+      "evidence": [
+        "bb33c9a57c93c03c4397876dee8458ac9062dfd5"
+      ],
+      "reason": "d52-era guest boot argc/argv contract",
+      "id": "ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp:631->636"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp",
+      "old_start": 638,
+      "new_start": 727,
+      "header": "638,0 +727 @@ namespace ps2_syscalls",
+      "category": "required by d52 consumer contract",
+      "disposition": "retained",
+      "evidence": [
+        "bb33c9a57c93c03c4397876dee8458ac9062dfd5"
+      ],
+      "reason": "d52-era guest boot argc/argv contract",
+      "id": "ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp:638->727"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp",
+      "old_start": 640,
+      "new_start": 730,
+      "header": "640,0 +730,4 @@ namespace ps2_syscalls",
+      "category": "required by d52 consumer contract",
+      "disposition": "retained",
+      "evidence": [
+        "bb33c9a57c93c03c4397876dee8458ac9062dfd5"
+      ],
+      "reason": "d52-era guest boot argc/argv contract",
+      "id": "ps2xRuntime/src/lib/Kernel/Syscalls/System.cpp:640->730"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Syscalls/System.h",
+      "old_start": 2,
+      "new_start": 3,
+      "header": "2,0 +3,3 @@",
+      "category": "required by d52 consumer contract",
+      "disposition": "retained",
+      "evidence": [
+        "bb33c9a57c93c03c4397876dee8458ac9062dfd5"
+      ],
+      "reason": "d52-era guest boot argc/argv contract",
+      "id": "ps2xRuntime/src/lib/Kernel/Syscalls/System.h:2->3"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Syscalls/System.h",
+      "old_start": 26,
+      "new_start": 30,
+      "header": "26,0 +30,3 @@ namespace ps2_syscalls",
+      "category": "required by d52 consumer contract",
+      "disposition": "retained",
+      "evidence": [
+        "bb33c9a57c93c03c4397876dee8458ac9062dfd5"
+      ],
+      "reason": "d52-era guest boot argc/argv contract",
+      "id": "ps2xRuntime/src/lib/Kernel/Syscalls/System.h:26->30"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/host_pad_gamecontroller.mm",
+      "old_start": 0,
+      "new_start": 1,
+      "header": "0,0 +1,332 @@",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/host_pad_gamecontroller.mm:0->1"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 11,
+      "new_start": 12,
+      "header": "11,0 +12 @@",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:11->12"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 12,
+      "new_start": 14,
+      "header": "12,0 +14 @@",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:12->14"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 497,
+      "new_start": 500,
+      "header": "497,0 +500 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:497->500"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 498,
+      "new_start": 502,
+      "header": "498,0 +502 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:498->502"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 546,
+      "new_start": 551,
+      "header": "546,0 +551,2 @@ void GS::reset()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:546->551"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1081,
+      "new_start": 1088,
+      "header": "1081,0 +1088 @@ void GS::flushPendingTiles()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1081->1088"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1082,
+      "new_start": 1090,
+      "header": "1082,0 +1090 @@ void GS::flushPendingTiles()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1082->1090"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1087,
+      "new_start": 1095,
+      "header": "1087,2 +1095,5 @@ void GS::presentLatchDrain()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1087->1095"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1093,
+      "new_start": 1105,
+      "header": "1093,0 +1105 @@ void GS::presentLatchDrain()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1093->1105"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1094,
+      "new_start": 1107,
+      "header": "1094,0 +1107 @@ void GS::presentLatchDrain()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1094->1107"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1169,
+      "new_start": 1182,
+      "header": "1169,2 +1182,5 @@ void GS::captureFrameClearPresentationUnlocked(const GSFrameReg &targetFrame,",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1169->1182"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1246,
+      "new_start": 1262,
+      "header": "1246,2 +1262,5 @@ void GS::captureFrameClearPresentationUnlocked(const GSFrameReg &targetFrame,",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1246->1262"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1298,
+      "new_start": 1317,
+      "header": "1298 +1317 @@ void GS::captureFrameClearPresentationUnlocked(const GSFrameReg &targetFrame,",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1298->1317"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1320,
+      "new_start": 1339,
+      "header": "1320 +1339 @@ void GS::captureFrameClearPresentationUnlocked(const GSFrameReg &targetFrame,",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1320->1339"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1337,
+      "new_start": 1356,
+      "header": "1337,2 +1356,4 @@ void GS::captureFrameClearPresentationUnlocked(const GSFrameReg &targetFrame,",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1337->1356"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1370,
+      "new_start": 1392,
+      "header": "1370,0 +1392,5 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1370->1392"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1421,
+      "new_start": 1447,
+      "header": "1421 +1447 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1421->1447"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1425,
+      "new_start": 1452,
+      "header": "1425,0 +1452 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1425->1452"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1432,
+      "new_start": 1460,
+      "header": "1432,0 +1460,4 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1432->1460"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1434,
+      "new_start": 1466,
+      "header": "1434,0 +1466 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1434->1466"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1460,
+      "new_start": 1493,
+      "header": "1460,0 +1493,2 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1460->1493"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1469,
+      "new_start": 1503,
+      "header": "1469 +1503 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1469->1503"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1482,
+      "new_start": 1515,
+      "header": "1482,15 +1515,0 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1482->1515"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1509,
+      "new_start": 1528,
+      "header": "1509 +1528 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1509->1528"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1515,
+      "new_start": 1535,
+      "header": "1515,0 +1535,28 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1515->1535"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1624,
+      "new_start": 1672,
+      "header": "1624,0 +1672,2 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1624->1672"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1626,
+      "new_start": 1676,
+      "header": "1626,0 +1676 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1626->1676"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1723,
+      "new_start": 1774,
+      "header": "1723,0 +1774,2 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1723->1774"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1725,
+      "new_start": 1778,
+      "header": "1725,0 +1778 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1725->1778"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1744,
+      "new_start": 1798,
+      "header": "1744,0 +1798,2 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1744->1798"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1746,
+      "new_start": 1802,
+      "header": "1746,0 +1802 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1746->1802"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1766,
+      "new_start": 1822,
+      "header": "1766,2 +1822,3 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1766->1822"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1824,
+      "new_start": 1882,
+      "header": "1824,0 +1882,2 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1824->1882"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 1826,
+      "new_start": 1886,
+      "header": "1826,0 +1886 @@ void GS::latchHostPresentationFrame()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:1826->1886"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 2030,
+      "new_start": 2091,
+      "header": "2030,0 +2091 @@ void GS::processGIFPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBy",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:2030->2091"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 2031,
+      "new_start": 2093,
+      "header": "2031,0 +2093 @@ void GS::processGIFPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBy",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:2031->2093"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 2040,
+      "new_start": 2102,
+      "header": "2040 +2102,5 @@ void GS::processGIFPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBy",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:2040->2102"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 2060,
+      "new_start": 2126,
+      "header": "2060,2 +2126,5 @@ void GS::processGIFPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBy",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:2060->2126"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 2064,
+      "new_start": 2134,
+      "header": "2064,0 +2134 @@ void GS::processGIFPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBy",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:2064->2134"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 2065,
+      "new_start": 2136,
+      "header": "2065,0 +2136 @@ void GS::processGIFPacket(GifPathId pathId, const uint8_t *data, uint32_t sizeBy",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:2065->2136"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3108,
+      "new_start": 3180,
+      "header": "3108,0 +3180 @@ void GS::performLocalToLocalTransfer()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3108->3180"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3112,
+      "new_start": 3185,
+      "header": "3112,0 +3185 @@ void GS::performLocalToLocalTransfer()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3112->3185"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3117,
+      "new_start": 3191,
+      "header": "3117,0 +3191 @@ void GS::performLocalToLocalTransfer()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3117->3191"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3119,
+      "new_start": 3193,
+      "header": "3119 +3193 @@ void GS::performLocalToLocalTransfer()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3119->3193"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3334,
+      "new_start": 3409,
+      "header": "3334,0 +3409 @@ void GS::vertexKick(bool drawing)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3334->3409"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3357,
+      "new_start": 3432,
+      "header": "3357 +3432 @@ void GS::vertexKick(bool drawing)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3357->3432"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3380,
+      "new_start": 3456,
+      "header": "3380,0 +3456,8 @@ void GS::vertexKick(bool drawing)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3380->3456"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3382,
+      "new_start": 3465,
+      "header": "3382 +3465 @@ void GS::vertexKick(bool drawing)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3382->3465"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3383,
+      "new_start": 3467,
+      "header": "3383,0 +3467 @@ void GS::vertexKick(bool drawing)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3383->3467"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3394,
+      "new_start": 3479,
+      "header": "3394,0 +3479 @@ void GS::vertexKick(bool drawing)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3394->3479"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3400,
+      "new_start": 3485,
+      "header": "3400 +3485,12 @@ void GS::vertexKick(bool drawing)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3400->3485"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3508,
+      "new_start": 3604,
+      "header": "3508,3 +3604,4 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3508->3604"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3523,
+      "new_start": 3620,
+      "header": "3523,2 +3620,2 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3523->3620"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3528,
+      "new_start": 3626,
+      "header": "3528,0 +3626 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3528->3626"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3533,
+      "new_start": 3632,
+      "header": "3533,0 +3632 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3533->3632"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3535,
+      "new_start": 3634,
+      "header": "3535 +3634 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3535->3634"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3984,
+      "new_start": 4084,
+      "header": "3984,0 +4084 @@ void GS::performLocalToHostToBuffer()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3984->4084"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp",
+      "old_start": 3985,
+      "new_start": 4086,
+      "header": "3985,0 +4086 @@ void GS::performLocalToHostToBuffer()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "a00abccaf99ac1c8aa625666f766f8f4ca69d42c",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame/P3 capture paths are wrapped by PS2X_RRV_FIELD_ONLY",
+      "id": "ps2xRuntime/src/lib/ps2_gs_gpu.cpp:3985->4086"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_rasterizer.cpp",
+      "old_start": 9,
+      "new_start": 10,
+      "header": "9,0 +10 @@",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR-consuming raster path is guarded from field-only build",
+      "id": "ps2xRuntime/src/lib/ps2_gs_rasterizer.cpp:9->10"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_rasterizer.cpp",
+      "old_start": 10,
+      "new_start": 12,
+      "header": "10,0 +12 @@",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR-consuming raster path is guarded from field-only build",
+      "id": "ps2xRuntime/src/lib/ps2_gs_rasterizer.cpp:10->12"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_rasterizer.cpp",
+      "old_start": 1736,
+      "new_start": 1739,
+      "header": "1736,0 +1739 @@ void GSRasterizer::flushTileCmds(GS *gs, std::vector<GSTileCmd> &cmds)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR-consuming raster path is guarded from field-only build",
+      "id": "ps2xRuntime/src/lib/ps2_gs_rasterizer.cpp:1736->1739"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_gs_rasterizer.cpp",
+      "old_start": 1867,
+      "new_start": 1871,
+      "header": "1867,0 +1871 @@ void GSRasterizer::flushIR(GS *gs)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR-consuming raster path is guarded from field-only build",
+      "id": "ps2xRuntime/src/lib/ps2_gs_rasterizer.cpp:1867->1871"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 4,
+      "new_start": 5,
+      "header": "4,0 +5,4 @@",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:4->5"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 417,
+      "new_start": 420,
+      "header": "417,33 +420,0 @@ bool gifPath3HazardEnabled()",
+      "category": "later P3/F7-only",
+      "disposition": "excluded",
+      "evidence": [
+        "df1eb64619a97c0a3c535bf25c073308de58cb56",
+        "dfb26ad1aaa1e818b22c144ca65a1621ea3fb085"
+      ],
+      "reason": "post-d52 P3 diagnostic block physically removed from compatible source",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:417->420"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 475,
+      "new_start": 447,
+      "header": "475,0 +447,10 @@ namespace",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:475->447"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 1149,
+      "new_start": 1131,
+      "header": "1149,0 +1131,47 @@ void PS2Memory::write16(uint32_t address, uint16_t value)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:1149->1131"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 1203,
+      "new_start": 1232,
+      "header": "1203,0 +1232,14 @@ void PS2Memory::write32(uint32_t address, uint32_t value)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:1203->1232"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 1205,
+      "new_start": 1248,
+      "header": "1205,0 +1248 @@ void PS2Memory::write32(uint32_t address, uint32_t value)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:1205->1248"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 1287,
+      "new_start": 1331,
+      "header": "1287,0 +1331,12 @@ void PS2Memory::write128(uint32_t address, __m128i value)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:1287->1331"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 1289,
+      "new_start": 1345,
+      "header": "1289,0 +1345 @@ void PS2Memory::write128(uint32_t address, __m128i value)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:1289->1345"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 1746,
+      "new_start": 1803,
+      "header": "1746,0 +1803,17 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:1746->1803"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 1796,
+      "new_start": 1870,
+      "header": "1796,0 +1870,9 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:1796->1870"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 2138,
+      "new_start": 2221,
+      "header": "2138,0 +2221,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:2138->2221"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 2281,
+      "new_start": 2376,
+      "header": "2281,0 +2376,19 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:2281->2376"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 2360,
+      "new_start": 2474,
+      "header": "2360,0 +2474,12 @@ bool PS2Memory::writeIORegister(uint32_t address, uint32_t value)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:2360->2474"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 2923,
+      "new_start": 3049,
+      "header": "2923,0 +3049,11 @@ void PS2Memory::flushHeldVif1AtFrameBoundary()",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:2923->3049"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 3076,
+      "new_start": 3213,
+      "header": "3076,0 +3213 @@ void PS2Memory::processPendingTransfers()",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:3076->3213"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 3114,
+      "new_start": 3252,
+      "header": "3114,0 +3252,7 @@ void PS2Memory::processPendingTransfers()",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:3114->3252"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 3370,
+      "new_start": 3515,
+      "header": "3370,0 +3515,21 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:3370->3515"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 3494,
+      "new_start": 3659,
+      "header": "3494 +3659,3 @@ uint32_t PS2Memory::readIORegister(uint32_t address)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:3494->3659"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 3496,
+      "new_start": 3663,
+      "header": "3496 +3663,3 @@ uint32_t PS2Memory::readIORegister(uint32_t address)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:3496->3663"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 3498,
+      "new_start": 3667,
+      "header": "3498 +3667,3 @@ uint32_t PS2Memory::readIORegister(uint32_t address)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:3498->3667"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_memory.cpp",
+      "old_start": 3686,
+      "new_start": 3858,
+      "header": "3686,0 +3858,180 @@ void PS2Memory::clearModifiedFlag(uint32_t address, uint32_t size)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "939eeb09d4ac656b0f7be55b80e7ce9af471d9d7",
+        "669f0c44c955e138f9b1f411e6bce2bd37f874f2",
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4"
+      ],
+      "reason": "EE VU1 stores, VIF0 MADR, DMAC/VIF/GIF and timer behavior",
+      "id": "ps2xRuntime/src/lib/ps2_memory.cpp:3686->3858"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_pad.cpp",
+      "old_start": 2,
+      "new_start": 3,
+      "header": "2,0 +3,8 @@",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/ps2_pad.cpp:2->3"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_pad.cpp",
+      "old_start": 3,
+      "new_start": 12,
+      "header": "3,0 +12,3 @@",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/ps2_pad.cpp:3->12"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_pad.cpp",
+      "old_start": 7,
+      "new_start": 18,
+      "header": "7,19 +18,4 @@ namespace",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/ps2_pad.cpp:7->18"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_pad.cpp",
+      "old_start": 28,
+      "new_start": 29,
+      "header": "31,0 +29,207 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/ps2_pad.cpp:31->29"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_pad.cpp",
+      "old_start": 30,
+      "new_start": 237,
+      "header": "33,91 +237,218 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "8bef90ba7acd6e89688e99c551ded471f00cde4c",
+        "ps2recomp-runtime-host-pad-i0-i3.patch"
+      ],
+      "reason": "host pad I0-I3 support; not a GS producer requirement",
+      "id": "ps2xRuntime/src/lib/ps2_pad.cpp:33->237"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 10,
+      "new_start": 11,
+      "header": "10,0 +11,4 @@",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:10->11"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 29,
+      "new_start": 34,
+      "header": "29,0 +34,2 @@",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:29->34"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "d2d6820913a872b920ad979ee064f43c5f98e62e"
+      ],
+      "reason": "opt-in field-only headless host diagnostic preserves CPU RGBA snapshot conversion when no display is attached; default windowed path is unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 457,
+      "new_start": 464,
+      "header": "457,0 +464,20 @@ namespace",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:457->464"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 483,
+      "new_start": 510,
+      "header": "483,0 +510,27 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:483->510"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 493,
+      "new_start": 547,
+      "header": "493,0 +547,29 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:493->547"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 498,
+      "new_start": 580,
+      "header": "498,14 +580 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:498->580"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 512,
+      "new_start": 582,
+      "header": "512,0 +582,3 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "category": "required by ABI 4",
+      "disposition": "retained",
+      "evidence": [
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "field-only presentation fetch cannot fall back to local software GS",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:512->582"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "d2d6820913a872b920ad979ee064f43c5f98e62e"
+      ],
+      "reason": "opt-in field-only headless host diagnostic preserves CPU RGBA snapshot conversion when no display is attached; default windowed path is unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 514,
+      "new_start": 586,
+      "header": "514 +586 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:514->586"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 519,
+      "new_start": 592,
+      "header": "519,0 +592,6 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:519->592"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 605,
+      "new_start": 684,
+      "header": "605,0 +684,2 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:605->684"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 607,
+      "new_start": 688,
+      "header": "607,0 +688,3 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:607->688"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 622,
+      "new_start": 705,
+      "header": "622,3 +705,16 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:622->705"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 627,
+      "new_start": 723,
+      "header": "627,2 +723,11 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:627->723"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 642,
+      "new_start": 747,
+      "header": "642,4 +747,16 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:642->747"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "d2d6820913a872b920ad979ee064f43c5f98e62e"
+      ],
+      "reason": "opt-in field-only headless host diagnostic preserves CPU RGBA snapshot conversion when no display is attached; default windowed path is unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 665,
+      "new_start": 782,
+      "header": "665 +782 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:665->782"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "d2d6820913a872b920ad979ee064f43c5f98e62e"
+      ],
+      "reason": "opt-in field-only headless host diagnostic preserves CPU RGBA snapshot conversion when no display is attached; default windowed path is unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 699,
+      "new_start": 816,
+      "header": "699 +816 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:699->816"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "d2d6820913a872b920ad979ee064f43c5f98e62e"
+      ],
+      "reason": "opt-in field-only headless host diagnostic preserves CPU RGBA snapshot conversion when no display is attached; default windowed path is unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 746,
+      "new_start": 863,
+      "header": "746 +863 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:746->863"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "d2d6820913a872b920ad979ee064f43c5f98e62e"
+      ],
+      "reason": "opt-in field-only headless host diagnostic preserves CPU RGBA snapshot conversion when no display is attached; default windowed path is unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 761,
+      "new_start": 878,
+      "header": "761 +878 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:761->878"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "d2d6820913a872b920ad979ee064f43c5f98e62e"
+      ],
+      "reason": "opt-in field-only headless host diagnostic preserves CPU RGBA snapshot conversion when no display is attached; default windowed path is unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 778,
+      "new_start": 895,
+      "header": "778 +895 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:778->895"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "d2d6820913a872b920ad979ee064f43c5f98e62e"
+      ],
+      "reason": "opt-in field-only headless host diagnostic preserves CPU RGBA snapshot conversion when no display is attached; default windowed path is unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 804,
+      "new_start": 921,
+      "header": "804 +921 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:804->921"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "d2d6820913a872b920ad979ee064f43c5f98e62e"
+      ],
+      "reason": "opt-in field-only headless host diagnostic preserves CPU RGBA snapshot conversion when no display is attached; default windowed path is unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 824,
+      "new_start": 941,
+      "header": "824 +941 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:824->941"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "d2d6820913a872b920ad979ee064f43c5f98e62e"
+      ],
+      "reason": "opt-in field-only headless host diagnostic preserves CPU RGBA snapshot conversion when no display is attached; default windowed path is unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 832,
+      "new_start": 949,
+      "header": "832 +949 @@ static void UploadFrame(Texture2D &tex, PS2Runtime *rt, uint32_t &outWidth, uint",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:832->949"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 861,
+      "new_start": 979,
+      "header": "861,0 +979,12 @@ void PS2Runtime::dispatchGsPacket(GifPathId pathId, const uint8_t *data, uint32_",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:861->979"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 943,
+      "new_start": 1073,
+      "header": "943,0 +1073,33 @@ void PS2Runtime::advanceActiveGsBackendField(uint64_t fieldIndex)",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:943->1073"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 958,
+      "new_start": 1121,
+      "header": "958,0 +1121,8 @@ bool PS2Runtime::activeGsBackend() const",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:958->1121"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 1040,
+      "new_start": 1210,
+      "header": "1040 +1210,3 @@ bool PS2Runtime::copyActiveGsBackendPresentationFrame(std::vector<uint8_t> &outP",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:1040->1210"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 1041,
+      "new_start": 1214,
+      "header": "1041,0 +1214,2 @@ bool PS2Runtime::copyActiveGsBackendPresentationFrame(std::vector<uint8_t> &outP",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:1041->1214"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 1047,
+      "new_start": 1222,
+      "header": "1047,0 +1222,27 @@ bool PS2Runtime::copyActiveGsBackendPresentationFrame(std::vector<uint8_t> &outP",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:1047->1222"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 1149,
+      "new_start": 1351,
+      "header": "1149,0 +1351,9 @@ bool PS2Runtime::syncCoreSubsystems()",
+      "category": "later P3/F7-only",
+      "disposition": "compile-excluded",
+      "evidence": [
+        "d52eb405d40fac1ae05630edb60d3940951e6c00",
+        "bc57581a6f1702db4e24e9c401587adb4ee80cf7"
+      ],
+      "reason": "IR/FullFrame presentation and failure paths guarded from field-only profile",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:1149->1351"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "33b232a824dbd1bd9f2aa8cfd7690c771c9422d2",
+        "fd1505eb72a272186b327e222743d6c5f7b4f61b"
+      ],
+      "reason": "opt-in field-only displayless diagnostic preserves audio initialization, CPU RGBA snapshot conversion, and a deadline-based 60 Hz host cadence; default windowed path and guest tick machinery are unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 1190,
+      "new_start": 1401,
+      "header": "1190,0 +1401,16 @@ bool PS2Runtime::initialize(const char *title)",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:1190->1401"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "d2d6820913a872b920ad979ee064f43c5f98e62e"
+      ],
+      "reason": "opt-in field-only headless host diagnostic preserves CPU RGBA snapshot conversion when no display is attached; default windowed path is unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 1192,
+      "new_start": 1418,
+      "header": "1192 +1418 @@ bool PS2Runtime::initialize(const char *title)",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:1192->1418"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "d2d6820913a872b920ad979ee064f43c5f98e62e"
+      ],
+      "reason": "opt-in field-only headless host diagnostic preserves CPU RGBA snapshot conversion when no display is attached; default windowed path is unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 1194,
+      "new_start": 1420,
+      "header": "1194,4 +1420,4 @@ bool PS2Runtime::initialize(const char *title)",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:1194->1420"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "d2d6820913a872b920ad979ee064f43c5f98e62e"
+      ],
+      "reason": "opt-in field-only headless host diagnostic preserves CPU RGBA snapshot conversion when no display is attached; default windowed path is unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 1199,
+      "new_start": 1425,
+      "header": "1199,4 +1425,5 @@ bool PS2Runtime::initialize(const char *title)",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:1199->1425"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 1701,
+      "new_start": 1929,
+      "header": "1701,0 +1929,51 @@ void PS2Runtime::executeVU0Microprogram(uint8_t *rdram, R5900Context *ctx, uint3",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "diagnostic or host-loop handling not needed to define the ABI",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:1701->1929"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 2487,
+      "new_start": 2766,
+      "header": "2487,0 +2766,34 @@ void PS2Runtime::dispatchLoop(uint8_t *rdram, R5900Context *ctx)",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "diagnostic or host-loop handling not needed to define the ABI",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:2487->2766"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 2865,
+      "new_start": 3177,
+      "header": "2865,2 +3177,40 @@ void PS2Runtime::run()",
+      "category": "required by d52 consumer contract",
+      "disposition": "retained",
+      "evidence": [
+        "bb33c9a57c93c03c4397876dee8458ac9062dfd5"
+      ],
+      "reason": "d52 guest boot argc/argv initialization",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:2865->3177"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "d2d6820913a872b920ad979ee064f43c5f98e62e"
+      ],
+      "reason": "opt-in field-only headless host diagnostic preserves CPU RGBA snapshot conversion when no display is attached; default windowed path is unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 2886,
+      "new_start": 3236,
+      "header": "2886,4 +3236,9 @@ void PS2Runtime::run()",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:2886->3236"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 2937,
+      "new_start": 3293,
+      "header": "2937,0 +3293,4 @@ void PS2Runtime::run()",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "33b232a824dbd1bd9f2aa8cfd7690c771c9422d2",
+        "fd1505eb72a272186b327e222743d6c5f7b4f61b"
+      ],
+      "reason": "opt-in field-only displayless diagnostic preserves audio initialization, CPU RGBA snapshot conversion, and a deadline-based 60 Hz host cadence; default windowed path and guest tick machinery are unchanged",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:2937->3293"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "d2d6820913a872b920ad979ee064f43c5f98e62e"
+      ],
+      "reason": "opt-in field-only headless host diagnostic preserves CPU RGBA snapshot conversion when no display is attached; default windowed path is unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 3102,
+      "new_start": 3461,
+      "header": "3102,41 +3461,44 @@ void PS2Runtime::run()",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:3102->3461"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 3143,
+      "new_start": 3506,
+      "header": "3143,0 +3506,23 @@ void PS2Runtime::run()",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "33b232a824dbd1bd9f2aa8cfd7690c771c9422d2",
+        "fd1505eb72a272186b327e222743d6c5f7b4f61b"
+      ],
+      "reason": "opt-in field-only displayless diagnostic preserves audio initialization, CPU RGBA snapshot conversion, and a deadline-based 60 Hz host cadence; default windowed path and guest tick machinery are unchanged",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:3143->3506"
+    },
+    {
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "206b040f7e853622e031b12a6d49cd0d2db30d21",
+        "d2d6820913a872b920ad979ee064f43c5f98e62e"
+      ],
+      "reason": "opt-in field-only headless host diagnostic preserves CPU RGBA snapshot conversion when no display is attached; default windowed path is unchanged",
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 3197,
+      "new_start": 3582,
+      "header": "3197,2 +3582,5 @@ void PS2Runtime::run()",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:3197->3582"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_runtime.cpp",
+      "old_start": 3206,
+      "new_start": 3595,
+      "header": "3206,0 +3595,4 @@ void PS2Runtime::run()",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "diagnostic or host-loop handling not needed to define the ABI",
+      "id": "ps2xRuntime/src/lib/ps2_runtime.cpp:3206->3595"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp",
+      "old_start": 1,
+      "new_start": 2,
+      "header": "1,0 +2 @@",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "VIF PATH2/DIRECT diagnostics; no P3 probe in this hunk",
+      "id": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp:1->2"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp",
+      "old_start": 98,
+      "new_start": 100,
+      "header": "98,0 +100,73 @@ namespace",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "VIF PATH2/DIRECT diagnostics; no P3 probe in this hunk",
+      "id": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp:98->100"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp",
+      "old_start": 132,
+      "new_start": 207,
+      "header": "132,0 +207,2 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "VIF PATH2/DIRECT diagnostics; no P3 probe in this hunk",
+      "id": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp:132->207"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp",
+      "old_start": 143,
+      "new_start": 218,
+      "header": "143,5 +218,0 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "VIF PATH2/DIRECT diagnostics; no P3 probe in this hunk",
+      "id": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp:143->218"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp",
+      "old_start": 167,
+      "new_start": 239,
+      "header": "167,0 +239 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "VIF PATH2/DIRECT diagnostics; no P3 probe in this hunk",
+      "id": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp:167->239"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp",
+      "old_start": 188,
+      "new_start": 261,
+      "header": "188,0 +261,2 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "VIF PATH2/DIRECT diagnostics; no P3 probe in this hunk",
+      "id": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp:188->261"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp",
+      "old_start": 201,
+      "new_start": 276,
+      "header": "201,0 +276 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "VIF PATH2/DIRECT diagnostics; no P3 probe in this hunk",
+      "id": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp:201->276"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp",
+      "old_start": 206,
+      "new_start": 280,
+      "header": "206,23 +280,0 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "VIF PATH2/DIRECT diagnostics; no P3 probe in this hunk",
+      "id": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp:206->280"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp",
+      "old_start": 480,
+      "new_start": 532,
+      "header": "480 +532,2 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "VIF PATH2/DIRECT diagnostics; no P3 probe in this hunk",
+      "id": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp:480->532"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp",
+      "old_start": 489,
+      "new_start": 543,
+      "header": "489,0 +543,13 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)",
+      "category": "product-independent tooling",
+      "disposition": "retained",
+      "evidence": [
+        "30c4002d0b7509c235aa0079ffffe11475c81cfe"
+      ],
+      "reason": "VIF PATH2/DIRECT diagnostics; no P3 probe in this hunk",
+      "id": "ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp:489->543"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 0,
+      "new_start": 1,
+      "header": "0,0 +1 @@",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:0->1"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 1,
+      "new_start": 3,
+      "header": "1,0 +3 @@",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:1->3"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 13,
+      "new_start": 16,
+      "header": "13,0 +16 @@",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:13->16"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 299,
+      "new_start": 303,
+      "header": "299,0 +303,26 @@ namespace",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:299->303"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 351,
+      "new_start": 381,
+      "header": "351,0 +381,3 @@ static inline bool vuDenormFlushEnabled();",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:351->381"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 377,
+      "new_start": 410,
+      "header": "377,0 +410,221 @@ VU1Interpreter::VU1Interpreter()",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:377->410"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 531,
+      "new_start": 784,
+      "header": "531 +784,14 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:531->784"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 634,
+      "new_start": 900,
+      "header": "634 +900 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:634->900"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 710,
+      "new_start": 976,
+      "header": "710 +976,6 @@ void VU1Interpreter::execute(uint8_t *vuCode, uint32_t codeSize,",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:710->976"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 768,
+      "new_start": 1039,
+      "header": "768 +1039,4 @@ void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:768->1039"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 776,
+      "new_start": 1050,
+      "header": "776 +1050 @@ void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:776->1050"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 782,
+      "new_start": 1056,
+      "header": "782 +1056,5 @@ void VU1Interpreter::resume(uint8_t *vuCode, uint32_t codeSize,",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:782->1056"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 820,
+      "new_start": 1099,
+      "header": "820,0 +1099,4 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:820->1099"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 826,
+      "new_start": 1109,
+      "header": "826,0 +1109,38 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:826->1109"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 831,
+      "new_start": 1151,
+      "header": "831 +1151,4 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:831->1151"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 835,
+      "new_start": 1159,
+      "header": "835,0 +1159,6 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:835->1159"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 1012,
+      "new_start": 1341,
+      "header": "1012 +1341 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:1012->1341"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 1074,
+      "new_start": 1404,
+      "header": "1074,0 +1404,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:1074->1404"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 1154,
+      "new_start": 1492,
+      "header": "1154,0 +1492,106 @@ static inline float vuFlushDenorm(float f)",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:1154->1492"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2848,
+      "new_start": 3291,
+      "header": "2848 +3291,3 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2848->3291"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2852,
+      "new_start": 3297,
+      "header": "2852 +3297 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2852->3297"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2856,
+      "new_start": 3301,
+      "header": "2856,4 +3301,5 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2856->3301"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2866,
+      "new_start": 3312,
+      "header": "2866 +3312 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2866->3312"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2875,
+      "new_start": 3321,
+      "header": "2875,4 +3321,3 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2875->3321"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2881,
+      "new_start": 3326,
+      "header": "2881 +3326,2 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2881->3326"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2891,
+      "new_start": 3337,
+      "header": "2891 +3337 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2891->3337"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2922,
+      "new_start": 3368,
+      "header": "2922,2 +3368,6 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2922->3368"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2925,
+      "new_start": 3375,
+      "header": "2925,2 +3375,7 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2925->3375"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2927,
+      "new_start": 3383,
+      "header": "2927,0 +3383 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2927->3383"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2931,
+      "new_start": 3387,
+      "header": "2931,2 +3387,2 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2931->3387"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2934,
+      "new_start": 3390,
+      "header": "2934 +3390,2 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2934->3390"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2937,
+      "new_start": 3394,
+      "header": "2937,2 +3394,2 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2937->3394"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2940,
+      "new_start": 3397,
+      "header": "2940,2 +3397,8 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2940->3397"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2944,
+      "new_start": 3407,
+      "header": "2944 +3407 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2944->3407"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2947,
+      "new_start": 3410,
+      "header": "2947 +3410 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2947->3410"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2950,
+      "new_start": 3413,
+      "header": "2950 +3413 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2950->3413"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2953,
+      "new_start": 3416,
+      "header": "2953 +3416 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2953->3416"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2956,
+      "new_start": 3419,
+      "header": "2956 +3419 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2956->3419"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2959,
+      "new_start": 3422,
+      "header": "2959 +3422 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2959->3422"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2980,
+      "new_start": 3444,
+      "header": "2980,0 +3444,5 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2980->3444"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_vu1.cpp",
+      "old_start": 2982,
+      "new_start": 3449,
+      "header": "2982,9 +3449,0 @@ void VU1Interpreter::execLower(uint32_t instr, uint8_t *vuData, uint32_t dataSiz",
+      "category": "required by existing EE/R5900/COP1/COP2/VU semantics",
+      "disposition": "retained",
+      "evidence": [
+        "a17ec03634fcefb660d4686b4715c9eb3cd79bc6",
+        "d57c522e2352068e842d1c9bd500f81b29d1115d"
+      ],
+      "reason": "VU interpreter, Q latency/EFU, rounding and JIT-semantic support",
+      "id": "ps2xRuntime/src/lib/ps2_vu1.cpp:2982->3449"
+    },
+    {
+      "file": "ps2xTest/src/ps2_memory_tests.cpp",
+      "old_start": 867,
+      "new_start": 868,
+      "header": "867,0 +868,48 @@ void register_ps2_memory_tests()",
+      "category": "required by an existing test",
+      "disposition": "retained",
+      "evidence": [
+        "272e59a4c3d7c0fb1a60b3d87d280b6933f3ebd4",
+        "ps2recomp-runtime-vif0-normal-madr-advance.patch"
+      ],
+      "reason": "VIF0 MADR regression",
+      "id": "ps2xTest/src/ps2_memory_tests.cpp:867->868"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp",
+      "old_start": 276,
+      "new_start": 254,
+      "header": "276 +254 @@ namespace ps2_stubs",
+      "category": "required by an existing test",
+      "disposition": "retained",
+      "evidence": [
+        "M1 Phase 0 deterministic neutral-pad comparison requirement"
+      ],
+      "reason": "RRV_TEST_NEUTRAL_PAD suppresses packet-level test injection so a comparison run remains neutral",
+      "id": "ps2xRuntime/src/lib/Kernel/Stubs/Pad.cpp:276->254"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_pad.cpp",
+      "old_start": 28,
+      "new_start": 24,
+      "header": "28 +24 @@ namespace",
+      "category": "required by an existing test",
+      "disposition": "retained",
+      "evidence": [
+        "M1 Phase 0 deterministic neutral-pad comparison requirement"
+      ],
+      "reason": "strict test-only RRV_TEST_NEUTRAL_PAD parsing fails closed on invalid values",
+      "id": "ps2xRuntime/src/lib/ps2_pad.cpp:28->24"
+    },
+    {
+      "file": "ps2xRuntime/src/lib/ps2_pad.cpp",
+      "old_start": 30,
+      "new_start": 26,
+      "header": "30 +26,2 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s",
+      "category": "required by an existing test",
+      "disposition": "retained",
+      "evidence": [
+        "M1 Phase 0 deterministic neutral-pad comparison requirement"
+      ],
+      "reason": "fixed connected neutral host-pad state and capabilities isolate deterministic presentation comparisons from host input",
+      "id": "ps2xRuntime/src/lib/ps2_pad.cpp:30->26"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+diff --git a/pcsx2/GS/GSState.cpp b/pcsx2/GS/GSState.cpp
+index f8dc1b0..4c7cb14 100644
+--- a/pcsx2/GS/GSState.cpp
++++ b/pcsx2/GS/GSState.cpp
+@@ -3456,7 +3456,15 @@ void GSState::Transfer(const u8* mem, u32 size)
+ 						} while (path.StepReg() && size > 0 && path.reg != 0);
+ 					}
+ 
++					// A split path-3 PACKED payload can finish the current loop while retaining
++					// a residual QWC for the next GIFtag. Do not enter PACKED fallback here.
++					if constexpr (index == 3)
++					{
++						if (size == 0 || path.nloop == 0)
++							break;
++					}
++
+ 					// all data available? usually is
+ 
+ 					total = path.nloop * path.nreg;
+ 

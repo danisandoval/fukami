@@ -1,0 +1,274 @@
+Ground-truth capture trigger for the pinned PCSX2 reference build.
+
+Why this patch exists
+---------------------
+Capturing a hardware reference for a scene deep in attract needs the dump to
+start at a *guest-semantic* moment, not at a wall-clock offset and not when a
+human decides the picture looks right. PCSX2 can only start a GS dump from a
+hotkey, so every reference this project owns was staged by hand: not
+reproducible, impossible to re-run when a checkpoint moves, and it caps the
+oracle at the handful of scenes somebody sat through. (Injecting the hotkey
+from the outside is not an option either — this host denies osascript the
+accessibility permission that sending keystrokes needs.)
+
+This adds a host-side controller that watches an EE word each vsync and starts
+a bounded, deterministically-named GS dump when the guest enters a requested
+(phase, script, step) coordinate. It is purely observational:
+
+  * it never writes guest memory, never changes timing, never changes GS state;
+  * it starts the dump through exactly the call the GSDumpMultiFrame hotkey
+    makes (`GSQueueSnapshot`), on the same thread, with the same arguments;
+  * with `RRV_GT_CAPTURE` unset it reads one getenv and does nothing.
+
+The reference-purity claim is not "the patch looks harmless". Every capture
+logs the ELF probe word 0x2206F8 beside the dump it triggered, and
+scripts/gt_capture.py re-captures A1 and A3 and diffs them against the trusted
+2026-08-02 references before any new checkpoint is used (docs/TESTING.md
+T-GT-AUTO).
+
+Applies to PCSX2 d5f75c9e42064a77036466f1f4594b0507888633.
+Build with scripts/build_pcsx2_gt_capture.sh, which clones the pinned revision
+into a scratch tree and never touches the user's working tree.
+
+diff --git a/pcsx2/VMManager.cpp b/pcsx2/VMManager.cpp
+index f7e2ad3cb..46705edbf 100644
+--- a/pcsx2/VMManager.cpp
++++ b/pcsx2/VMManager.cpp
+@@ -23,6 +23,7 @@
+ #include "Input/InputManager.h"
+ #include "IopBios.h"
+ #include "MTGS.h"
++#include "Memory.h"
+ #include "MTVU.h"
+ #include "PINE.h"
+ #include "Patch.h"
+@@ -2906,10 +2907,229 @@ void VMManager::Internal::EntryPointCompilingOnCPUThread()
+ 	R5900SymbolImporter.OnElfLoadedInMemory();
+ }
+ 
++
++// ---------------------------------------------------------------------------
++// RRV ground-truth capture: start a GS dump on a guest-semantic coordinate.
++//
++// RRV_GT_CAPTURE       name:phase:script:step:fields[,...]   ('*' = don't care)
++// RRV_GT_CAPTURE_DIR   output directory (default: working directory)
++// RRV_GT_CAPTURE_ADDR  EE word holding the scene phase       (default 0x334E94)
++// RRV_GT_CAPTURE_CURS  EE pointer to {script, step}          (default 0x3348AC)
++// RRV_GT_CAPTURE_PROBE EE word logged beside every dump      (default 0x2206F8)
++// RRV_GT_CAPTURE_SETTLE  vsyncs to wait after a coordinate is first seen
++// RRV_GT_CAPTURE_QUIT=1  shut the VM down once the last target has been dumped
++//
++// Purely observational: no guest memory is written, no timing is changed, and
++// the dump is started through exactly the call the GSDumpMultiFrame hotkey
++// makes. With RRV_GT_CAPTURE unset this reads one getenv and does nothing.
++//
++// The timeline of every distinct coordinate is logged while this is enabled.
++// That log is the reproducible semantic index of the attract sequence, and it
++// is what a later re-run is checked against.
++// ---------------------------------------------------------------------------
++namespace RRVGtCapture
++{
++	static constexpr u32 kAny = 0xFFFFFFFFu;
++
++	struct Target
++	{
++		std::string name;
++		u32 phase = kAny;
++		u32 script = kAny;
++		u32 step = kAny;
++		u32 fields = 24;
++		bool done = false;
++	};
++
++	static bool s_configured = false;
++	static bool s_enabled = false;
++	static std::vector<Target> s_targets;
++	static std::string s_dir;
++	static u32 s_phase_addr = 0x334E94u;
++	static u32 s_cursor_addr = 0x3348ACu;
++	static u32 s_probe_addr = 0x2206F8u;
++	static u32 s_settle = 0;
++	static bool s_quit_when_done = false;
++	static u64 s_vsync = 0;
++	static u32 s_pending_settle = 0;
++	static int s_pending_target = -1;
++	static u32 s_dump_countdown = 0;
++	static u32 s_last_phase = kAny - 1, s_last_script = kAny - 1, s_last_step = kAny - 1;
++
++	static u32 ParseField(const std::string_view s)
++	{
++		if (s.empty() || s == "*")
++			return kAny;
++		return static_cast<u32>(std::strtoul(std::string(s).c_str(), nullptr, 0));
++	}
++
++	static void Configure()
++	{
++		if (s_configured)
++			return;
++		s_configured = true;
++
++		const char* spec = std::getenv("RRV_GT_CAPTURE");
++		if (!spec || spec[0] == '\0')
++			return;
++
++		if (const char* v = std::getenv("RRV_GT_CAPTURE_DIR"))
++			s_dir = v;
++		if (const char* v = std::getenv("RRV_GT_CAPTURE_ADDR"))
++			s_phase_addr = static_cast<u32>(std::strtoul(v, nullptr, 0));
++		if (const char* v = std::getenv("RRV_GT_CAPTURE_CURS"))
++			s_cursor_addr = static_cast<u32>(std::strtoul(v, nullptr, 0));
++		if (const char* v = std::getenv("RRV_GT_CAPTURE_PROBE"))
++			s_probe_addr = static_cast<u32>(std::strtoul(v, nullptr, 0));
++		if (const char* v = std::getenv("RRV_GT_CAPTURE_SETTLE"))
++			s_settle = static_cast<u32>(std::strtoul(v, nullptr, 0));
++		if (const char* v = std::getenv("RRV_GT_CAPTURE_QUIT"))
++			s_quit_when_done = (v[0] != '\0' && v[0] != '0');
++
++		for (const std::string_view& item : StringUtil::SplitString(spec, ',', true))
++		{
++			const std::vector<std::string_view> f = StringUtil::SplitString(item, ':', false);
++			if (f.size() != 5)
++			{
++				Console.Error(fmt::format("[gt-capture] ignoring malformed target '{}'", item));
++				continue;
++			}
++			Target t;
++			t.name = std::string(f[0]);
++			t.phase = ParseField(f[1]);
++			t.script = ParseField(f[2]);
++			t.step = ParseField(f[3]);
++			t.fields = ParseField(f[4]);
++			if (t.fields == kAny || t.fields == 0)
++				t.fields = 24;
++			s_targets.push_back(std::move(t));
++		}
++
++		s_enabled = !s_targets.empty();
++		if (!s_enabled)
++			return;
++
++		Console.WriteLn(fmt::format(
++			"[gt-capture] {} target(s); phase@0x{:08X} cursor@0x{:08X} probe@0x{:08X} settle={} dir='{}'",
++			s_targets.size(), s_phase_addr, s_cursor_addr, s_probe_addr, s_settle, s_dir));
++		for (const Target& t : s_targets)
++		{
++			Console.WriteLn(fmt::format("[gt-capture]   {} phase={} script={} step={} fields={}",
++				t.name, static_cast<s32>(t.phase), static_cast<s32>(t.script),
++				static_cast<s32>(t.step), t.fields));
++		}
++	}
++
++	static bool Matches(const Target& t, u32 phase, u32 script, u32 step)
++	{
++		return (t.phase == kAny || t.phase == phase) &&
++			   (t.script == kAny || t.script == script) &&
++			   (t.step == kAny || t.step == step);
++	}
++
++	static void Start(size_t index, u32 phase, u32 script, u32 step)
++	{
++		Target& t = s_targets[index];
++		std::string path = s_dir.empty() ? fmt::format("{}.png", t.name)
++										 : fmt::format("{}/{}.png", s_dir, t.name);
++		const u32 probe = memRead32(s_probe_addr);
++		Console.WriteLn(fmt::format(
++			"[gt-capture] START {} at vsync {} phase={} script={} step={} fields={} "
++			"probe[0x{:08X}]=0x{:08X} -> {}",
++			t.name, s_vsync, static_cast<s32>(phase), static_cast<s32>(script),
++			static_cast<s32>(step), t.fields, s_probe_addr, probe, path));
++		const u32 fields = t.fields;
++		MTGS::RunOnGSThread([path = std::move(path), fields]() { GSQueueSnapshot(path, fields); });
++		t.done = true;
++		// The dump closes itself `fields` vsyncs later. Hold the next target off
++		// until then, so two checkpoints can never land in one GS dump.
++		s_dump_countdown = fields + 2;
++	}
++
++	static void OnVSync()
++	{
++		Configure();
++		if (!s_enabled)
++			return;
++
++		s_vsync++;
++
++		const u32 phase = memRead32(s_phase_addr);
++		u32 script = kAny, step = kAny;
++		const u32 cursor = memRead32(s_cursor_addr);
++		if (cursor != 0 && (cursor & 3u) == 0 && cursor <= 0x01FFFFF8u)
++		{
++			script = memRead32(cursor);
++			step = memRead32(cursor + 4u);
++		}
++
++		if (phase != s_last_phase || script != s_last_script || step != s_last_step)
++		{
++			Console.WriteLn(fmt::format("[gt-capture] timeline vsync={} phase={} script={} step={}",
++				s_vsync, static_cast<s32>(phase), static_cast<s32>(script), static_cast<s32>(step)));
++			s_last_phase = phase;
++			s_last_script = script;
++			s_last_step = step;
++			// A coordinate change cancels a settle that has not fired: the scene
++			// we were waiting to settle into is already gone.
++			s_pending_target = -1;
++		}
++
++		if (s_dump_countdown > 0)
++		{
++			if (--s_dump_countdown == 0 && s_quit_when_done)
++			{
++				bool all_done = true;
++				for (const Target& t : s_targets)
++					all_done &= t.done;
++				if (all_done)
++				{
++					Console.WriteLn("[gt-capture] all targets captured - shutting down");
++					Host::RequestVMShutdown(false, false, false);
++				}
++			}
++			return;
++		}
++
++		if (s_pending_target >= 0)
++		{
++			if (s_pending_settle > 0)
++			{
++				s_pending_settle--;
++				return;
++			}
++			const size_t index = static_cast<size_t>(s_pending_target);
++			s_pending_target = -1;
++			Start(index, phase, script, step);
++			return;
++		}
++
++		for (size_t i = 0; i < s_targets.size(); i++)
++		{
++			if (s_targets[i].done || !Matches(s_targets[i], phase, script, step))
++				continue;
++			if (s_settle == 0)
++			{
++				Start(i, phase, script, step);
++			}
++			else
++			{
++				s_pending_target = static_cast<int>(i);
++				s_pending_settle = s_settle;
++				Console.WriteLn(fmt::format("[gt-capture] {} matched at vsync {}, settling {} vsync(s)",
++					s_targets[i].name, s_vsync, s_settle));
++			}
++			return;
++		}
++	}
++} // namespace RRVGtCapture
++
+ void VMManager::Internal::VSyncOnCPUThread()
+ {
+ 	Pad::UpdateMacroButtons();
+ 
++	RRVGtCapture::OnVSync();
++
+ 	Patch::ApplyVsyncPatches();
+ 
+ 	// Frame advance must be done *before* pumping messages, because otherwise

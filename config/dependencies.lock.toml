@@ -1,0 +1,89 @@
+# RRV-Recomp build dependency lock.  Revisions are immutable Git object IDs.
+# This lock describes source provenance only; it never captures user-provided
+# game data or generated game code.
+
+[ps2recomp]
+url = "https://github.com/ran-j/PS2Recomp.git"
+revision = "cf9d22b9793ab0e0591c7c23e6a50bba07fd393b"
+default_checkout = "build-deps/ps2recomp-d52-compatible-v2"
+require_clean_checkout = true
+compatible_name = "RRV d52-compatible PS2Recomp producer v2"
+compatible_revision = "bdbdede9c98b7796cff76c130177cc3fccb93f9b"
+compatible_tree = "88f6378c0502a22ba55ab4d01dfcce4af7cb0d36"
+compatible_patch = "tools/patches/ps2recomp-d52-compatible-v2.patch"
+compatible_patch_sha256 = "281cfcd7f8635dc2ae32f01d5be6bec86942260ec3f53c92e0c9f5663c4e9f8f"
+compatible_commit_date = "2026-09-04T00:00:00Z"
+compatible_commit_epoch = "1788480000"
+# Upstream no longer has `revision`, so this repository carries the producer in tree (third_party/ps2recomp: the
+# compatible tree below plus the changes listed in its RRV_CHANGES.md). There is nothing to fetch for it:
+# prepare_dependencies.py skips this component.
+vendored_in_tree = "third_party/ps2recomp"
+
+# The historical local checkout at this revision contains uncommitted runtime
+# and recompiler edits.  d52 has 127 PS2Recomp patch files, but no
+# checked-in ordered manifest which reconstructs that dirty tree.  It is
+# therefore evidence only, not a reproducible product dependency.  Do not
+# silently substitute a dirty checkout for this clean pinned revision.
+historic_dirty_tree = "exact_historical_identity_unavailable_compatible_v2_is_canonical"
+
+[sse2neon]
+# ARM64 SIMD shim the runtime and the product graph compile against (-DFETCHCONTENT_SOURCE_DIR_SSE2NEON).
+url = "https://github.com/DLTcollab/sse2neon.git"
+revision = "92f6de174717aef09033ad21568d5bb9e5470404"
+default_checkout = "build-deps/sse2neon-92f6de1"
+require_clean_checkout = true
+
+[ps2recomp_source_dependencies]
+sse2neon = "92f6de174717aef09033ad21568d5bb9e5470404"
+raylib = "c1ab645ca298a2801097931d1079b10ff7eb9df8"
+elfio = "8ae6cec5d60495822ecd57d736f66149da9b1830"
+toml11 = "b389bbc4ebf90fa2fe7651de3046fb19f661ba3c"
+fmt = "407c905e45ad75fc29bf0f9bb7c5c2fd3475976f"
+libdwarf = "2e088b983562860f497b4fd789a3e61524eb857c"
+rabbitizer = "d5804fa488474830a47fbf9f3693048ec1e45589"
+nlohmann_json = "9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03"
+
+[sdl]
+url = "https://github.com/libsdl-org/SDL.git"
+version = "2.32.10"
+tag = "release-2.32.10"
+revision = "5d249570393f7a37e037abf22cd6012a4cc56a71"
+
+[pcsx2]
+url = "https://github.com/PCSX2/pcsx2.git"
+revision = "fd9d310ccbb6b8b62c976da8886a3c8fd3a10ff3"
+default_checkout = "build-deps/pcsx2-2.8.2"
+require_clean_checkout = true
+# Git tree of the locked revision with the whole bridge patch series applied (the index tree the
+# bridge manifest records as pcsx2_source.patched_tree); scripts/pcsx2_patch_series.py check
+# --pcsx2-source proves the series reproduces it.
+bridge_patched_tree = "6bf1a4edd0a772afaee775b772a9d148a46b58a3"
+
+[[pcsx2_bridge_patches]]
+path = "tools/patches/pcsx2-gs-bridge-target.patch"
+sha256 = "a5d0088d69219ef4703863d38c8abb81d1fdb5b7ae7bbdcea3d9a1b0eb5ff281"
+
+# Linux/Steam Deck only (Gate 5): applied after the target patch.
+[[pcsx2_bridge_linux_patches]]
+path = "tools/patches/pcsx2-gs-bridge-linux.patch"
+sha256 = "21ed2a4abad51f25d3b7df356edf10a476eff16fe7cbe389e7de0950221d8e7b"
+
+[[pcsx2_gt_capture_patches]]
+path = "tools/patches/pcsx2-gt-capture.patch"
+sha256 = "6bc6d4f361e4ec4af04f15a812706e43b85e8a294df753624a6ba676cb3920a7"
+
+[[pcsx2_gt_capture_patches]]
+path = "tools/patches/pcsx2-gt-guest-trace.patch"
+sha256 = "e636196773ea46993aefc02e1fb9c8d66e49a6499318af97cc62ccd0fa613a8c"
+
+[[pcsx2_gt_capture_patches]]
+path = "tools/patches/pcsx2-vu1-input-trace.patch"
+sha256 = "b05e27d9773bd641218fed68bd238d41876d73bc9e55086c04e3300850210b4b"
+
+[[pcsx2_gt_capture_patches]]
+path = "tools/patches/pcsx2-gt-write-watch.patch"
+sha256 = "eb61633fde4554b7f2f6d803dee7571aea241978317318ea958827efa6b9e876"
+
+[[pcsx2_gt_debug_server_patch]]
+path = "tools/patches/pcsx2-debug-server.patch"
+sha256 = "7c2f2fe6b0e8e05677c21eb126e1d45ca98fd3d600ea8b5a1fc1d35f7b31c950"

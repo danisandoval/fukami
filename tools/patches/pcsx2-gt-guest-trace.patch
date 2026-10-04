@@ -1,0 +1,127 @@
+Deterministic, default-off guest-state trace for the phase-6 oracle.
+Applies after pcsx2-gt-capture.patch to pinned PCSX2 d5f75c9e4.
+
+diff --git a/pcsx2/GS/GS.cpp b/pcsx2/GS/GS.cpp
+--- a/pcsx2/GS/GS.cpp
++++ b/pcsx2/GS/GS.cpp
+@@ -48,4 +48,6 @@
+ #include "common/SmallString.h"
+ #include "common/StringUtil.h"
+ 
++namespace RRVGuestTrace { void NoteGS(u32 bytes); }
++
+ #include "IconsFontAwesome.h"
+@@ -415,19 +417,23 @@ void GSReadLocalMemoryUnsync(u8* mem, u32 qwc, u64 BITBLITBUF, u64 TRXPOS, u64 T
+ void GSgifTransfer(const u8* mem, u32 size)
+ {
++	RRVGuestTrace::NoteGS(size * 16u);
+ 	g_gs_renderer->Transfer<3>(mem, size);
+ }
+ 
+ void GSgifTransfer1(u8* mem, u32 addr)
+ {
++	RRVGuestTrace::NoteGS(0x4000u - addr);
+ 	g_gs_renderer->Transfer<0>(const_cast<u8*>(mem) + addr, (0x4000 - addr) / 16);
+ }
+ 
+ void GSgifTransfer2(u8* mem, u32 size)
+ {
++	RRVGuestTrace::NoteGS(size * 16u);
+ 	g_gs_renderer->Transfer<1>(const_cast<u8*>(mem), size);
+ }
+ 
+ void GSgifTransfer3(u8* mem, u32 size)
+ {
++	RRVGuestTrace::NoteGS(size * 16u);
+ 	g_gs_renderer->Transfer<2>(const_cast<u8*>(mem), size);
+ }
+diff --git a/pcsx2/VMManager.cpp b/pcsx2/VMManager.cpp
+--- a/pcsx2/VMManager.cpp
++++ b/pcsx2/VMManager.cpp
+@@ -79,3 +79,5 @@
+ #endif
+ 
++namespace RRVGuestTrace { void OnVSync(); }
++
+ namespace VMManager
+@@ -3138,5 +3140,6 @@ void VMManager::Internal::VSyncOnCPUThread()
+ 	Pad::UpdateMacroButtons();
+ 
+ 	RRVGtCapture::OnVSync();
++	RRVGuestTrace::OnVSync();
+ 
+ 	Patch::ApplyVsyncPatches();
+diff --git a/pcsx2/x86/ix86-32/iR5900.cpp b/pcsx2/x86/ix86-32/iR5900.cpp
+--- a/pcsx2/x86/ix86-32/iR5900.cpp
++++ b/pcsx2/x86/ix86-32/iR5900.cpp
+@@ -22,5 +22,10 @@
+ #include "common/HeapArray.h"
+ #include "common/Perf.h"
+ 
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++
+ // Only for MOVQ workaround.
+ #include "common/emitter/internal.h"
+@@ -41,4 +46,53 @@
+ using namespace x86Emitter;
+ using namespace R5900;
+ 
++namespace RRVGuestTrace
++{
++static std::atomic<u64> s_vsyncs{0}, s_gs_submits{0}, s_gs_bytes{0};
++void OnVSync() { s_vsyncs.fetch_add(1, std::memory_order_relaxed); }
++void NoteGS(u32 bytes) { s_gs_submits.fetch_add(1, std::memory_order_relaxed); s_gs_bytes.fetch_add(bytes, std::memory_order_relaxed); }
++static FILE* Stream()
++{
++	static FILE* s_file = []() -> FILE* { const char* v = std::getenv("RRV_GT_GUEST_TRACE"); if (!v || !v[0] || v[0] == '0') return nullptr; FILE* f = (std::strcmp(v, "1") == 0 || std::strcmp(v, "-") == 0) ? stderr : std::fopen(v, "w"); if (f) std::setvbuf(f, nullptr, _IOLBF, 0); return f; }();
++	return s_file;
++}
++static void Scene(u32& phase, u32& script, u32& step)
++{
++	phase = memRead32(0x334E94u); script = step = 0xFFFFFFFFu;
++	const u32 cursor = memRead32(0x3348ACu);
++	if (cursor && !(cursor & 3u) && cursor <= 0x01FFFFF8u) { script = memRead32(cursor); step = memRead32(cursor + 4u); }
++}
++static bool InWindow(u32 phase)
++{
++	static const u32 lo = [] { const char* v = std::getenv("RRV_GT_GUEST_TRACE_PHASE_MIN"); return v ? static_cast<u32>(std::strtoul(v, nullptr, 0)) : 4u; }();
++	static const u32 hi = [] { const char* v = std::getenv("RRV_GT_GUEST_TRACE_PHASE_MAX"); return v ? static_cast<u32>(std::strtoul(v, nullptr, 0)) : 7u; }();
++	return phase >= lo && phase <= hi;
++}
++static void Hook(u32 pc)
++{
++	FILE* f = Stream(); if (!f) return;
++	u32 phase, script, step; Scene(phase, script, step); if (!InWindow(phase)) return;
++	const u64 vsyncs = s_vsyncs.load(std::memory_order_relaxed);
++	if (pc == 0x21E464u || pc == 0x21E678u || pc == 0x220824u)
++	{
++		const u32 next = pc == 0x21E464u ? 0u : (pc == 0x21E678u ? cpuRegs.GPR.r[3].UL[0] : cpuRegs.GPR.r[2].UL[0]); static u64 write_seq = 0;
++		std::fprintf(f, "kind=flag_write seq=%llu pc=%08x phase=%u script=%u step=%u old=%u new=%u selector=%08x a0=%08x a1=%08x a2=%08x a3=%08x t8=%08x ra=%08x vsyncs=%llu\n", static_cast<unsigned long long>(++write_seq), pc, phase, script, step, memRead32(0x334DE4u), next, memRead32(0x334E04u), cpuRegs.GPR.r[4].UL[0], cpuRegs.GPR.r[5].UL[0], cpuRegs.GPR.r[6].UL[0], cpuRegs.GPR.r[7].UL[0], cpuRegs.GPR.r[24].UL[0], cpuRegs.GPR.r[31].UL[0], static_cast<unsigned long long>(vsyncs)); return;
++	}
++	if (pc == 0x220650u || pc == 0x220660u || pc == 0x220080u)
++	{
++		static u64 kick_seq = 0;
++		std::fprintf(f, "kind=dma_kick seq=%llu pc=%08x phase=%u script=%u step=%u state=%u mask=%u v0=%08x v1=%08x a0=%08x ra=%08x vif1_root=%08x gif_root=%08x gif3_root=%08x gif4_root=%08x vsyncs=%llu\n", static_cast<unsigned long long>(++kick_seq), pc, phase, script, step, memRead32(0x346E84u), memRead32(0x346E80u), cpuRegs.GPR.r[2].UL[0], cpuRegs.GPR.r[3].UL[0], cpuRegs.GPR.r[4].UL[0], cpuRegs.GPR.r[31].UL[0], memRead32(0x3470CCu), memRead32(0x3470D0u), memRead32(0x3470D4u), memRead32(0x3470D8u), static_cast<unsigned long long>(vsyncs)); return;
++	}
++	if (pc != 0x21DF94u)
++	{
++		const u32 a0 = cpuRegs.GPR.r[4].UL[0]; static u64 path_seq = 0;
++		std::fprintf(f, "kind=path seq=%llu pc=%08x phase=%u script=%u step=%u a0=%08x a1=%08x a2=%08x a3=%08x v0=%08x v1=%08x s0=%08x ra=%08x p6_index=%08x p6_counter=%08x flush_root=%08x root_word=%08x state=%08x mask=%08x vsyncs=%llu\n", static_cast<unsigned long long>(++path_seq), pc, phase, script, step, a0, cpuRegs.GPR.r[5].UL[0], cpuRegs.GPR.r[6].UL[0], cpuRegs.GPR.r[7].UL[0], cpuRegs.GPR.r[2].UL[0], cpuRegs.GPR.r[3].UL[0], cpuRegs.GPR.r[16].UL[0], cpuRegs.GPR.r[31].UL[0], memRead32(0x334F80u), memRead32(0x334EC4u), memRead32(0x334DE8u), memRead32(a0), memRead32(0x334EA0u), memRead32(0x334EC0u), static_cast<unsigned long long>(vsyncs)); return;
++	}
++	static u64 seq = 0, ps = 0, pb = 0, pv = 0; const u64 submits = s_gs_submits.load(std::memory_order_relaxed), bytes = s_gs_bytes.load(std::memory_order_relaxed);
++	const u32 selector = memRead32(0x334E04u), major = selector >> 16, minor = selector & 0xFFFFu, table = memRead32(0x002F2A28u + major * 4u), resolved = memRead32(table + minor * 4u);
++	std::fprintf(f, "kind=dispatch seq=%llu pc=%08x phase=%u script=%u step=%u flag=%u aux=%u selector=%08x major=%u minor=%u table=%08x target=%08x resolved=%08x v0=%08x v1=%08x a0=%08x a1=%08x a2=%08x a3=%08x t0=%08x t1=%08x t2=%08x t3=%08x s0=%08x s1=%08x s2=%08x s3=%08x ra=%08x h_flags=%04x h_334ba0=%08x h_list=%08x h_334d70=%08x h_334d74=%08x h_334d78=%08x h_334d88=%08x h_334d8c=%08x h_334db8=%08x h_334dbc=%08x h_334e00=%08x h_334e8c=%08x h_334e90=%08x h_334e98=%08x h_state=%08x h_mask=%08x h_334f00=%08x gs_submits=%llu gs_bytes=%llu vsyncs=%llu d_submits=%llu d_bytes=%llu d_vsyncs=%llu\n", static_cast<unsigned long long>(++seq), pc, phase, script, step, memRead32(0x334DE4u), memRead32(0x334DC8u), selector, major, minor, table, cpuRegs.GPR.r[4].UL[0], resolved, cpuRegs.GPR.r[2].UL[0], cpuRegs.GPR.r[3].UL[0], cpuRegs.GPR.r[4].UL[0], cpuRegs.GPR.r[5].UL[0], cpuRegs.GPR.r[6].UL[0], cpuRegs.GPR.r[7].UL[0], cpuRegs.GPR.r[8].UL[0], cpuRegs.GPR.r[9].UL[0], cpuRegs.GPR.r[10].UL[0], cpuRegs.GPR.r[11].UL[0], cpuRegs.GPR.r[16].UL[0], cpuRegs.GPR.r[17].UL[0], cpuRegs.GPR.r[18].UL[0], cpuRegs.GPR.r[19].UL[0], cpuRegs.GPR.r[31].UL[0], memRead16(0x3683A0u), memRead32(0x334BA0u), memRead32(0x334BA4u), memRead32(0x334D70u), memRead32(0x334D74u), memRead32(0x334D78u), memRead32(0x334D88u), memRead32(0x334D8Cu), memRead32(0x334DB8u), memRead32(0x334DBCu), memRead32(0x334E00u), memRead32(0x334E8Cu), memRead32(0x334E90u), memRead32(0x334E98u), memRead32(0x334EA0u), memRead32(0x334EC0u), memRead32(0x334F00u), static_cast<unsigned long long>(submits), static_cast<unsigned long long>(bytes), static_cast<unsigned long long>(vsyncs), static_cast<unsigned long long>(submits - ps), static_cast<unsigned long long>(bytes - pb), static_cast<unsigned long long>(vsyncs - pv)); ps = submits; pb = bytes; pv = vsyncs;
++}
++static bool IsHookPC(u32 v) { return v == 0x21DF94u || v == 0x21E464u || v == 0x21E678u || v == 0x220824u || v == 0x2456C8u || v == 0x245810u || v == 0x220650u || v == 0x220660u || v == 0x220080u; }
++} // namespace RRVGuestTrace
++
+ static bool eeRecNeedsReset = false;
+@@ -2584,4 +2628,5 @@ StartRecomp:
+ 		g_pCurInstInfo = s_pInstCache;
+ 		while (!g_branch && pc < s_nEndBlock)
+ 		{
++			if (RRVGuestTrace::IsHookPC(pc)) { iFlushCall(FLUSH_EVERYTHING); xFastCall((void*)RRVGuestTrace::Hook, pc); }
+ #ifdef DUMP_BLOCKS

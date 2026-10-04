@@ -1,0 +1,742 @@
+diff --git a/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm b/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
+index 6bf6af8..d8d30f3 100644
+--- a/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
++++ b/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
+@@ -5,6 +5,7 @@
+ #include "GS/GSGL.h"
+ #include "GS/Renderers/Metal/GSMetalCPPAccessible.h"
+ #include "GS/Renderers/Metal/GSDeviceMTL.h"
++#include "GS/Renderers/Metal/RRVMetalLifetimeDiag.h"
+ #include "GS/Renderers/Metal/GSTextureMTL.h"
+ #include "GS/GSPerfMon.h"
+ #include "GS/GSShaderCompileIndicator.h"
+@@ -15,6 +16,9 @@
+ #include "cpuinfo.h"
+ #include "imgui.h"
+ 
++#include <thread>
++#include <cstring>
++
+ #ifdef __APPLE__
+ #include "GSMTLSharedHeader.h"
+ 
+@@ -23,6 +27,147 @@
+ 	return simd::make_float2(vec.x, vec.y);
+ }
+ 
++namespace
++{
++rrv::metal_lifetime::Ring s_rrv_metal_lifetime;
++std::atomic<u64> s_rrv_last_present_config{0};
++std::atomic<u64> s_rrv_last_interlace_config{0};
++
++u64 RrvMetalLifetimePointer(id object)
++{
++	return static_cast<u64>(reinterpret_cast<uintptr_t>((__bridge void*)object));
++}
++
++u64 RrvMetalLifetimeThread()
++{
++	return static_cast<u64>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
++}
++
++const char* RrvMetalLifetimeEventName(rrv::metal_lifetime::Event event)
++{
++	using Event = rrv::metal_lifetime::Event;
++	switch (event)
++	{
++		case Event::Attach: return "attach";
++		case Event::Detach: return "detach";
++		case Event::UpdateWindow: return "update-window";
++		case Event::DestroySurface: return "destroy-surface";
++		case Event::Destroy: return "destroy";
++		case Event::CommandBufferCreate: return "command-buffer-create";
++		case Event::Commit: return "commit";
++		case Event::Complete: return "complete";
++		case Event::SpinComplete: return "spin-complete";
++		case Event::DrawableAcquire: return "drawable-acquire";
++		case Event::DrawablePresent: return "drawable-present";
++		case Event::DeviceReady: return "device-ready";
++		case Event::PipelineReady: return "pipeline-ready";
++		case Event::PresentConfig: return "present-config";
++		case Event::InterlaceConfig: return "interlace-config";
++	}
++	return "unknown";
++}
++
++void RrvMetalLifetimeRecordRaw(rrv::metal_lifetime::Event event, u64 command_buffer, u64 queue,
++	u64 layer, u64 drawable, u64 draw, u64 status, u64 surface_width = 0,
++	u64 surface_height = 0, u64 pixel_format = 0, u64 reacquire_before_complete = 0)
++{
++	if (!s_rrv_metal_lifetime.enabled())
++		return;
++	s_rrv_metal_lifetime.record(event, command_buffer, queue, layer, drawable, draw, status,
++		RrvMetalLifetimeThread(), surface_width, surface_height, pixel_format, reacquire_before_complete);
++}
++
++void RrvMetalLifetimeSurface(CAMetalLayer* layer, u64* surface_width, u64* surface_height, u64* pixel_format)
++{
++	*surface_width = 0;
++	*surface_height = 0;
++	*pixel_format = 0;
++	if (!layer)
++		return;
++	const CGSize size = [layer drawableSize];
++	*surface_width = static_cast<u64>(size.width);
++	*surface_height = static_cast<u64>(size.height);
++	*pixel_format = static_cast<u64>([layer pixelFormat]);
++}
++
++void RrvMetalLifetimeRecord(rrv::metal_lifetime::Event event, id<MTLCommandBuffer> command_buffer,
++	id<MTLCommandQueue> queue, CAMetalLayer* layer, id<CAMetalDrawable> drawable, u64 draw,
++	u64 reacquire_before_complete = 0)
++{
++	if (!s_rrv_metal_lifetime.enabled())
++		return;
++	u64 surface_width, surface_height, pixel_format;
++	RrvMetalLifetimeSurface(layer, &surface_width, &surface_height, &pixel_format);
++	RrvMetalLifetimeRecordRaw(event, RrvMetalLifetimePointer(command_buffer), RrvMetalLifetimePointer(queue),
++		RrvMetalLifetimePointer(layer), RrvMetalLifetimePointer(drawable), draw,
++		command_buffer ? static_cast<u64>([command_buffer status]) : 0,
++		surface_width, surface_height, pixel_format, reacquire_before_complete);
++}
++
++u64 RrvMetalLifetimeFloatBits(float value)
++{
++	u32 bits;
++	std::memcpy(&bits, &value, sizeof(bits));
++	return bits;
++}
++
++u64 RrvMetalLifetimeConfigSignature(const GSVector4& source, const GSVector4& target, u64 source_width,
++	u64 source_height, u64 target_width, u64 target_height, u64 selector, u64 filter, u64 pipeline)
++{
++	u64 hash = 1469598103934665603ull;
++	const auto mix = [&hash](u64 value) { hash = (hash ^ value) * 1099511628211ull; };
++	mix(RrvMetalLifetimeFloatBits(source.x)); mix(RrvMetalLifetimeFloatBits(source.y));
++	mix(RrvMetalLifetimeFloatBits(source.z)); mix(RrvMetalLifetimeFloatBits(source.w));
++	mix(RrvMetalLifetimeFloatBits(target.x)); mix(RrvMetalLifetimeFloatBits(target.y));
++	mix(RrvMetalLifetimeFloatBits(target.z)); mix(RrvMetalLifetimeFloatBits(target.w));
++	mix(source_width); mix(source_height); mix(target_width); mix(target_height);
++	mix(selector); mix(filter); mix(pipeline);
++	return hash;
++}
++
++void RrvMetalLifetimeRecordConfigIfChanged(rrv::metal_lifetime::Event event, std::atomic<u64>& previous,
++	u64 signature, id pipeline, id<MTLTexture> output,
++	id<MTLCommandQueue> queue, CAMetalLayer* layer, id<CAMetalDrawable> drawable, u64 draw)
++{
++	if (!s_rrv_metal_lifetime.enabled() || previous.exchange(signature, std::memory_order_relaxed) == signature)
++		return;
++	const u64 output_width = output ? static_cast<u64>([output width]) : 0;
++	const u64 output_height = output ? static_cast<u64>([output height]) : 0;
++	const u64 output_format = output ? static_cast<u64>([output pixelFormat]) : 0;
++	RrvMetalLifetimeRecordRaw(event, RrvMetalLifetimePointer(pipeline), RrvMetalLifetimePointer(queue),
++		RrvMetalLifetimePointer(layer), RrvMetalLifetimePointer(drawable), draw, signature,
++		output_width, output_height, output_format);
++}
++} // namespace
++
++// LLDB: `expr -- GSRrvMetalLifetimeDump()` after a failed run. These hooks are
++// intentionally local to the renderer and are not exported through the bridge ABI.
++extern "C" void GSRrvMetalLifetimeDump()
++{
++	const rrv::metal_lifetime::Snapshot snapshot = s_rrv_metal_lifetime.snapshot();
++	Console.WriteLn("RRV Metal lifetime: first=%llu next=%llu overwritten=%llu gaps=%llu records=%llu",
++		static_cast<unsigned long long>(snapshot.first_ticket), static_cast<unsigned long long>(snapshot.next_ticket),
++		static_cast<unsigned long long>(snapshot.overwritten), static_cast<unsigned long long>(snapshot.gaps),
++		static_cast<unsigned long long>(snapshot.count));
++	for (u64 index = 0; index < snapshot.count; ++index)
++	{
++		const rrv::metal_lifetime::Record& record = snapshot.records[index];
++		Console.WriteLn("RRV Metal lifetime: ticket=%llu lifecycle=%llu event=%s cb=0x%llx queue=0x%llx layer=0x%llx drawable=0x%llx draw=%llu status=%llu thread=0x%llx size=%llux%llu format=%llu reacquire-pending=%llu",
++			static_cast<unsigned long long>(record.ticket), static_cast<unsigned long long>(record.lifecycle),
++			RrvMetalLifetimeEventName(record.event), static_cast<unsigned long long>(record.command_buffer),
++			static_cast<unsigned long long>(record.queue), static_cast<unsigned long long>(record.layer),
++			static_cast<unsigned long long>(record.drawable), static_cast<unsigned long long>(record.draw),
++			static_cast<unsigned long long>(record.status), static_cast<unsigned long long>(record.thread),
++			static_cast<unsigned long long>(record.surface_width), static_cast<unsigned long long>(record.surface_height),
++			static_cast<unsigned long long>(record.pixel_format), static_cast<unsigned long long>(record.reacquire_before_complete));
++	}
++}
++
++extern "C" void GSRrvMetalLifetimeSnapshot()
++{
++	GSRrvMetalLifetimeDump();
++}
++
+ GSDevice* MakeGSDeviceMTL()
+ {
+ 	return new GSDeviceMTL();
+@@ -195,6 +340,7 @@
+ 	if (!m_texture_upload_cmdbuf)
+ 	{
+ 		m_texture_upload_cmdbuf = MRCRetain([m_queue commandBuffer]);
++		RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::CommandBufferCreate, m_texture_upload_cmdbuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 		m_texture_upload_encoder = MRCRetain([m_texture_upload_cmdbuf blitCommandEncoder]);
+ 		pxAssertRel(m_texture_upload_encoder, "Failed to create texture upload encoder!");
+ 		[m_texture_upload_cmdbuf setLabel:@"Texture Upload"];
+@@ -221,6 +367,7 @@
+ 	if (!m_vertex_upload_cmdbuf)
+ 	{
+ 		m_vertex_upload_cmdbuf = MRCRetain([m_queue commandBuffer]);
++		RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::CommandBufferCreate, m_vertex_upload_cmdbuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 		m_vertex_upload_encoder = MRCRetain([m_vertex_upload_cmdbuf blitCommandEncoder]);
+ 		pxAssertRel(m_vertex_upload_encoder, "Failed to create vertex upload encoder!");
+ 		[m_vertex_upload_cmdbuf setLabel:@"Vertex Upload"];
+@@ -235,6 +382,7 @@
+ 	{
+ 		m_encoders_in_current_cmdbuf = 0;
+ 		m_current_render_cmdbuf = MRCRetain([m_queue commandBuffer]);
++		RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::CommandBufferCreate, m_current_render_cmdbuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 		pxAssertRel(m_current_render_cmdbuf, "Failed to create draw command buffer!");
+ 		[m_current_render_cmdbuf setLabel:@"Draw"];
+ 	}
+@@ -282,6 +430,7 @@
+ 	else if (m_vertex_upload_cmdbuf)
+ 	{
+ 		[m_vertex_upload_encoder endEncoding];
++		RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Commit, m_vertex_upload_cmdbuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 		[m_vertex_upload_cmdbuf commit];
+ 		m_vertex_upload_encoder = nil;
+ 		m_vertex_upload_cmdbuf = nil;
+@@ -289,6 +438,7 @@
+ 	if (m_texture_upload_cmdbuf)
+ 	{
+ 		[m_texture_upload_encoder endEncoding];
++		RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Commit, m_texture_upload_cmdbuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 		[m_texture_upload_cmdbuf commit];
+ 		m_texture_upload_encoder = nil;
+ 		m_texture_upload_cmdbuf = nil;
+@@ -344,12 +494,14 @@
+ 				dev->DrawCommandBufferFinished(draw, buf);
+ 		}];
+ 	}
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Commit, m_current_render_cmdbuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 	[m_current_render_cmdbuf commit];
+ 	m_current_render_cmdbuf = nil;
+ 	m_current_draw++;
+ 	if (spin_cycles)
+ 	{
+ 		id<MTLCommandBuffer> spinCmdBuf = [m_queue commandBuffer];
++		RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::CommandBufferCreate, spinCmdBuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 		[spinCmdBuf setLabel:@"Spin"];
+ 		id<MTLComputeCommandEncoder> spinCmdEncoder = [spinCmdBuf computeCommandEncoder];
+ 		[spinCmdEncoder setLabel:@"Spin"];
+@@ -359,8 +511,15 @@
+ 		[spinCmdEncoder setBuffer:m_spin_buffer offset:0 atIndex:1];
+ 		[spinCmdEncoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+ 		[spinCmdEncoder endEncoding];
+-		[spinCmdBuf addCompletedHandler:[backref = m_backref, spin_cycles](id<MTLCommandBuffer> buf)
++		const bool diag_enabled = s_rrv_metal_lifetime.enabled();
++		const u64 diag_queue = diag_enabled ? RrvMetalLifetimePointer(m_queue) : 0;
++		const u64 diag_layer = diag_enabled ? RrvMetalLifetimePointer(m_layer) : 0;
++		const u64 diag_drawable = diag_enabled ? RrvMetalLifetimePointer(m_current_drawable) : 0;
++		const u64 diag_draw = m_current_draw;
++		[spinCmdBuf addCompletedHandler:[backref = m_backref, spin_cycles, diag_enabled, diag_queue, diag_layer, diag_drawable, diag_draw](id<MTLCommandBuffer> buf)
+ 		{
++			if (diag_enabled && s_rrv_metal_lifetime.enabled())
++				RrvMetalLifetimeRecordRaw(rrv::metal_lifetime::Event::SpinComplete, RrvMetalLifetimePointer(buf), diag_queue, diag_layer, diag_drawable, diag_draw, static_cast<u64>([buf status]));
+ #pragma clang diagnostic push
+ #pragma clang diagnostic ignored "-Wunguarded-availability"
+ 			u64 begin = [buf GPUStartTime] * s_to_ns;
+@@ -370,6 +529,7 @@
+ 			if (GSDeviceMTL* dev = backref->second)
+ 				dev->m_spin_manager.SpinCompleted(spin_cycles, static_cast<u32>(begin), static_cast<u32>(end));
+ 		}];
++		RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Commit, spinCmdBuf, m_queue, m_layer, m_current_drawable, diag_draw);
+ 		[spinCmdBuf commit];
+ 	}
+ }
+@@ -725,10 +885,21 @@ static constexpr MTLPixelFormat ConvertPixelFormat(GSTexture::Format format)
+ void GSDeviceMTL::DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, ShaderInterlace shader, Filter filter, const InterlaceConstantBuffer& cb)
+ { @autoreleasepool {
+ 	id<MTLCommandBuffer> cmdbuf = GetRenderCmdBuf();
++	id<MTLRenderPipelineState> pipeline = m_interlace_pipeline[static_cast<int>(shader)];
++	if (s_rrv_metal_lifetime.enabled())
++	{
++		id<MTLTexture> output = dTex ? static_cast<GSTextureMTL*>(dTex)->GetTexture() : nil;
++		const GSVector2i source_size = sTex->GetSize();
++		const GSVector2i target_size = dTex ? dTex->GetSize() : GetWindowSize();
++		const u64 signature = RrvMetalLifetimeConfigSignature(sRect, dRect, source_size.x, source_size.y,
++			target_size.x, target_size.y, static_cast<u64>(shader), static_cast<u64>(filter), RrvMetalLifetimePointer(pipeline));
++		RrvMetalLifetimeRecordConfigIfChanged(rrv::metal_lifetime::Event::InterlaceConfig, s_rrv_last_interlace_config,
++			signature, pipeline, output, m_queue, m_layer, m_current_drawable, m_current_draw);
++	}
+ 	GSScopedDebugGroupMTL dbg(cmdbuf, @"DoInterlace");
+ 
+ 	const bool can_discard = shader == ShaderInterlace::WEAVE || shader == ShaderInterlace::MAD_BUFFER;
+-	DoStretchRect(sTex, sRect, dTex, dRect, m_interlace_pipeline[static_cast<int>(shader)], filter,
++	DoStretchRect(sTex, sRect, dTex, dRect, pipeline, filter,
+ 		!can_discard ? LoadAction::DontCareIfFull : LoadAction::Load, &cb, sizeof(cb));
+ }}
+ 
+@@ -863,19 +1034,32 @@ static void OnMainThread(Fn&& fn)
+ void GSDeviceMTL::AttachSurfaceOnMainThread()
+ {
+ 	pxAssert([NSThread isMainThread]);
+-	m_layer = MRCRetain([CAMetalLayer layer]);
++	// RRV's direct-present bridge supplies a caller-owned CAMetalLayer through
++	// WindowInfo. PCSX2 retains it only for the active GS device and continues
++	// to own the Metal device, queue, drawable acquisition and presentation.
++	// Normal PCSX2 hosts leave surface_handle null and retain the stock layer.
++	m_layer = m_window_info.surface_handle ?
++		MRCRetain((__bridge CAMetalLayer*)m_window_info.surface_handle) :
++		MRCRetain([CAMetalLayer layer]);
+ 	[m_layer setDrawableSize:CGSizeMake(m_window_info.surface_width, m_window_info.surface_height)];
+ 	[m_layer setDevice:m_dev.dev];
+ 	m_view = MRCRetain((__bridge NSView*)m_window_info.window_handle);
+ 	[m_view setWantsLayer:YES];
+ 	[m_view setLayer:m_layer];
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Attach, nil, m_queue, m_layer, nil, m_current_draw);
+ }
+ 
+ void GSDeviceMTL::DetachSurfaceOnMainThread()
+ {
+ 	pxAssert([NSThread isMainThread]);
+-	[m_view setLayer:nullptr];
+-	[m_view setWantsLayer:NO];
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Detach, nil, m_queue, m_layer, m_current_drawable, m_current_draw);
++	// The bridge borrows a layer owned by RRV. It must leave that caller-owned
++	// AppKit state attached during shutdown; only its own retain is released.
++	if (!m_window_info.surface_handle)
++	{
++		[m_view setLayer:nullptr];
++		[m_view setWantsLayer:NO];
++	}
+ 	m_view = nullptr;
+ 	m_layer = nullptr;
+ }
+@@ -982,6 +1166,8 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 
+ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
+ { @autoreleasepool {
++	s_rrv_metal_lifetime.configureAtCreate();
++	s_rrv_metal_lifetime.startLifecycle();
+ 	if (!GSDevice::Create(vsync_mode, allow_present_throttle))
+ 		return false;
+ 
+@@ -1000,11 +1186,16 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 			Console.Warning("Metal: Couldn't find adapter %s, using default", GSConfig.Adapter.c_str());
+ 		m_dev = GSMTLDevice(MRCTransfer(MTLCreateSystemDefaultDevice()));
+ 		if (!m_dev.dev)
++		{
+ 			Host::ReportErrorAsync(TRANSLATE_SV("GSDeviceMTL", "No Metal Devices Available"), TRANSLATE_SV("GSDeviceMTL", "No Metal-supporting GPUs were found.  PCSX2 requires a Metal GPU (available on all Macs from 2012 onwards)."));
++			return false;
++		}
+ 	}
+ 
+ 	m_name = [[m_dev.dev name] UTF8String];
+ 	m_queue = MRCTransfer([m_dev.dev newCommandQueue]);
++	if (s_rrv_metal_lifetime.enabled())
++		RrvMetalLifetimeRecordRaw(rrv::metal_lifetime::Event::DeviceReady, RrvMetalLifetimePointer(m_dev.dev), RrvMetalLifetimePointer(m_queue), 0, 0, 0, 0);
+ 
+ 	m_pass_desc = MRCTransfer([MTLRenderPassDescriptor new]);
+ 	[m_pass_desc colorAttachments][0].loadAction = MTLLoadActionClear;
+@@ -1086,6 +1277,7 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 	m_spin_buffer = MRCTransfer([m_dev.dev newBufferWithLength:4 options:spin_opts]);
+ 	[m_spin_buffer setLabel:@"Spin Buffer"];
+ 	id<MTLCommandBuffer> initCommands = [m_queue commandBuffer];
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::CommandBufferCreate, initCommands, m_queue, m_layer, nil, m_current_draw);
+ 	id<MTLBlitCommandEncoder> clearSpinBuffer = [initCommands blitCommandEncoder];
+ 	[clearSpinBuffer fillBuffer:m_spin_buffer range:NSMakeRange(0, 4) value:0];
+ 	[clearSpinBuffer updateFence:m_spin_fence];
+@@ -1338,13 +1530,19 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 	pdesc.colorAttachments[0].pixelFormat = layer_px_fmt;
+ 	m_imgui_pipeline = MakePipeline(pdesc, LoadShader(@"vs_imgui"), LoadShader(@"ps_imgui"), @"imgui");
+ 
++	if (s_rrv_metal_lifetime.enabled())
++		RrvMetalLifetimeRecordRaw(rrv::metal_lifetime::Event::PipelineReady, RrvMetalLifetimePointer(m_dev.dev), RrvMetalLifetimePointer(m_queue), RrvMetalLifetimePointer(m_layer), 0, m_current_draw, 0);
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Commit, initCommands, m_queue, m_layer, nil, m_current_draw);
+ 	[initCommands commit];
+ 	return true;
+ }}
+ 
+ void GSDeviceMTL::Destroy()
+ { @autoreleasepool {
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Destroy, nil, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 	FlushEncoders();
++	if (s_rrv_metal_lifetime.enabled())
++		GSRrvMetalLifetimeDump();
+ 	std::lock_guard<std::mutex> guard(m_backref->first);
+ 	m_backref->second = nullptr;
+ 
+@@ -1356,6 +1554,7 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 
+ void GSDeviceMTL::DestroySurface()
+ {
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::DestroySurface, nil, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 	if (!m_layer)
+ 		return;
+ 	OnMainThread([this]{ DetachSurfaceOnMainThread(); });
+@@ -1364,6 +1563,7 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 
+ bool GSDeviceMTL::UpdateWindow()
+ {
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::UpdateWindow, nil, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 	DestroySurface();
+ 
+ 	if (!AcquireWindow(false))
+@@ -1408,6 +1608,7 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 
+ void GSDeviceMTL::ResizeWindow(u32 new_window_width, u32 new_window_height, float new_window_scale)
+ {
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::UpdateWindow, nil, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 	m_window_info.surface_scale = new_window_scale;
+ 	if (!m_layer ||
+ 		(m_window_info.surface_width == new_window_width && m_window_info.surface_height == new_window_height))
+@@ -1426,6 +1627,7 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ void GSDeviceMTL::UpdateTexture(id<MTLTexture> texture, u32 x, u32 y, u32 width, u32 height, const void* data, u32 data_stride)
+ {
+ 	id<MTLCommandBuffer> cmdbuf = [m_queue commandBuffer];
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::CommandBufferCreate, cmdbuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 	id<MTLBlitCommandEncoder> enc = [cmdbuf blitCommandEncoder];
+ 	size_t bytes = data_stride * height;
+ 	MRCOwned<id<MTLBuffer>> buf = MRCTransfer([m_dev.dev newBufferWithLength:bytes options:m_resource_options_shared_wc]);
+@@ -1440,6 +1642,7 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 	   destinationLevel:0
+ 	  destinationOrigin:MTLOriginMake(0, 0, 0)];
+ 	[enc endEncoding];
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Commit, cmdbuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 	[cmdbuf commit];
+ }
+ 
+@@ -1456,6 +1659,12 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 	}
+ 	id<MTLCommandBuffer> buf = GetRenderCmdBuf();
+ 	m_current_drawable = MRCRetain([m_layer nextDrawable]);
++	if (s_rrv_metal_lifetime.enabled())
++	{
++		const u64 diag_drawable = RrvMetalLifetimePointer(m_current_drawable);
++		const u64 reacquire_before_complete = s_rrv_metal_lifetime.drawableIsPending(diag_drawable) ? 1 : 0;
++		RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::DrawableAcquire, buf, m_queue, m_layer, m_current_drawable, m_current_draw, reacquire_before_complete);
++	}
+ 	EndRenderPass();
+ 	if (!m_current_drawable)
+ 	{
+@@ -1480,6 +1689,23 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 	EndRenderPass();
+ 	if (m_current_drawable)
+ 	{
++		if (s_rrv_metal_lifetime.enabled())
++		{
++			const u64 diag_queue = RrvMetalLifetimePointer(m_queue);
++			const u64 diag_layer = RrvMetalLifetimePointer(m_layer);
++			const u64 diag_drawable = RrvMetalLifetimePointer(m_current_drawable);
++			const u64 diag_draw = m_current_draw;
++			s_rrv_metal_lifetime.markDrawablePresented(diag_drawable);
++			RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::DrawablePresent, m_current_render_cmdbuf, m_queue, m_layer, m_current_drawable, diag_draw);
++			[m_current_render_cmdbuf addCompletedHandler:[diag_queue, diag_layer, diag_drawable, diag_draw](id<MTLCommandBuffer> buf)
++			{
++				if (s_rrv_metal_lifetime.enabled())
++				{
++					s_rrv_metal_lifetime.markDrawableCompleted(diag_drawable);
++					RrvMetalLifetimeRecordRaw(rrv::metal_lifetime::Event::Complete, RrvMetalLifetimePointer(buf), diag_queue, diag_layer, diag_drawable, diag_draw, static_cast<u64>([buf status]));
++				}
++			}];
++		}
+ 		const bool use_present_drawable = m_use_present_drawable == UsePresentDrawable::Always ||
+ 			(m_use_present_drawable == UsePresentDrawable::IfVsync && m_vsync_mode == GSVSyncMode::FIFO);
+ 
+@@ -1489,6 +1715,10 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 			[m_current_render_cmdbuf addScheduledHandler:[drawable = std::move(m_current_drawable)](id<MTLCommandBuffer>){
+ 				[drawable present];
+ 			}];
++		// Count only the bridge's external-surface presentation after an actual
++		// drawable was acquired and its presentation was scheduled.
++		if (m_window_info.surface_handle)
++			GSRrvRecordDirectPresent();
+ 	}
+ 	FlushEncoders();
+ 	FrameCompleted();
+@@ -1772,6 +2002,15 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 	cb.SetTarget(dRect, ds);
+ 	cb.SetTime(shaderTime);
+ 	id<MTLRenderPipelineState> pipe = m_present_pipeline[static_cast<int>(shader)];
++	if (!dTex && s_rrv_metal_lifetime.enabled())
++	{
++		id<MTLTexture> output = m_current_drawable ? [m_current_drawable texture] : nil;
++		const GSVector2i source_size = sTex->GetSize();
++		const u64 signature = RrvMetalLifetimeConfigSignature(sRect, dRect, source_size.x, source_size.y,
++			ds.x, ds.y, static_cast<u64>(shader), static_cast<u64>(filter), RrvMetalLifetimePointer(pipe));
++		RrvMetalLifetimeRecordConfigIfChanged(rrv::metal_lifetime::Event::PresentConfig, s_rrv_last_present_config,
++			signature, pipe, output, m_queue, m_layer, m_current_drawable, m_current_draw);
++	}
+ 
+ 	if (dTex)
+ 	{
+diff --git a/pcsx2/GS/Renderers/Metal/GSMTLDeviceInfo.mm b/pcsx2/GS/Renderers/Metal/GSMTLDeviceInfo.mm
+index 7649f59..2257b22 100644
+--- a/pcsx2/GS/Renderers/Metal/GSMTLDeviceInfo.mm
++++ b/pcsx2/GS/Renderers/Metal/GSMTLDeviceInfo.mm
+@@ -10,14 +10,19 @@
+ 
+ static id<MTLLibrary> loadMainLibrary(id<MTLDevice> dev, NSString* name)
+ {
+-	NSString* path = [[NSBundle mainBundle] pathForResource:name ofType:@"metallib"];
+-	if (!path)
++	// RRV's canonical package reader has established EmuFolders::Resources
++	// from the verified bridge image. Do not consult the process bundle here:
++	// that would make another package authoritative after relocation.
++	std::string ssname = std::string([name UTF8String]) + ".metallib";
++	std::string sspath = Path::Combine(EmuFolders::Resources, ssname);
++	NSString* path = [[NSString alloc] initWithBytes:sspath.data() length:sspath.length() encoding:NSUTF8StringEncoding];
++	id<MTLLibrary> library = [dev newLibraryWithFile:path error:nullptr];
++	if (library)
+ 	{
+-		std::string ssname = std::string([name UTF8String]) + ".metallib";
+-		std::string sspath = Path::Combine(EmuFolders::Resources, ssname);
+-		path = [[NSString alloc] initWithBytes:sspath.data() length:sspath.length() encoding:NSUTF8StringEncoding];
++		std::fprintf(stderr, "RRV: selected packaged Metal library %s\n", sspath.c_str());
++		std::fflush(stderr);
+ 	}
+-	return path ? [dev newLibraryWithFile:path error:nullptr] : nullptr;
++	return library;
+ }
+ 
+ static MRCOwned<id<MTLLibrary>> loadMainLibrary(id<MTLDevice> dev)
+@@ -33,7 +38,7 @@
+ 			return MRCTransfer(lib);
+ 	if (id<MTLLibrary> lib = loadMainLibrary(dev, @"default"))
+ 		return MRCTransfer(lib);
+-	return MRCTransfer([dev newDefaultLibrary]);
++	return {};
+ }
+ 
+ static GSMTLDevice::MetalVersion detectLibraryVersion(id<MTLLibrary> lib)
+diff --git a/pcsx2/GS/Renderers/Metal/RRVMetalLifetimeDiag.h b/pcsx2/GS/Renderers/Metal/RRVMetalLifetimeDiag.h
+new file mode 100644
+index 0000000..1a1c558
+--- /dev/null
++++ b/pcsx2/GS/Renderers/Metal/RRVMetalLifetimeDiag.h
+@@ -0,0 +1,230 @@
++// SPDX-FileCopyrightText: 2026 RRV-Recomp contributors
++// SPDX-License-Identifier: GPL-3.0+
++//
++// A deliberately small, process-lifetime diagnostic ring for the Metal
++// boundary.  It is not a renderer ownership mechanism: it never retains,
++// releases, dereferences, waits on, or otherwise changes the lifetime of the
++// objects whose pointer values it records.
++
++#pragma once
++
++#include <array>
++#include <atomic>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++
++namespace rrv::metal_lifetime
++{
++inline constexpr std::uint64_t kCapacity = 512;
++inline constexpr std::uint64_t kDrawableSlots = 8;
++inline constexpr std::uint64_t kBusyBit = std::uint64_t{1} << 63;
++
++enum class Event : std::uint64_t
++{
++	Attach = 1,
++	Detach,
++	UpdateWindow,
++	DestroySurface,
++	Destroy,
++	CommandBufferCreate,
++	Commit,
++	Complete,
++	SpinComplete,
++	DrawableAcquire,
++	DrawablePresent,
++	DeviceReady,
++	PipelineReady,
++	PresentConfig,
++	InterlaceConfig,
++};
++
++struct Record
++{
++	std::uint64_t ticket = 0;
++	std::uint64_t lifecycle = 0;
++	std::uint64_t command_buffer = 0;
++	std::uint64_t queue = 0;
++	std::uint64_t layer = 0;
++	std::uint64_t drawable = 0;
++	std::uint64_t draw = 0;
++	std::uint64_t status = 0;
++	std::uint64_t thread = 0;
++	std::uint64_t surface_width = 0;
++	std::uint64_t surface_height = 0;
++	std::uint64_t pixel_format = 0;
++	std::uint64_t reacquire_before_complete = 0;
++	Event event = Event::Attach;
++};
++
++struct Snapshot
++{
++	std::uint64_t first_ticket = 0;
++	std::uint64_t next_ticket = 1;
++	std::uint64_t overwritten = 0;
++	std::uint64_t gaps = 0;
++	std::uint64_t count = 0;
++	std::array<Record, kCapacity> records{};
++};
++
++class Ring final
++{
++	struct Slot
++	{
++		// `generation` is the ticket of a fully-published slot. The high bit is
++		// a writer lease, so snapshot readers never consume partial fields.
++		std::atomic<std::uint64_t> generation{0};
++		std::atomic<std::uint64_t> lifecycle{0};
++		std::atomic<std::uint64_t> command_buffer{0};
++		std::atomic<std::uint64_t> queue{0};
++		std::atomic<std::uint64_t> layer{0};
++		std::atomic<std::uint64_t> drawable{0};
++		std::atomic<std::uint64_t> draw{0};
++		std::atomic<std::uint64_t> status{0};
++		std::atomic<std::uint64_t> thread{0};
++		std::atomic<std::uint64_t> event{0};
++		std::atomic<std::uint64_t> surface_width{0};
++		std::atomic<std::uint64_t> surface_height{0};
++		std::atomic<std::uint64_t> pixel_format{0};
++		std::atomic<std::uint64_t> reacquire_before_complete{0};
++	};
++
++	std::array<Slot, kCapacity> m_slots{};
++	std::atomic<std::uint64_t> m_next_ticket{1};
++	std::atomic<std::uint64_t> m_lifecycle{0};
++	std::atomic<bool> m_configured{false};
++	std::atomic<bool> m_enabled{false};
++	// Eight slots cover the normal Metal drawable ring without allocating or
++	// retaining it. A hash collision can only make this diagnostic conservative
++	// (a missed flag), never alter presentation ownership.
++	std::array<std::atomic<std::uint64_t>, kDrawableSlots> m_pending_drawables{};
++
++public:
++	void configureAtCreate()
++	{
++		bool expected = false;
++		if (m_configured.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
++		{
++			const char* value = std::getenv("RRV_METAL_LIFETIME_DIAG");
++			m_enabled.store(value && std::strcmp(value, "1") == 0, std::memory_order_release);
++		}
++	}
++
++	void startLifecycle()
++	{
++		if (m_enabled.load(std::memory_order_relaxed))
++			m_lifecycle.fetch_add(1, std::memory_order_relaxed);
++	}
++
++	bool enabled() const { return m_enabled.load(std::memory_order_relaxed); }
++
++	// Test-only setup has no production call sites. It allows the fixed-size
++	// protocol to be stressed without reading the process environment.
++	void enableForTest()
++	{
++		m_configured.store(true, std::memory_order_relaxed);
++		m_enabled.store(true, std::memory_order_relaxed);
++		m_lifecycle.store(1, std::memory_order_relaxed);
++	}
++
++	void record(Event event, std::uint64_t command_buffer, std::uint64_t queue,
++		std::uint64_t layer, std::uint64_t drawable, std::uint64_t draw,
++		std::uint64_t status, std::uint64_t thread, std::uint64_t surface_width = 0,
++		std::uint64_t surface_height = 0, std::uint64_t pixel_format = 0,
++		std::uint64_t reacquire_before_complete = 0)
++	{
++		if (!m_enabled.load(std::memory_order_relaxed))
++			return;
++
++		const std::uint64_t ticket = m_next_ticket.fetch_add(1, std::memory_order_relaxed);
++		Slot& slot = m_slots[ticket % kCapacity];
++		std::uint64_t generation = slot.generation.load(std::memory_order_acquire);
++		// Never wait for another recorder, including a completion callback. A busy,
++		// newer, or contended slot drops this ticket; snapshot() reports that gap.
++		if ((generation & kBusyBit) || generation >= ticket ||
++			!slot.generation.compare_exchange_strong(generation, ticket | kBusyBit,
++				std::memory_order_acquire, std::memory_order_acquire))
++			return;
++
++		slot.lifecycle.store(m_lifecycle.load(std::memory_order_relaxed), std::memory_order_relaxed);
++		slot.command_buffer.store(command_buffer, std::memory_order_relaxed);
++		slot.queue.store(queue, std::memory_order_relaxed);
++		slot.layer.store(layer, std::memory_order_relaxed);
++		slot.drawable.store(drawable, std::memory_order_relaxed);
++		slot.draw.store(draw, std::memory_order_relaxed);
++		slot.status.store(status, std::memory_order_relaxed);
++		slot.thread.store(thread, std::memory_order_relaxed);
++		slot.event.store(static_cast<std::uint64_t>(event), std::memory_order_relaxed);
++		slot.surface_width.store(surface_width, std::memory_order_relaxed);
++		slot.surface_height.store(surface_height, std::memory_order_relaxed);
++		slot.pixel_format.store(pixel_format, std::memory_order_relaxed);
++		slot.reacquire_before_complete.store(reacquire_before_complete, std::memory_order_relaxed);
++		slot.generation.store(ticket, std::memory_order_release);
++	}
++
++	bool drawableIsPending(std::uint64_t drawable) const
++	{
++		return enabled() && drawable != 0 && m_pending_drawables[(drawable >> 4) % kDrawableSlots].load(std::memory_order_acquire) == drawable;
++	}
++
++	void markDrawablePresented(std::uint64_t drawable)
++	{
++		if (enabled() && drawable != 0)
++			m_pending_drawables[(drawable >> 4) % kDrawableSlots].store(drawable, std::memory_order_release);
++	}
++
++	void markDrawableCompleted(std::uint64_t drawable)
++	{
++		if (!enabled() || drawable == 0)
++			return;
++		std::atomic<std::uint64_t>& pending = m_pending_drawables[(drawable >> 4) % kDrawableSlots];
++		std::uint64_t expected = drawable;
++		pending.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
++	}
++
++	void forceBusySlotForTest(std::uint64_t ticket)
++	{
++		m_slots[ticket % kCapacity].generation.store(ticket | kBusyBit, std::memory_order_release);
++	}
++
++	Snapshot snapshot() const
++	{
++		Snapshot result;
++		result.next_ticket = m_next_ticket.load(std::memory_order_acquire);
++		result.first_ticket = result.next_ticket > kCapacity ? result.next_ticket - kCapacity : 1;
++		result.overwritten = result.first_ticket - 1;
++		for (std::uint64_t ticket = result.first_ticket; ticket < result.next_ticket; ++ticket)
++		{
++			const Slot& slot = m_slots[ticket % kCapacity];
++			const std::uint64_t before = slot.generation.load(std::memory_order_acquire);
++			if (before != ticket)
++			{
++				++result.gaps;
++				continue;
++			}
++			Record& record = result.records[result.count];
++			record.ticket = ticket;
++			record.lifecycle = slot.lifecycle.load(std::memory_order_relaxed);
++			record.command_buffer = slot.command_buffer.load(std::memory_order_relaxed);
++			record.queue = slot.queue.load(std::memory_order_relaxed);
++			record.layer = slot.layer.load(std::memory_order_relaxed);
++			record.drawable = slot.drawable.load(std::memory_order_relaxed);
++			record.draw = slot.draw.load(std::memory_order_relaxed);
++			record.status = slot.status.load(std::memory_order_relaxed);
++			record.thread = slot.thread.load(std::memory_order_relaxed);
++			record.surface_width = slot.surface_width.load(std::memory_order_relaxed);
++			record.surface_height = slot.surface_height.load(std::memory_order_relaxed);
++			record.pixel_format = slot.pixel_format.load(std::memory_order_relaxed);
++			record.reacquire_before_complete = slot.reacquire_before_complete.load(std::memory_order_relaxed);
++			record.event = static_cast<Event>(slot.event.load(std::memory_order_relaxed));
++			if (slot.generation.load(std::memory_order_acquire) != ticket)
++			{
++				++result.gaps;
++				continue;
++			}
++			++result.count;
++		}
++		return result;
++	}
++};
++} // namespace rrv::metal_lifetime

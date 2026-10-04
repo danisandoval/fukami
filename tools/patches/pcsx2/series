@@ -1,0 +1,14 @@
+# Applied in this order, concatenated byte for byte, they equal
+# tools/patches/pcsx2-gs-bridge-target.patch (sha256-locked in config/dependencies.lock.toml).
+# One patch file per line; blank lines and # comments are ignored.
+0001-bridge-target-and-local-memory-entry-points.patch
+0002-metal-lifetime-diagnostic.patch
+0003-software-renderer-without-vm-jit-map.patch
+0004-gif-packed-partial-exhaustion.patch
+0005-texture-cache-scratch-capacity.patch
+0006-full-frame-canonical-field-ofy.patch
+0007-full-frame-round-sprite-u-only.patch
+0008-drop-large-st-triangles.patch
+0009-full-frame-round-sprite-minified-v.patch
+0010-software-renderer-static-keys-and-arm64-c-path.patch
+0011-metal-present-pacing.patch

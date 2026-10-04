@@ -1,0 +1,23 @@
+{
+  "schema": "rrv-vu-aot-catalogue-v2",
+  "catalogue_id": "a6058c22e6502437",
+  "generator": "tools/vu-aot/vu_aot_gen.py",
+  "elf_chains": 7,
+  "recorded_images": 0,
+  "blocks": 2662,
+  "slots": 44774,
+  "max_block_slots": 256,
+  "position_independent": true,
+  "block_analysis": {
+    "slots": 44774,
+    "fmac": 17685,
+    "no_mac_word": 13650,
+    "no_ring_write": 33624,
+    "no_visible": 43484,
+    "clamps": 38894,
+    "clamps_skipped": 17232
+  },
+  "input_elf_sha256": "fb5b4d3f6d74384cee9da4c8b954b40a0205da0a9ae7db9e68d670156f5e706f",
+  "record_dirs": [],
+  "blocks_inc_sha256": "6019a76cbafca0d314c5287921636be8dff5a1391e7eceeb89869ce83fa3318a"
+}

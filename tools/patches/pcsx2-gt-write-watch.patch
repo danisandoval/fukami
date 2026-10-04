@@ -1,0 +1,372 @@
+Bounded scratch PCSX2 probes for hardware-vs-RRV subsystem localisation.
+Applies after pcsx2-gt-capture.patch and pcsx2-gt-guest-trace.patch to pinned
+PCSX2 d5f75c9e4. All four probes are default off and share one log file
+(RRV_GT_WATCH_LOG, default stderr) and one phase gate (RRV_GT_WATCH_PHASE).
+
+  RRV_GT_WATCH=<hexaddr>:<hexlen>[,...]  EE write-watch. Installs PCSX2's own
+      memchecks from the environment and AGGREGATES the hits per writer PC
+      (recMemcheck also emits the call for LOG-only checks; dynarecMemcheck
+      counts and returns instead of pausing the VM). Answers "which guest PC
+      writes this range, how often" on hardware. The mirror on our side is
+      RRV_PATH_WATCH + RRV_PATH_WATCH_HIST.
+  RRV_GT_FNHITS=<hex>[,...]              execution counter for named guest PCs.
+  RRV_GT_BLOCKS=1                        counts EVERY recompiled block entry.
+      Mirror: our RRV_FN_HITS=all. Diffing the two executed sets for one scene
+      names the guest code one engine runs and the other does not.
+  RRV_GT_MEMDUMP=<hexaddr>:<hexlen>      hex-dumps one guest range per report,
+      in the same format our runtime's RRV_GT_MEMDUMP prints.
+  RRV_GT_FNTRACE=<hex>[,...]             for the same PCs, log the first
+      RRV_GT_FNTRACE_MAX (default 40) hits with $ra and $a0..$a3, which names
+      the CALLER of a routine hardware runs and we do not.
+
+Reports carry the scene selector [0x334E04] so dumps align to the same guest
+coordinate on both engines (the demo race is sel=0x00020005), and per-interval
+deltas so a frozen subsystem is visible without diffing whole logs. NOTE: a
+report covers the interval BEFORE it, so an interval straddling a selector edge
+mixes two scenes -- exclude those before reading a histogram.
+
+--- a/pcsx2/x86/ix86-32/iR5900.cpp
++++ b/pcsx2/x86/ix86-32/iR5900.cpp
+@@ -22,10 +22,14 @@
+ #include "common/HeapArray.h"
+ #include "common/Perf.h"
+ 
++#include <algorithm>
+ #include <atomic>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
++#include <map>
++#include <utility>
++#include <vector>
+ 
+ // Only for MOVQ workaround.
+ #include "common/emitter/internal.h"
+@@ -46,10 +50,287 @@
+ using namespace x86Emitter;
+ using namespace R5900;
+ 
++// ── RRV scratch probe: EE write-watch (default off) ─────────────────────────
++// Answers "which guest PC writes this address range?" on hardware, by
++// installing PCSX2's own EE memchecks from an environment variable and
++// aggregating the hits per PC instead of pausing the VM.
++//   RRV_GT_WATCH=0x01DB2AB0:0xEE0[,0x00335260:0xAF00]
++//   RRV_GT_WATCH_LOG=<path>          (default stderr)
++//   RRV_GT_WATCH_PHASE=<n>           (only count while scenePhase == n)
++//   RRV_GT_WATCH_DUMP=<vsyncs>       (histogram dump period, default 300)
++namespace RRVWatch
++{
++struct Entry { u64 count = 0, prev = 0; u32 first_addr = 0; u32 last_addr = 0; };
++static std::map<u32, Entry> s_hits;
++static std::vector<std::pair<u32, u32>> s_ranges;  // start, end
++static bool s_enabled = false, s_parsed = false, s_installed = false;
++static u32 s_phase_gate = 0xFFFFFFFFu, s_dump_period = 300, s_vsyncs = 0;
++static FILE* s_log = nullptr;
++
++static void Parse()
++{
++	if (s_parsed) return;
++	s_parsed = true;
++	const char* v = std::getenv("RRV_GT_WATCH");
++	// Values are addresses, so "0x..." is legal — only a bare "0" disables.
++	if (!v || !v[0] || std::strcmp(v, "0") == 0) return;
++	const char* p = v;
++	while (*p)
++	{
++		char* end = nullptr;
++		const u32 start = static_cast<u32>(std::strtoul(p, &end, 0));
++		if (end == p) break;
++		u32 len = 4;
++		if (*end == ':') { p = end + 1; len = static_cast<u32>(std::strtoul(p, &end, 0)); }
++		if (len == 0) len = 4;
++		s_ranges.emplace_back(start, start + len);
++		if (*end != ',') break;
++		p = end + 1;
++	}
++	if (s_ranges.empty()) return;
++	const char* logp = std::getenv("RRV_GT_WATCH_LOG");
++	s_log = (!logp || !logp[0] || std::strcmp(logp, "-") == 0) ? stderr : std::fopen(logp, "w");
++	if (!s_log) s_log = stderr;
++	std::setvbuf(s_log, nullptr, _IOLBF, 0);
++	if (const char* ph = std::getenv("RRV_GT_WATCH_PHASE")) s_phase_gate = static_cast<u32>(std::strtoul(ph, nullptr, 0));
++	if (const char* dp = std::getenv("RRV_GT_WATCH_DUMP")) s_dump_period = std::max(1u, static_cast<u32>(std::strtoul(dp, nullptr, 0)));
++	s_enabled = true;
++}
++
++bool Enabled() { return s_enabled; }
++
++// RRV_GT_FNHITS=<hex>[,<hex>...] — count executions of the listed guest PCs,
++// reported in the same periodic dump. Apples-to-apples with our runtime's
++// RRV_FN_HITS, which counts the same call edges on our side.
++static std::map<u32, std::pair<u64, u64>> s_fn;   // pc -> {count, prev}
++static bool s_fn_parsed = false;
++
++static void ParseFn()
++{
++	if (s_fn_parsed) return;
++	s_fn_parsed = true;
++	const char* v = std::getenv("RRV_GT_FNHITS");
++	if (!v || !v[0] || std::strcmp(v, "0") == 0) return;
++	const char* p = v;
++	while (*p)
++	{
++		char* end = nullptr;
++		const u32 a = static_cast<u32>(std::strtoul(p, &end, 16));
++		if (end == p) break;
++		s_fn[a] = {0, 0};
++		if (*end != ',') break;
++		p = end + 1;
++	}
++}
++
++bool IsFnPC(u32 pc) { ParseFn(); return s_fn.count(pc) != 0; }
++
++void OnFn(u32 pc, u32 phase)
++{
++	if (s_phase_gate != 0xFFFFFFFFu && phase != s_phase_gate) return;
++	auto it = s_fn.find(pc);
++	if (it != s_fn.end()) it->second.first++;
++}
++
++static void Dump(const char* why, u32 phase)
++{
++	if (!s_log) return;
++	u64 total = 0, delta_total = 0;
++	for (const auto& kv : s_hits) { total += kv.second.count; delta_total += kv.second.count - kv.second.prev; }
++	std::fprintf(s_log, "kind=watch_dump why=%s phase=%u sel=%08x vsyncs=%u writers=%zu total=%llu delta=%llu\n",
++		why, phase, memRead32(0x334E04u), s_vsyncs, s_hits.size(),
++		static_cast<unsigned long long>(total), static_cast<unsigned long long>(delta_total));
++	for (auto& kv : s_fn)
++	{
++		const u64 d = kv.second.first - kv.second.second;
++		kv.second.second = kv.second.first;
++		std::fprintf(s_log, "  fn=%08x delta=%llu count=%llu\n", kv.first,
++			static_cast<unsigned long long>(d), static_cast<unsigned long long>(kv.second.first));
++	}
++	for (auto& kv : s_hits)
++	{
++		const u64 d = kv.second.count - kv.second.prev;
++		kv.second.prev = kv.second.count;
++		if (d == 0) continue;
++		std::fprintf(s_log, "  pc=%08x delta=%llu count=%llu last_addr=%08x\n", kv.first,
++			static_cast<unsigned long long>(d), static_cast<unsigned long long>(kv.second.count), kv.second.last_addr);
++	}
++	std::fflush(s_log);
++}
++
++void OnHit(u32 pc, u32 addr, u32 phase)
++{
++	if (s_phase_gate != 0xFFFFFFFFu && phase != s_phase_gate) return;
++	Entry& e = s_hits[pc];
++	if (e.count == 0) e.first_addr = addr;
++	e.count++;
++	e.last_addr = addr;
++}
++
++static void MemDump();
++static void ParseTrace();
++static bool TraceRequested();
++static void DumpBlocks();
++bool BlocksEnabled();
++
++void OnVSync(u32 phase)
++{
++	Parse();
++	ParseFn();
++	const char* memdump_env = std::getenv("RRV_GT_MEMDUMP");
++	if (!s_enabled && s_fn.empty() && !TraceRequested() && !BlocksEnabled() && !(memdump_env && memdump_env[0])) return;
++	if (!s_log)
++	{
++		const char* logp = std::getenv("RRV_GT_WATCH_LOG");
++		s_log = (!logp || !logp[0] || std::strcmp(logp, "-") == 0) ? stderr : std::fopen(logp, "w");
++		if (!s_log) s_log = stderr;
++		std::setvbuf(s_log, nullptr, _IOLBF, 0);
++		if (const char* ph = std::getenv("RRV_GT_WATCH_PHASE")) s_phase_gate = static_cast<u32>(std::strtoul(ph, nullptr, 0));
++		if (const char* dp = std::getenv("RRV_GT_WATCH_DUMP")) s_dump_period = std::max(1u, static_cast<u32>(std::strtoul(dp, nullptr, 0)));
++	}
++	s_vsyncs++;
++	if (!s_installed && !s_ranges.empty() && (s_phase_gate == 0xFFFFFFFFu || phase == s_phase_gate))
++	{
++		for (const auto& r : s_ranges)
++			CBreakPoints::AddMemCheck(BREAKPOINT_EE, r.first, r.second, MEMCHECK_WRITE, MEMCHECK_LOG);
++		// Recompiled blocks only carry memchecks if they existed at compile
++		// time; recResetEE() defers the flush when the EE is executing, so it
++		// is safe to ask for it from the vsync callback.
++		Cpu->Reset();
++		s_installed = true;
++		std::fprintf(s_log, "kind=watch_install phase=%u ranges=%zu\n", phase, s_ranges.size());
++	}
++	if ((s_vsyncs % s_dump_period) == 0)
++	{
++		if (s_installed || !s_fn.empty())
++			Dump("periodic", phase);
++		else if (s_log)
++			std::fprintf(s_log, "kind=watch_dump why=periodic phase=%u sel=%08x vsyncs=%u writers=0 total=0 delta=0\n", phase, memRead32(0x334E04u), s_vsyncs);
++		DumpBlocks();
++		MemDump();
++	}
++}
++// RRV_GT_FNTRACE=<hex>[,...] — for the same PCs RRV_GT_FNHITS counts, also log
++// the first RRV_GT_FNTRACE_MAX (default 40) hits with $ra and $a0..$a3, so the
++// CALLER of a routine hardware runs and we do not can be named directly.
++static std::map<u32, u32> s_trace;   // pc -> hits logged
++static bool s_trace_parsed = false;
++
++static void ParseTrace()
++{
++	if (s_trace_parsed) return;
++	s_trace_parsed = true;
++	const char* v = std::getenv("RRV_GT_FNTRACE");
++	if (!v || !v[0] || std::strcmp(v, "0") == 0) return;
++	const char* p = v;
++	while (*p)
++	{
++		char* end = nullptr;
++		const u32 a = static_cast<u32>(std::strtoul(p, &end, 16));
++		if (end == p) break;
++		s_trace[a] = 0;
++		if (*end != ',') break;
++		p = end + 1;
++	}
++}
++
++bool IsTracePC(u32 pc) { ParseTrace(); return s_trace.count(pc) != 0; }
++static bool TraceRequested() { ParseTrace(); return !s_trace.empty(); }
++
++void TraceHook(u32 pc)
++{
++	static const u32 cap = []
++	{
++		const char* v = std::getenv("RRV_GT_FNTRACE_MAX");
++		return v ? static_cast<u32>(std::strtoul(v, nullptr, 0)) : 40u;
++	}();
++	const u32 phase = memRead32(0x334E94u);
++	if (s_phase_gate != 0xFFFFFFFFu && phase != s_phase_gate) return;
++	auto it = s_trace.find(pc);
++	if (it == s_trace.end() || it->second >= cap || !s_log) return;
++	it->second++;
++	std::fprintf(s_log, "kind=fntrace pc=%08x sel=%08x hit=%u ra=%08x a0=%08x a1=%08x a2=%08x a3=%08x s0=%08x s1=%08x s3=%08x s4=%08x sp=%08x\n",
++		pc, memRead32(0x334E04u), it->second,
++		cpuRegs.GPR.r[31].UL[0], cpuRegs.GPR.r[4].UL[0], cpuRegs.GPR.r[5].UL[0],
++		cpuRegs.GPR.r[6].UL[0], cpuRegs.GPR.r[7].UL[0], cpuRegs.GPR.r[16].UL[0],
++		cpuRegs.GPR.r[17].UL[0], cpuRegs.GPR.r[19].UL[0], cpuRegs.GPR.r[20].UL[0],
++		cpuRegs.GPR.r[29].UL[0]);
++}
++
++void FnHook(u32 pc) { OnFn(pc, memRead32(0x334E94u)); }
++
++// RRV_GT_BLOCKS=1 — count every recompiled-block ENTRY while the phase gate
++// holds. Diffed against our runtime's RRV_FN_HITS=all, this names the guest
++// code hardware runs in a scene and we do not (or the reverse) without having
++// to guess a candidate list first.
++bool BlocksEnabled()
++{
++	static const bool on = []
++	{
++		const char* v = std::getenv("RRV_GT_BLOCKS");
++		return v && v[0] && v[0] != '0';
++	}();
++	return on;
++}
++
++static std::map<u32, std::pair<u64, u64>> s_blocks;
++
++void BlockHook(u32 pc)
++{
++	const u32 phase = memRead32(0x334E94u);
++	if (s_phase_gate != 0xFFFFFFFFu && phase != s_phase_gate) return;
++	s_blocks[pc].first++;
++}
++
++static void DumpBlocks()
++{
++	if (!BlocksEnabled() || !s_log) return;
++	u64 delta = 0;
++	for (const auto& kv : s_blocks) delta += kv.second.first - kv.second.second;
++	std::fprintf(s_log, "kind=blocks entries=%zu delta=%llu\n", s_blocks.size(), static_cast<unsigned long long>(delta));
++	for (auto& kv : s_blocks)
++	{
++		const u64 d = kv.second.first - kv.second.second;
++		kv.second.second = kv.second.first;
++		if (d == 0) continue;
++		std::fprintf(s_log, "  blk=%08x delta=%llu count=%llu\n", kv.first,
++			static_cast<unsigned long long>(d), static_cast<unsigned long long>(kv.second.first));
++	}
++}
++
++// RRV_GT_MEMDUMP=<hexaddr>:<hexlen> — hex-dump one guest range in every
++// periodic dump, so "which words of this object evolve during the race" can be
++// compared engine to engine without comparing values (the attract picks a
++// different demo each time, so only the STRUCTURE is comparable).
++static void MemDump()
++{
++	static bool parsed = false;
++	static u32 addr = 0, len = 0;
++	if (!parsed)
++	{
++		parsed = true;
++		if (const char* v = std::getenv("RRV_GT_MEMDUMP"))
++		{
++			char* end = nullptr;
++			addr = static_cast<u32>(std::strtoul(v, &end, 16));
++			if (end && *end == ':') len = static_cast<u32>(std::strtoul(end + 1, nullptr, 16));
++		}
++	}
++	if (!addr || !len || !s_log) return;
++	for (u32 o = 0; o < len; o += 32)
++	{
++		std::fprintf(s_log, "  mem %08x:", addr + o);
++		for (u32 w = 0; w < 32 && o + w < len; w += 4)
++			std::fprintf(s_log, " %08x", memRead32(addr + o + w));
++		std::fputc('\n', s_log);
++	}
++}
++} // namespace RRVWatch
++
+ namespace RRVGuestTrace
+ {
+ static std::atomic<u64> s_vsyncs{0}, s_gs_submits{0}, s_gs_bytes{0};
+-void OnVSync() { s_vsyncs.fetch_add(1, std::memory_order_relaxed); }
++void OnVSync() { s_vsyncs.fetch_add(1, std::memory_order_relaxed); RRVWatch::OnVSync(memRead32(0x334E94u)); }
+ void NoteGS(u32 bytes) { s_gs_submits.fetch_add(1, std::memory_order_relaxed); s_gs_bytes.fetch_add(bytes, std::memory_order_relaxed); }
+ static FILE* Stream()
+ {
+@@ -1595,6 +1876,14 @@
+ 			return;
+ 	}
+ 
++	if (RRVWatch::Enabled() && (mc.result & MEMCHECK_LOG))
++	{
++		const u32 rs = (op >> 21) & 0x1F;
++		const u32 addr = cpuRegs.GPR.r[rs].UL[0] + static_cast<u32>(static_cast<s32>(static_cast<s16>(op)));
++		RRVWatch::OnHit(cpuRegs.pc, addr, memRead32(0x334E94u));
++		return;
++	}
++
+ 	if (mc.result & MEMCHECK_LOG)
+ 	{
+ 		if (opcode.flags & IS_STORE)
+@@ -1648,7 +1937,8 @@
+ 		xForwardJGE8 next2; // if start >= address+size then goto next2
+ 
+ 		// hit the breakpoint
+-		if (checks[i].result & MEMCHECK_BREAK)
++		// RRV scratch probe: LOG-only checks also need the call emitted.
++		if (checks[i].result & (MEMCHECK_BREAK | MEMCHECK_LOG))
+ 		{
+ 			xMOV(eax, i);
+ 			xFastCall((void*)dynarecMemcheck, eax);
+@@ -2635,10 +2925,13 @@
+ 	if (doRecompilation)
+ 	{
+ 		// Finally: Generate x86 recompiled code!
++		if (RRVWatch::BlocksEnabled()) { iFlushCall(FLUSH_EVERYTHING); xFastCall((void*)RRVWatch::BlockHook, startpc); }
+ 		g_pCurInstInfo = s_pInstCache;
+ 		while (!g_branch && pc < s_nEndBlock)
+ 		{
+ 			if (RRVGuestTrace::IsHookPC(pc)) { iFlushCall(FLUSH_EVERYTHING); xFastCall((void*)RRVGuestTrace::Hook, pc); }
++			if (RRVWatch::IsFnPC(pc)) { iFlushCall(FLUSH_EVERYTHING); xFastCall((void*)RRVWatch::FnHook, pc); }
++			if (RRVWatch::IsTracePC(pc)) { iFlushCall(FLUSH_EVERYTHING); xFastCall((void*)RRVWatch::TraceHook, pc); }
+ #ifdef DUMP_BLOCKS
+ 			if (dump_block)
+ 			{

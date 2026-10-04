@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    name: no game material, no personal data
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Safety gates (forbidden paths, ELF/CHD/ISO magic, secrets, large files)
+        run: python3 scripts/export_public.py --check-tree .
+
+  asset-free:
+    name: asset-free suite (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS ARM64
+            os: macos-14
+            preset: m0-macos-arm64
+          - name: Linux x86-64
+            os: ubuntu-24.04
+            preset: m0-linux-x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake ninja-build g++ python3 zsh
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+      - name: Configure
+        run: cmake --preset "${{ matrix.preset }}"
+      - name: Build the declared suite
+        run: cmake --build "build/${{ matrix.preset }}" --target rrv-asset-free-tests --parallel
+      - name: Run it
+        run: python3 scripts/qualify_asset_free.py --build-dir "build/${{ matrix.preset }}"
+
+  pcsx2-patch-series:
+    name: PCSX2 bridge patch series
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the locked PCSX2 revision (tree only, no build)
+        run: |
+          set -euo pipefail
+          rev="$(python3 -c "import sys; sys.path.insert(0, 'scripts'); from prepare_dependencies import LOCK_PATH, load_toml; print(load_toml(LOCK_PATH)['pcsx2']['revision'])")"
+          git init -q pcsx2-source
+          git -C pcsx2-source fetch -q --depth 1 https://github.com/PCSX2/pcsx2.git "$rev"
+      - name: The series concatenates to the locked patch and reproduces the locked tree
+        run: |
+          set -euo pipefail
+          python3 scripts/pcsx2_patch_series.py check --pcsx2-source pcsx2-source
+          PCSX2_SOURCE_DIR="$PWD/pcsx2-source" python3 tests/test_pcsx2_patch_series.py

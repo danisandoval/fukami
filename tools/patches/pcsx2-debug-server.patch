@@ -1,0 +1,1530 @@
+Opt-in MCP/TCP debug server for the PCSX2 ground-truth build.
+
+Vendors https://github.com/hkmodd/PCSX2-MCP `pcsx2-plugin/DebugServer.{cpp,h}`
+(MIT) into `pcsx2/DebugTools/` of the original PCSX2 d5f75c9e4 adaptation, now applied to the
+fd9d310 pin, and starts it from
+VMManager::Initialize only when RRV_GT_DEBUG_SERVER is set. Applies AFTER
+pcsx2-gt-capture / pcsx2-gt-guest-trace / pcsx2-vu1-input-trace /
+pcsx2-gt-write-watch -- it is patch #5 in the GT stack.
+
+  RRV_GT_DEBUG_SERVER=1        listen on TCP 21512 (the PCSX2-MCP default)
+  RRV_GT_DEBUG_SERVER=<port>   listen on <port>
+
+Default OFF: no TCP listener starts and the VSync recorder drops events.
+The event hooks add only backing-state reads and branch/counter work; they do
+not write guest state or change timing/IRQ/GS behavior.
+
+What it adds over our existing instrumentation: interactive execution control
+against the reference (pause / continue / step / step-over), live 128-bit
+register reads across all seven categories (GPR/CP0/FPR/FCR/VU0F/VU0I/GSPRIV),
+conditional execution breakpoints, PCSX2-native disassembly, expression
+evaluation, and a stack walk -- i.e. the things PINE.md section 7.1 currently
+documents as "open the PCSX2 GUI debugger by hand".
+
+Five RRV edits vs upstream, all recorded in the file's provenance header:
+memory accessors renamed to Read*/Write* with `bool*` validity out-params;
+BiosThread::StackTop() does not exist at the pin; MipsStackWalk::Walk() takes
+five arguments at the pin; the env gate; and (5) a paused-EE read-only Gate-3 event/snapshot probe.
+
+COEXISTENCE WARNING. pcsx2-gt-write-watch.patch already changes shared memcheck
+machinery -- it makes recMemcheck fire for MEMCHECK_LOG-only checks. The debug
+server installs MEMCHECK_BREAK checks through the same CBreakPoints API. They
+work together, but do NOT arm RRV_GT_WATCH and a debug-server watchpoint on the
+same address range in one session: the aggregating histogram and the pausing
+watchpoint will both claim the hit and the histogram counts become unreadable.
+
+ORACLE WARNING. Writing guest memory or registers over this server makes the
+run a modified reference, not ground truth. Read-only use only, unless the run
+is explicitly labelled as an experiment.
+
+Gate-3 commands: rrv_gt_vsync_snapshot and rrv_gt_vsync_events
+(after_seq, limit<=32). Event kinds: 1 reset, 2 mode, 3 scheduled start,
+4 asserted start, 5 suppressed start, 6 FIELD/VSINT, 7 suppressed FIELD,
+8 asserted end, 9 suppressed end. Read while EE is paused; the ring is
+16,384 records and reports overwrite and rejected-read counters. SYNCV is
+read directly from PS2GS_BASE, as PCSX2 Counters.cpp itself does. CMOD is
+SMODE1 bits 13-14; VFP odd is SYNCV bit 0. video_mode is the timing-cache
+mode, while gs_video_mode and gs_is_interlaced are live counter inputs.
+Initial hwReset calls rcntInit before DebugServer::Start in VM initialization;
+therefore its Reset event is absent from the ring (later resets can record).
+
+diff --git a/pcsx2/CMakeLists.txt b/pcsx2/CMakeLists.txt
+index 4652ff9..ba8ad9f 100644
+--- a/pcsx2/CMakeLists.txt
++++ b/pcsx2/CMakeLists.txt
+@@ -801,6 +801,7 @@ set(pcsx2DebugToolsSources
+ 	DebugTools/MipsAssemblerTables.cpp
+ 	DebugTools/MipsStackWalk.cpp
+ 	DebugTools/Breakpoints.cpp
++	DebugTools/DebugServer.cpp
+ 	DebugTools/SymbolGuardian.cpp
+ 	DebugTools/SymbolImporter.cpp
+ 	DebugTools/DisR3000A.cpp
+@@ -819,6 +820,7 @@ set(pcsx2DebugToolsHeaders
+ 	DebugTools/MipsAssemblerTables.h
+ 	DebugTools/MipsStackWalk.h
+ 	DebugTools/Breakpoints.h
++	DebugTools/DebugServer.h
+ 	DebugTools/SymbolGuardian.h
+ 	DebugTools/SymbolImporter.h
+ 	DebugTools/Debug.h
+diff --git a/pcsx2/Counters.cpp b/pcsx2/Counters.cpp
+index 1bb801a..9dc272d 100644
+--- a/pcsx2/Counters.cpp
++++ b/pcsx2/Counters.cpp
+@@ -7,6 +7,7 @@
+ #include "Common.h"
+ #include "R3000A.h"
+ #include "Counters.h"
++#include "DebugTools/DebugServer.h"
+ #include "IopCounters.h"
+ 
+ #include "GS.h"
+@@ -164,10 +165,55 @@ struct vSyncTimingInfo
+ };
+ 
+ static vSyncTimingInfo vSyncInfo;
++static u64 s_rrv_gt_vsync_generation = 0;
++
++DebugServer::VSyncProbeSnapshot DebugServer::GetVSyncProbeSnapshot()
++{
++	VSyncProbeSnapshot s{};
++	s.ee_cycle = cpuRegs.cycle;
++	s.generation = s_rrv_gt_vsync_generation;
++	s.last_sequence = LastVSyncEventSequence();
++	s.vsync_start_cycle = vsyncCounter.startCycle;
++	s.csr = CSRreg._u64;
++	s.smode1 = *(u64*)PS2GS_BASE(GS_SMODE1);
++	s.smode2 = *(u64*)PS2GS_BASE(GS_SMODE2);
++	s.syncv = *(u64*)PS2GS_BASE(GS_SYNCV);
++	s.intc_stat = psHu32(INTC_STAT);
++	s.intc_mask = psHu32(INTC_MASK);
++	s.frame = g_FrameCount;
++	s.vsync_mode = vsyncCounter.Mode;
++	s.vsync_delta_cycles = vsyncCounter.deltaCycles;
++	s.video_mode = static_cast<u32>(vSyncInfo.VideoMode);
++	s.gs_video_mode = static_cast<u32>(gsVideoMode);
++	s.gs_is_interlaced = gsIsInterlaced ? 1 : 0;
++	s.smode1_cmod = (s.smode1 >> 13) & 3;
++	s.syncv_vfp_odd = s.syncv & 1;
++	s.render_cycles = vSyncInfo.Render;
++	s.blank_cycles = vSyncInfo.Blank;
++	s.gsblank_cycles = vSyncInfo.GSBlank;
++	s.hrender_cycles = vSyncInfo.hRender;
++	s.hblank_cycles = vSyncInfo.hBlank;
++	s.hsync_error = vSyncInfo.hSyncError;
++	s.scanlines = vSyncInfo.hScanlinesPerFrame;
++	s.frame_rate = vSyncInfo.Framerate;
++	return s;
++}
++
++static void RRVRecordVSync(DebugServer::VSyncProbeKind kind, u64 scheduled,
++	u64 csr_before, u32 intc_before)
++{
++	DebugServer::RecordVSyncEvent(kind, scheduled, csr_before, intc_before);
++}
++
++static void RRVRecordVSync(DebugServer::VSyncProbeKind kind, u64 scheduled, u64 csr_before)
++{
++	RRVRecordVSync(kind, scheduled, csr_before, psHu32(INTC_STAT));
++}
+ 
+ void rcntInit()
+ {
+ 	int i;
++	s_rrv_gt_vsync_generation = 0;
+ 
+ 	g_FrameCount = 0;
+ 
+@@ -198,6 +244,7 @@ void rcntInit()
+ 	for (i = 0; i < 4; i++)
+ 		rcntReset(i);
+ 	cpuRcntSet();
++	RRVRecordVSync(DebugServer::VSyncProbeKind::Reset, cpuRegs.cycle, CSRreg._u64);
+ }
+ 
+ static void vSyncInfoCalc(vSyncTimingInfo* info, double framesPerSecond, u32 scansPerFrame)
+@@ -345,6 +392,7 @@ void UpdateVSyncRate(bool force)
+ 
+ 	if (vSyncInfo.Framerate != frames_per_second || vSyncInfo.VideoMode != gsVideoMode || force)
+ 	{
++		const u64 rrv_csr_before = CSRreg._u64;
+ 		u32 total_scanlines = 0;
+ 		bool custom = false;
+ 
+@@ -421,6 +469,8 @@ void UpdateVSyncRate(bool force)
+ 		cpuRcntSet();
+ 
+ 		VMManager::Internal::FrameRateChanged();
++		RRVRecordVSync(DebugServer::VSyncProbeKind::ModeChange,
++			vsyncCounter.startCycle + vsyncCounter.deltaCycles, rrv_csr_before);
+ 	}
+ }
+ 
+@@ -486,6 +536,8 @@ static __fi void DoFMVSwitch()
+ 
+ static __fi void VSyncStart(u64 sCycle)
+ {
++	++s_rrv_gt_vsync_generation;
++	RRVRecordVSync(DebugServer::VSyncProbeKind::StartScheduled, sCycle, CSRreg._u64);
+ 	// End-of-frame tasks.
+ 	DoFMVSwitch();
+ 	VMManager::Internal::VSyncOnCPUThread();
+@@ -508,10 +560,14 @@ static __fi void VSyncStart(u64 sCycle)
+ 
+ 	if (!GSSMODE1reg.SINT)
+ 	{
++		const u32 rrv_intc_before = psHu32(INTC_STAT);
+ 		hwIntcIrq(INTC_VBLANK_S);
++		RRVRecordVSync(DebugServer::VSyncProbeKind::StartAsserted, sCycle, CSRreg._u64, rrv_intc_before);
+ 		rcntStartGate(true, sCycle); // Counters Start Gate code
+ 		psxVBlankStart();
+ 	}
++	else
++		RRVRecordVSync(DebugServer::VSyncProbeKind::StartSuppressed, sCycle, CSRreg._u64);
+ 
+ 	// INTC - VB Blank Start Hack --
+ 	// Hack fix!  This corrects a freezeup in Granda 2 where it decides to spin
+@@ -544,9 +600,14 @@ static __fi void VSyncStart(u64 sCycle)
+ 
+ static __fi void GSVSync()
+ {
++	const u64 rrv_csr_before = CSRreg._u64;
++	const u64 rrv_scheduled = vsyncCounter.startCycle + vsyncCounter.deltaCycles;
+ 	// CSR is swapped and GS vBlank IRQ is triggered roughly 3.5 hblanks after VSync Start
+ 	if (GSSMODE1reg.SINT)
++	{
++		RRVRecordVSync(DebugServer::VSyncProbeKind::FieldSuppressed, rrv_scheduled, rrv_csr_before);
+ 		return;
++	}
+ 
+ 	if (IsProgressiveVideoMode())
+ 		CSRreg.SetField();
+@@ -559,6 +620,7 @@ static __fi void GSVSync()
+ 		if (!GSIMR.VSMSK)
+ 			gsIrq();
+ 	}
++	RRVRecordVSync(DebugServer::VSyncProbeKind::FieldTransition, rrv_scheduled, rrv_csr_before);
+ }
+ 
+ static __fi void VSyncEnd(u64 sCycle)
+@@ -568,10 +630,14 @@ static __fi void VSyncEnd(u64 sCycle)
+ 	g_FrameCount++;
+ 	if (!GSSMODE1reg.SINT)
+ 	{
++		const u32 rrv_intc_before = psHu32(INTC_STAT);
+ 		hwIntcIrq(INTC_VBLANK_E); // HW Irq
++		RRVRecordVSync(DebugServer::VSyncProbeKind::EndAsserted, sCycle, CSRreg._u64, rrv_intc_before);
+ 		psxVBlankEnd(); // psxCounters vBlank End
+ 		rcntEndGate(true, sCycle); // Counters End Gate Code
+ 	}
++	else
++		RRVRecordVSync(DebugServer::VSyncProbeKind::EndSuppressed, sCycle, CSRreg._u64);
+ 
+ 	// This doesn't seem to be needed here.  Games only seem to break with regard to the
+ 	// vsyncstart irq.
+diff --git a/pcsx2/DebugTools/DebugServer.cpp b/pcsx2/DebugTools/DebugServer.cpp
+new file mode 100644
+index 0000000..a5152a6
+--- /dev/null
++++ b/pcsx2/DebugTools/DebugServer.cpp
+@@ -0,0 +1,1162 @@
++// ---------------------------------------------------------------------------
++// RRV-Recomp provenance note (see CLAUDE.md "Reference / oracle discipline")
++//
++//   Upstream:  https://github.com/hkmodd/PCSX2-MCP
++//              pcsx2-plugin/DebugServer.{cpp,h}, MIT licensed (header below).
++//   Vendored:  2026-08-22, against pinned PCSX2
++//              d5f75c9e42064a77036466f1f4594b0507888633.
++//   RRV edits: (1) DebugInterface memory accessors renamed read*/write* ->
++//                  Read*/Write* and `bool valid` -> `bool* valid`, matching
++//                  common/MemoryInterface.h at the pinned revision;
++//              (2) BiosThread::StackTop() does not exist at the pin -> 0;
++//              (3) MipsStackWalk::Walk() takes 5 args at the pin, not 6;
++//              (4) start/stop is gated on RRV_GT_DEBUG_SERVER (default OFF) so
++//                  this is a probe, not a behaviour change to the oracle.
++//   2026-09-24: (5) read-only Gate-3 paused EE VSync event/snapshot probe
++//               against the current fd9d310 PCSX2 pin.
++//
++// MIT is GPL-3.0 compatible; the combined work stays GPL-3.0.
++// ---------------------------------------------------------------------------
++// SPDX-FileCopyrightText: 2026 PS2Recomp Debug Bridge
++// SPDX-License-Identifier: MIT
++//
++// PCSX2 Debug Server — JSON/TCP API wrapping full DebugInterface
++// Protocol: newline-delimited JSON over TCP (port 21512)
++//
++// Request:  {"cmd":"read_registers","cpu":"ee","category":0}\n
++// Response: {"ok":true,"data":{...}}\n
++//
++// Integration:
++//   1. Drop DebugServer.h + DebugServer.cpp into pcsx2/DebugTools/
++//   2. Add to CMakeLists.txt
++//   3. Call DebugServer::Start() from VMManager::Initialize()
++//   4. Call DebugServer::Stop() from VMManager::Shutdown()
++//   5. Call DebugServer::OnBreakpointHit() from breakpoint handler
++
++// ============================================================
++// NOTE: This file uses a minimal inline JSON builder to avoid
++// external dependencies. PCSX2 doesn't bundle nlohmann/json
++// in all configurations.
++// ============================================================
++
++#ifdef _WIN32
++#define WIN32_LEAN_AND_MEAN
++#include <winsock2.h>
++#include <ws2tcpip.h>
++#pragma comment(lib, "ws2_32.lib")
++typedef SOCKET socket_t;
++#define SOCKET_INVALID INVALID_SOCKET
++#define CLOSE_SOCKET closesocket
++#else
++#include <sys/socket.h>
++#include <netinet/in.h>
++#include <arpa/inet.h>
++#include <unistd.h>
++typedef int socket_t;
++#define SOCKET_INVALID (-1)
++#define CLOSE_SOCKET close
++#endif
++
++#include "DebugServer.h"
++#include "DebugInterface.h"
++#include "Breakpoints.h"
++#include "MipsStackWalk.h"
++
++#include <cstring>
++#include <cstdio>
++#include <string>
++#include <vector>
++#include <thread>
++#include <atomic>
++#include <mutex>
++#include <condition_variable>
++#include <sstream>
++#include <algorithm>
++#include <array>
++
++// Forward declarations — these are PCSX2 globals
++extern R5900DebugInterface r5900Debug;
++extern R3000DebugInterface r3000Debug;
++
++namespace DebugServer
++{
++	// Fixed storage: the EE thread never allocates or waits for network I/O.
++	static constexpr size_t VSYNC_EVENT_CAPACITY = 16384;
++	static std::array<VSyncProbeEvent, VSYNC_EVENT_CAPACITY> s_vsync_events;
++	static std::mutex s_vsync_events_mutex;
++	static std::atomic<uint64_t> s_vsync_sequence{0};
++	static uint64_t s_vsync_overwrites = 0;
++	static std::atomic<uint64_t> s_vsync_rejected_reads{0};
++
++	uint64_t LastVSyncEventSequence()
++	{
++		return s_vsync_sequence.load(std::memory_order_acquire);
++	}
++
++	void RecordVSyncEvent(VSyncProbeKind kind, uint64_t scheduled_ee_cycle,
++		uint64_t csr_before, uint32_t intc_before)
++	{
++		if (!IsRunning())
++			return;
++		VSyncProbeEvent event{};
++		event.kind = kind;
++		event.scheduled_ee_cycle = scheduled_ee_cycle;
++		event.csr_before = csr_before;
++		event.intc_before = intc_before;
++		event.state = GetVSyncProbeSnapshot();
++		std::lock_guard<std::mutex> lock(s_vsync_events_mutex);
++		event.sequence = s_vsync_sequence.load(std::memory_order_relaxed) + 1;
++		s_vsync_events[(event.sequence - 1) % VSYNC_EVENT_CAPACITY] = event;
++		if (event.sequence > VSYNC_EVENT_CAPACITY)
++			++s_vsync_overwrites;
++		s_vsync_sequence.store(event.sequence, std::memory_order_release);
++	}
++
++	// ============================================================
++	// Minimal JSON Builder
++	// ============================================================
++	class JsonBuilder
++	{
++	public:
++		void startObject() { comma(); m_buf += '{'; m_needComma.push_back(false); }
++		void endObject() { m_buf += '}'; m_needComma.pop_back(); if (!m_needComma.empty()) m_needComma.back() = true; }
++		void startArray() { comma(); m_buf += '['; m_needComma.push_back(false); }
++		void endArray() { m_buf += ']'; m_needComma.pop_back(); if (!m_needComma.empty()) m_needComma.back() = true; }
++
++		void key(const char* k)
++		{
++			comma();
++			m_buf += '"';
++			escapeStr(k);
++			m_buf += "\":";
++			m_needComma.back() = false; // value follows
++		}
++
++		void valStr(const char* v) { comma(); m_buf += '"'; escapeStr(v); m_buf += '"'; m_needComma.back() = true; }
++		void valStr(const std::string& v) { valStr(v.c_str()); }
++		void valInt(int64_t v) { comma(); m_buf += std::to_string(v); m_needComma.back() = true; }
++		void valUint(uint64_t v) { comma(); m_buf += std::to_string(v); m_needComma.back() = true; }
++		void valBool(bool v) { comma(); m_buf += v ? "true" : "false"; m_needComma.back() = true; }
++		void valNull() { comma(); m_buf += "null"; m_needComma.back() = true; }
++
++		void valHex32(uint32_t v)
++		{
++			char buf[16];
++			snprintf(buf, sizeof(buf), "0x%08x", v);
++			comma();
++			m_buf += '"';
++			m_buf += buf;
++			m_buf += '"';
++			m_needComma.back() = true;
++		}
++
++		void valHex128(u128 v)
++		{
++			char buf[40];
++			snprintf(buf, sizeof(buf), "%08x%08x%08x%08x",
++				v._u32[3], v._u32[2], v._u32[1], v._u32[0]);
++			comma();
++			m_buf += '"';
++			m_buf += buf;
++			m_buf += '"';
++			m_needComma.back() = true;
++		}
++
++		// Key-value shortcuts
++		void kv(const char* k, const char* v) { key(k); valStr(v); }
++		void kv(const char* k, const std::string& v) { key(k); valStr(v); }
++		void kv(const char* k, int v) { key(k); valInt(static_cast<int64_t>(v)); }
++		void kv(const char* k, unsigned int v) { key(k); valUint(static_cast<uint64_t>(v)); }
++		void kv(const char* k, int64_t v) { key(k); valInt(v); }
++		void kv(const char* k, uint64_t v) { key(k); valUint(v); }
++		void kv(const char* k, bool v) { key(k); valBool(v); }
++
++		std::string str() const { return m_buf; }
++		void clear() { m_buf.clear(); m_needComma.clear(); }
++
++	private:
++		void comma()
++		{
++			if (!m_needComma.empty() && m_needComma.back())
++				m_buf += ',';
++		}
++		void escapeStr(const char* s)
++		{
++			for (; *s; ++s)
++			{
++				switch (*s)
++				{
++					case '"': m_buf += "\\\""; break;
++					case '\\': m_buf += "\\\\"; break;
++					case '\n': m_buf += "\\n"; break;
++					case '\r': m_buf += "\\r"; break;
++					case '\t': m_buf += "\\t"; break;
++					default: m_buf += *s; break;
++				}
++			}
++		}
++
++		std::string m_buf;
++		std::vector<bool> m_needComma;
++	};
++
++	static void writeVSyncState(JsonBuilder& j, const VSyncProbeSnapshot& s)
++	{
++		j.startObject();
++		j.kv("ee_cycle", s.ee_cycle);
++		j.kv("generation", s.generation);
++		j.kv("last_sequence", s.last_sequence);
++		j.kv("scheduled_start_cycle", s.vsync_start_cycle);
++		j.kv("frame", s.frame);
++		j.kv("vsync_mode", s.vsync_mode);
++		j.kv("vsync_delta_cycles", s.vsync_delta_cycles);
++		j.kv("intc_stat", s.intc_stat);
++		j.kv("intc_mask", s.intc_mask);
++		j.kv("csr", s.csr);
++		j.kv("smode1", s.smode1);
++		j.kv("smode2", s.smode2);
++		j.kv("syncv", s.syncv);
++		j.kv("video_mode", s.video_mode);
++		j.kv("gs_video_mode", s.gs_video_mode);
++		j.kv("gs_is_interlaced", s.gs_is_interlaced);
++		j.kv("smode1_cmod", s.smode1_cmod);
++		j.kv("syncv_vfp_odd", s.syncv_vfp_odd);
++		j.kv("frame_rate", std::to_string(s.frame_rate));
++		j.kv("render_cycles", s.render_cycles);
++		j.kv("blank_cycles", s.blank_cycles);
++		j.kv("gsblank_cycles", s.gsblank_cycles);
++		j.kv("hrender_cycles", s.hrender_cycles);
++		j.kv("hblank_cycles", s.hblank_cycles);
++		j.kv("hsync_error", s.hsync_error);
++		j.kv("scanlines", s.scanlines);
++		j.endObject();
++	}
++
++	// ============================================================
++	// Minimal JSON Parser (just enough for our commands)
++	// ============================================================
++	struct JsonValue
++	{
++		enum Type { NONE, STRING, NUMBER, BOOL, OBJECT };
++		Type type = NONE;
++		std::string strVal;
++		int64_t numVal = 0;
++		bool boolVal = false;
++	};
++
++	static std::unordered_map<std::string, JsonValue> parseJsonObject(const std::string& json)
++	{
++		std::unordered_map<std::string, JsonValue> result;
++		size_t i = 0;
++		// Skip to first '{'
++		while (i < json.size() && json[i] != '{') i++;
++		i++; // skip '{'
++
++		while (i < json.size())
++		{
++			// Skip whitespace/commas
++			while (i < json.size() && (json[i] == ' ' || json[i] == '\t' || json[i] == '\n' || json[i] == '\r' || json[i] == ','))
++				i++;
++			if (i >= json.size() || json[i] == '}') break;
++
++			// Read key
++			if (json[i] != '"') break;
++			i++;
++			std::string key;
++			while (i < json.size() && json[i] != '"')
++			{
++				if (json[i] == '\\' && i + 1 < json.size()) { key += json[i + 1]; i += 2; }
++				else { key += json[i]; i++; }
++			}
++			i++; // skip closing '"'
++
++			// Skip colon
++			while (i < json.size() && json[i] != ':') i++;
++			i++;
++
++			// Skip whitespace
++			while (i < json.size() && (json[i] == ' ' || json[i] == '\t')) i++;
++
++			JsonValue val;
++			if (json[i] == '"')
++			{
++				// String value
++				i++;
++				std::string sv;
++				while (i < json.size() && json[i] != '"')
++				{
++					if (json[i] == '\\' && i + 1 < json.size()) { sv += json[i + 1]; i += 2; }
++					else { sv += json[i]; i++; }
++				}
++				i++; // skip closing '"'
++				val.type = JsonValue::STRING;
++				val.strVal = sv;
++			}
++			else if (json[i] == 't' || json[i] == 'f')
++			{
++				val.type = JsonValue::BOOL;
++				val.boolVal = (json[i] == 't');
++				while (i < json.size() && json[i] != ',' && json[i] != '}') i++;
++			}
++			else if (json[i] == '-' || (json[i] >= '0' && json[i] <= '9'))
++			{
++				std::string ns;
++				bool isHex = false;
++				if (json[i] == '0' && i + 1 < json.size() && (json[i + 1] == 'x' || json[i + 1] == 'X'))
++				{
++					isHex = true;
++					i += 2;
++				}
++				while (i < json.size() && ((json[i] >= '0' && json[i] <= '9') ||
++					   json[i] == '-' ||
++					   (isHex && ((json[i] >= 'a' && json[i] <= 'f') || (json[i] >= 'A' && json[i] <= 'F')))))
++				{
++					ns += json[i]; i++;
++				}
++				val.type = JsonValue::NUMBER;
++				if (isHex) val.numVal = (int64_t)strtoull(ns.c_str(), nullptr, 16);
++				else val.numVal = strtoll(ns.c_str(), nullptr, 10);
++			}
++			else
++			{
++				// Skip unknown
++				while (i < json.size() && json[i] != ',' && json[i] != '}') i++;
++			}
++
++			result[key] = val;
++		}
++
++		return result;
++	}
++
++	static std::string getStr(const std::unordered_map<std::string, JsonValue>& m, const char* key, const char* def = "")
++	{
++		auto it = m.find(key);
++		if (it != m.end() && it->second.type == JsonValue::STRING) return it->second.strVal;
++		return def;
++	}
++
++	static int64_t getNum(const std::unordered_map<std::string, JsonValue>& m, const char* key, int64_t def = 0)
++	{
++		auto it = m.find(key);
++		if (it != m.end() && it->second.type == JsonValue::NUMBER) return it->second.numVal;
++		// Also try parsing string as hex
++		if (it != m.end() && it->second.type == JsonValue::STRING)
++		{
++			const auto& s = it->second.strVal;
++			if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
++				return (int64_t)strtoull(s.c_str() + 2, nullptr, 16);
++			return strtoll(s.c_str(), nullptr, 10);
++		}
++		return def;
++	}
++
++	static bool getBool(const std::unordered_map<std::string, JsonValue>& m, const char* key, bool def = false)
++	{
++		auto it = m.find(key);
++		if (it != m.end() && it->second.type == JsonValue::BOOL) return it->second.boolVal;
++		return def;
++	}
++
++	// ============================================================
++	// Get DebugInterface by CPU name
++	// ============================================================
++	static DebugInterface* getCpu(const std::string& name)
++	{
++		if (name == "iop" || name == "r3000" || name == "IOP")
++			return &r3000Debug;
++		return &r5900Debug; // default to EE
++	}
++
++	static BreakPointCpu getBpCpu(const std::string& name)
++	{
++		if (name == "iop" || name == "r3000" || name == "IOP")
++			return BREAKPOINT_IOP;
++		return BREAKPOINT_EE;
++	}
++
++	// ============================================================
++	// Command Handlers
++	// ============================================================
++
++	static std::string handleCommand(const std::string& jsonLine)
++	{
++		auto params = parseJsonObject(jsonLine);
++		std::string cmd = getStr(params, "cmd");
++		std::string cpuName = getStr(params, "cpu", "ee");
++		DebugInterface* cpu = getCpu(cpuName);
++
++		JsonBuilder j;
++
++		// ----- RRV GT VSYNC PROBE (read-only, stopped EE only) -----
++		if (cmd == "rrv_gt_vsync_snapshot" || cmd == "rrv_gt_vsync_events")
++		{
++			if (cpuName != "ee" || !r5900Debug.isAlive() || !r5900Debug.isCpuPaused())
++			{
++				s_vsync_rejected_reads.fetch_add(1, std::memory_order_relaxed);
++				j.startObject();
++				j.kv("ok", false);
++				j.kv("error", "paused EE required");
++				j.endObject();
++			}
++			else if (cmd == "rrv_gt_vsync_snapshot")
++			{
++				j.startObject();
++				j.kv("ok", true);
++				j.key("data"); writeVSyncState(j, GetVSyncProbeSnapshot());
++				j.endObject();
++			}
++			else
++			{
++				const int64_t requested_after = getNum(params, "after_seq", 0);
++				const uint64_t after = requested_after > 0 ? static_cast<uint64_t>(requested_after) : 0;
++				const int64_t requested_limit = getNum(params, "limit", 32);
++				const size_t limit = static_cast<size_t>(std::clamp<int64_t>(requested_limit, 1, 32));
++				std::array<VSyncProbeEvent, 32> page{};
++				size_t count = 0;
++				uint64_t last, earliest, overwritten;
++				{
++					std::lock_guard<std::mutex> lock(s_vsync_events_mutex);
++					last = s_vsync_sequence.load(std::memory_order_relaxed);
++					earliest = last >= VSYNC_EVENT_CAPACITY ? last - VSYNC_EVENT_CAPACITY + 1 : 1;
++					overwritten = s_vsync_overwrites;
++					for (uint64_t seq = std::max(after + 1, earliest); seq <= last && count < limit; ++seq)
++						page[count++] = s_vsync_events[(seq - 1) % VSYNC_EVENT_CAPACITY];
++				}
++				j.startObject();
++				j.kv("ok", true);
++				j.kv("last_sequence", last);
++				j.kv("earliest_sequence", earliest);
++				j.kv("overwritten", overwritten);
++				j.kv("rejected_reads", s_vsync_rejected_reads.load(std::memory_order_relaxed));
++				j.kv("lost_since_after", after + 1 < earliest ? earliest - after - 1 : 0);
++				j.key("events"); j.startArray();
++				for (size_t i = 0; i < count; ++i)
++				{
++					const VSyncProbeEvent& event = page[i];
++					j.startObject();
++					j.kv("sequence", event.sequence);
++					j.kv("kind", static_cast<uint32_t>(event.kind));
++					j.kv("scheduled_ee_cycle", event.scheduled_ee_cycle);
++					j.kv("csr_before", event.csr_before);
++					j.kv("intc_before", event.intc_before);
++					j.key("state"); writeVSyncState(j, event.state);
++					j.endObject();
++				}
++				j.endArray();
++				j.endObject();
++			}
++		}
++		// ----- STATUS -----
++		else if (cmd == "status")
++		{
++			j.startObject();
++			j.kv("ok", true);
++			j.key("data"); j.startObject();
++			j.kv("alive", cpu->isAlive());
++			j.kv("paused", cpu->isCpuPaused());
++			j.key("pc"); j.valHex32(cpu->getPC());
++			j.kv("cycles", (int64_t)cpu->getCycles());
++			j.endObject();
++			j.endObject();
++		}
++		// ----- READ REGISTERS (ALL) -----
++		else if (cmd == "read_registers")
++		{
++			int cat = (int)getNum(params, "category", -1);
++			j.startObject();
++			j.kv("ok", true);
++			j.key("data"); j.startObject();
++
++			int catStart = (cat >= 0) ? cat : 0;
++			int catEnd = (cat >= 0) ? cat + 1 : cpu->getRegisterCategoryCount();
++
++			for (int c = catStart; c < catEnd; c++)
++			{
++				j.key(cpu->getRegisterCategoryName(c));
++				j.startObject();
++				j.kv("size", cpu->getRegisterSize(c));
++				j.kv("count", cpu->getRegisterCount(c));
++				j.key("regs"); j.startArray();
++				for (int r = 0; r < cpu->getRegisterCount(c); r++)
++				{
++					j.startObject();
++					j.kv("name", cpu->getRegisterName(c, r));
++					j.key("value"); j.valHex128(cpu->getRegister(c, r));
++					j.kv("display", cpu->getRegisterString(c, r));
++					j.endObject();
++				}
++				j.endArray();
++				j.endObject();
++			}
++
++			j.key("pc"); j.valHex32(cpu->getPC());
++			j.key("hi"); j.valHex128(cpu->getHI());
++			j.key("lo"); j.valHex128(cpu->getLO());
++			j.endObject();
++			j.endObject();
++		}
++		// ----- WRITE REGISTER -----
++		else if (cmd == "write_register")
++		{
++			int cat = (int)getNum(params, "category", 0);
++			int num = (int)getNum(params, "index", 0);
++			// Value can be a hex string or number
++			std::string valStr = getStr(params, "value", "0");
++			u128 newVal = {};
++			// Parse hex string (up to 128-bit)
++			if (valStr.size() > 2 && valStr[0] == '0' && (valStr[1] == 'x' || valStr[1] == 'X'))
++				valStr = valStr.substr(2);
++			// Pad to 32 hex chars (128 bits)
++			while (valStr.size() < 32) valStr = "0" + valStr;
++			for (int i = 0; i < 4; i++)
++			{
++				std::string part = valStr.substr(24 - i * 8, 8);
++				newVal._u32[i] = (uint32_t)strtoul(part.c_str(), nullptr, 16);
++			}
++			cpu->setRegister(cat, num, newVal);
++
++			j.startObject();
++			j.kv("ok", true);
++			j.endObject();
++		}
++		// ----- SET PC -----
++		else if (cmd == "set_pc")
++		{
++			u32 pc = (u32)getNum(params, "value", 0);
++			cpu->setPc(pc);
++			j.startObject();
++			j.kv("ok", true);
++			j.key("pc"); j.valHex32(pc);
++			j.endObject();
++		}
++		// ----- READ MEMORY -----
++		else if (cmd == "read_memory")
++		{
++			u32 addr = (u32)getNum(params, "address", 0);
++			int len = (int)getNum(params, "length", 256);
++			if (len > 65536) len = 65536;
++
++			j.startObject();
++			j.kv("ok", true);
++			j.key("address"); j.valHex32(addr);
++			j.kv("length", (int64_t)len);
++
++			// Hex string output
++			j.key("hex");
++			std::string hexStr;
++			hexStr.reserve(len * 2);
++			for (int i = 0; i < len; i++)
++			{
++				bool valid = true;
++				u32 byte = cpu->Read8(addr + i, &valid);
++				if (!valid) byte = 0;
++				char hb[4];
++				snprintf(hb, sizeof(hb), "%02x", byte & 0xFF);
++				hexStr += hb;
++			}
++			j.valStr(hexStr);
++			j.endObject();
++		}
++		// ----- WRITE MEMORY -----
++		else if (cmd == "write_memory")
++		{
++			u32 addr = (u32)getNum(params, "address", 0);
++			std::string hexData = getStr(params, "data", "");
++			int written = 0;
++			for (size_t i = 0; i + 1 < hexData.size(); i += 2)
++			{
++				u8 byte = (u8)strtoul(hexData.substr(i, 2).c_str(), nullptr, 16);
++				cpu->Write8(addr + written, byte);
++				written++;
++			}
++			j.startObject();
++			j.kv("ok", true);
++			j.kv("written", (int64_t)written);
++			j.endObject();
++		}
++		// ----- DISASSEMBLE -----
++		else if (cmd == "disassemble")
++		{
++			u32 addr = (u32)getNum(params, "address", 0);
++			int count = (int)getNum(params, "count", 20);
++			bool simplify = getBool(params, "simplify", true);
++			if (count > 500) count = 500;
++
++			j.startObject();
++			j.kv("ok", true);
++			j.key("instructions"); j.startArray();
++			for (int i = 0; i < count; i++)
++			{
++				u32 pc = addr + i * 4;
++				if (!cpu->isValidAddress(pc)) break;
++
++				bool valid = true;
++				u32 opcode = cpu->Read32(pc, &valid);
++
++				j.startObject();
++				j.key("address"); j.valHex32(pc);
++				j.key("opcode"); j.valHex32(opcode);
++				j.kv("disasm", cpu->disasm(pc, simplify));
++				j.endObject();
++			}
++			j.endArray();
++			j.endObject();
++		}
++		// ----- EVALUATE EXPRESSION -----
++		else if (cmd == "evaluate")
++		{
++			std::string expr = getStr(params, "expression", "0");
++			u64 result = 0;
++			std::string error;
++			bool ok = cpu->evaluateExpression(expr.c_str(), result, error);
++
++			j.startObject();
++			j.kv("ok", ok);
++			if (ok)
++			{
++				j.key("result"); j.valUint(result);
++				char hexBuf[20];
++				snprintf(hexBuf, sizeof(hexBuf), "0x%llx", (unsigned long long)result);
++				j.kv("hex", hexBuf);
++			}
++			else
++			{
++				j.kv("error", error);
++			}
++			j.endObject();
++		}
++		// ----- SET BREAKPOINT -----
++		else if (cmd == "set_breakpoint")
++		{
++			u32 addr = (u32)getNum(params, "address", 0);
++			bool temp = getBool(params, "temporary", false);
++			bool enabled = getBool(params, "enabled", true);
++			std::string condExpr = getStr(params, "condition", "");
++			std::string desc = getStr(params, "description", "");
++			auto bpCpu = getBpCpu(cpuName);
++
++			CBreakPoints::AddBreakPoint(bpCpu, addr, temp, enabled);
++
++			if (!desc.empty())
++				CBreakPoints::ChangeBreakPointDescription(bpCpu, addr, desc);
++
++			if (!condExpr.empty())
++			{
++				BreakPointCond cond;
++				cond.debug = cpu;
++				cond.expressionString = condExpr;
++				std::string error;
++				if (cpu->initExpression(condExpr.c_str(), cond.expression, error))
++				{
++					CBreakPoints::ChangeBreakPointAddCond(bpCpu, addr, cond);
++				}
++			}
++
++			j.startObject();
++			j.kv("ok", true);
++			j.key("address"); j.valHex32(addr);
++			j.endObject();
++		}
++		// ----- REMOVE BREAKPOINT -----
++		else if (cmd == "remove_breakpoint")
++		{
++			u32 addr = (u32)getNum(params, "address", 0);
++			CBreakPoints::RemoveBreakPoint(getBpCpu(cpuName), addr);
++			j.startObject();
++			j.kv("ok", true);
++			j.endObject();
++		}
++		// ----- SET MEMCHECK (WATCHPOINT) -----
++		else if (cmd == "set_memcheck")
++		{
++			u32 start = (u32)getNum(params, "address", 0);
++			u32 end = (u32)getNum(params, "end", start + 4);
++			std::string typeStr = getStr(params, "type", "write");
++			std::string actionStr = getStr(params, "action", "break");
++			std::string desc = getStr(params, "description", "");
++			std::string condExpr = getStr(params, "condition", "");
++
++			MemCheckCondition cond = MEMCHECK_WRITE;
++			if (typeStr == "read") cond = MEMCHECK_READ;
++			else if (typeStr == "readwrite" || typeStr == "access") cond = MEMCHECK_READWRITE;
++			else if (typeStr == "onchange") cond = (MemCheckCondition)(MEMCHECK_WRITE | MEMCHECK_WRITE_ONCHANGE);
++
++			MemCheckResult result = MEMCHECK_BREAK;
++			if (actionStr == "log") result = MEMCHECK_LOG;
++			else if (actionStr == "both") result = MEMCHECK_BOTH;
++
++			auto bpCpu = getBpCpu(cpuName);
++			CBreakPoints::AddMemCheck(bpCpu, start, end, cond, result);
++
++			if (!desc.empty())
++				CBreakPoints::ChangeMemCheckDescription(bpCpu, start, end, desc);
++
++			if (!condExpr.empty())
++			{
++				BreakPointCond bpCond;
++				bpCond.debug = cpu;
++				bpCond.expressionString = condExpr;
++				std::string error;
++				if (cpu->initExpression(condExpr.c_str(), bpCond.expression, error))
++					CBreakPoints::ChangeMemCheckAddCond(bpCpu, start, end, bpCond);
++			}
++
++			j.startObject();
++			j.kv("ok", true);
++			j.key("start"); j.valHex32(start);
++			j.key("end"); j.valHex32(end);
++			j.endObject();
++		}
++		// ----- REMOVE MEMCHECK -----
++		else if (cmd == "remove_memcheck")
++		{
++			u32 start = (u32)getNum(params, "address", 0);
++			u32 end = (u32)getNum(params, "end", start + 4);
++			CBreakPoints::RemoveMemCheck(getBpCpu(cpuName), start, end);
++			j.startObject();
++			j.kv("ok", true);
++			j.endObject();
++		}
++		// ----- LIST BREAKPOINTS -----
++		else if (cmd == "list_breakpoints")
++		{
++			auto bps = CBreakPoints::GetBreakpoints(getBpCpu(cpuName), true);
++			j.startObject();
++			j.kv("ok", true);
++			j.key("breakpoints"); j.startArray();
++			for (const auto& bp : bps)
++			{
++				j.startObject();
++				j.key("address"); j.valHex32(bp.addr);
++				j.kv("enabled", bp.enabled);
++				j.kv("temporary", bp.temporary);
++				j.kv("stepping", bp.stepping);
++				j.kv("has_condition", bp.hasCond);
++				if (bp.hasCond)
++					j.kv("condition", bp.cond.expressionString);
++				if (!bp.description.empty())
++					j.kv("description", bp.description);
++				j.endObject();
++			}
++			j.endArray();
++			j.endObject();
++		}
++		// ----- LIST MEMCHECKS -----
++		else if (cmd == "list_memchecks")
++		{
++			auto mcs = CBreakPoints::GetMemChecks(getBpCpu(cpuName));
++			j.startObject();
++			j.kv("ok", true);
++			j.key("memchecks"); j.startArray();
++			for (const auto& mc : mcs)
++			{
++				j.startObject();
++				j.key("start"); j.valHex32(mc.start);
++				j.key("end"); j.valHex32(mc.end);
++				j.kv("hits", (int64_t)mc.numHits);
++				j.key("last_pc"); j.valHex32(mc.lastPC);
++				j.key("last_addr"); j.valHex32(mc.lastAddr);
++				if (!mc.description.empty())
++					j.kv("description", mc.description);
++				j.endObject();
++			}
++			j.endArray();
++			j.endObject();
++		}
++		// ----- PAUSE -----
++		else if (cmd == "pause")
++		{
++			cpu->pauseCpu();
++			j.startObject();
++			j.kv("ok", true);
++			j.key("pc"); j.valHex32(cpu->getPC());
++			j.endObject();
++		}
++		// ----- RESUME -----
++		else if (cmd == "resume")
++		{
++			// Skip current BP if we're sitting on one (matches PCSX2 GUI behavior)
++			CBreakPoints::SetSkipFirst(getBpCpu(cpuName), cpu->getPC());
++			cpu->resumeCpu();
++			j.startObject();
++			j.kv("ok", true);
++			j.endObject();
++		}
++		// ----- STEP -----
++		else if (cmd == "step")
++		{
++			u32 pc = cpu->getPC();
++
++			// Skip current BP if we're sitting on one (matches PCSX2 GUI behavior)
++			CBreakPoints::SetSkipFirst(getBpCpu(cpuName), pc);
++
++			u32 nextPc = pc + 4;
++			CBreakPoints::AddBreakPoint(getBpCpu(cpuName), nextPc, true, true, true);
++			cpu->resumeCpu();
++
++			// Wait for it to hit (with timeout)
++			int timeout = 5000; // ms
++			while (!cpu->isCpuPaused() && timeout > 0)
++			{
++				std::this_thread::sleep_for(std::chrono::milliseconds(1));
++				timeout--;
++			}
++
++			u32 newPc = cpu->getPC();
++			bool inBios = (newPc < 0x00100000) || (newPc >= 0x80000000 && newPc < 0x80100000);
++
++			j.startObject();
++			j.kv("ok", true);
++			j.key("old_pc"); j.valHex32(pc);
++			j.key("new_pc"); j.valHex32(newPc);
++			j.kv("disasm", cpu->disasm(newPc, true));
++			j.kv("in_bios", inBios);
++
++			bool valid = true;
++			u32 opcode = cpu->Read32(newPc, &valid);
++			j.key("opcode"); j.valHex32(opcode);
++			j.endObject();
++		}
++		// ----- STEP OVER -----
++		else if (cmd == "step_over")
++		{
++			u32 pc = cpu->getPC();
++
++			// Skip current BP if we're sitting on one (matches PCSX2 GUI behavior)
++			CBreakPoints::SetSkipFirst(getBpCpu(cpuName), pc);
++
++			bool valid = true;
++			u32 opcode = cpu->Read32(pc, &valid);
++			u32 op = (opcode >> 26) & 63;
++
++			u32 bpAddr = pc + 8; // default: skip instruction + delay slot
++			if (op == 3 || // JAL
++				(op == 0 && (opcode & 63) == 9)) // JALR
++			{
++				bpAddr = pc + 8;
++			}
++			else
++			{
++				bpAddr = pc + 4;
++			}
++
++			CBreakPoints::AddBreakPoint(getBpCpu(cpuName), bpAddr, true, true, true);
++			cpu->resumeCpu();
++
++			int timeout = 10000;
++			while (!cpu->isCpuPaused() && timeout > 0)
++			{
++				std::this_thread::sleep_for(std::chrono::milliseconds(1));
++				timeout--;
++			}
++
++			u32 newPc = cpu->getPC();
++			bool inBios = (newPc < 0x00100000) || (newPc >= 0x80000000 && newPc < 0x80100000);
++
++			j.startObject();
++			j.kv("ok", true);
++			j.key("old_pc"); j.valHex32(pc);
++			j.key("new_pc"); j.valHex32(newPc);
++			j.kv("disasm", cpu->disasm(newPc, true));
++			j.kv("in_bios", inBios);
++			j.endObject();
++		}
++		// ----- GET THREADS -----
++		else if (cmd == "get_threads")
++		{
++			auto threads = cpu->GetThreadList();
++			j.startObject();
++			j.kv("ok", true);
++			j.key("threads"); j.startArray();
++			for (const auto& t : threads)
++			{
++				j.startObject();
++				j.kv("id", (int64_t)t->TID());
++				j.key("pc"); j.valHex32(t->PC());
++				j.kv("status", (int64_t)(int)t->Status());
++				j.kv("wait_type", (int64_t)(int)t->Wait());
++				j.endObject();
++			}
++			j.endArray();
++			j.endObject();
++		}
++		// ----- GET MODULES (IOP only) -----
++		else if (cmd == "get_modules")
++		{
++			auto mods = cpu->GetModuleList();
++			j.startObject();
++			j.kv("ok", true);
++			j.key("modules"); j.startArray();
++			for (const auto& m : mods)
++			{
++				j.startObject();
++				j.kv("name", m.name);
++				j.kv("version", (int64_t)m.version);
++				j.endObject();
++			}
++			j.endArray();
++			j.endObject();
++		}
++		// ----- GET BACKTRACE -----
++		else if (cmd == "get_backtrace")
++		{
++			int maxFrames = (int)getNum(params, "max_frames", 32);
++			if (maxFrames > 128) maxFrames = 128;
++
++			u32 pc = cpu->getPC();
++			u32 ra = cpu->getRegister(0, 31); // $ra
++			u32 sp = cpu->getRegister(0, 29); // $sp
++
++			// Find the running thread to get entry point and stack top
++			u32 threadEntry = 0;
++			u32 threadStackTop = 0;
++			auto threads = cpu->GetThreadList();
++			for (const auto& t : threads)
++			{
++				if (t->Status() == ThreadStatus::THS_RUN)
++				{
++					threadEntry = t->EntryPoint();
++					threadStackTop = 0; // RRV: pinned PCSX2 BiosThread has no StackTop()
++					break;
++				}
++			}
++
++			auto frames = MipsStackWalk::Walk(cpu, pc, ra, sp, threadEntry) /* RRV: pinned Walk() takes 5 args */;
++
++			j.startObject();
++			j.kv("ok", true);
++			j.kv("frame_count", (int64_t)(std::min)((int)frames.size(), maxFrames));
++			j.key("frames"); j.startArray();
++			int count = 0;
++			for (const auto& f : frames)
++			{
++				if (count >= maxFrames) break;
++				j.startObject();
++				j.key("entry"); j.valHex32(f.entry);
++				j.key("pc"); j.valHex32(f.pc);
++				j.key("sp"); j.valHex32(f.sp);
++				j.kv("stack_size", (int64_t)f.stackSize);
++				j.kv("disasm", cpu->disasm(f.pc, true));
++				j.endObject();
++				count++;
++			}
++			j.endArray();
++			j.endObject();
++		}
++		// ----- IS VALID ADDRESS -----
++		else if (cmd == "is_valid_address")
++		{
++			u32 addr = (u32)getNum(params, "address", 0);
++			j.startObject();
++			j.kv("ok", true);
++			j.kv("valid", cpu->isValidAddress(addr));
++			j.endObject();
++		}
++		// ----- READ STRING -----
++		else if (cmd == "read_string")
++		{
++			u32 addr = (u32)getNum(params, "address", 0);
++			int maxLen = (int)getNum(params, "max_length", 256);
++			if (maxLen > 4096) maxLen = 4096;
++
++			std::string str;
++			for (int i = 0; i < maxLen; i++)
++			{
++				bool valid = true;
++				u32 byte = cpu->Read8(addr + i, &valid);
++				if (!valid || byte == 0) break;
++				str += (char)byte;
++			}
++
++			j.startObject();
++			j.kv("ok", true);
++			j.kv("string", str);
++			j.kv("length", (int64_t)str.size());
++			j.endObject();
++		}
++		// ----- CLEAR ALL BREAKPOINTS -----
++		else if (cmd == "clear_breakpoints")
++		{
++			CBreakPoints::ClearAllBreakPoints();
++			CBreakPoints::ClearAllMemChecks();
++			j.startObject();
++			j.kv("ok", true);
++			j.endObject();
++		}
++		// ----- UNKNOWN COMMAND -----
++		else
++		{
++			j.startObject();
++			j.kv("ok", false);
++			j.kv("error", "Unknown command: " + cmd);
++			j.key("available_commands"); j.startArray();
++			const char* cmds[] = {
++				"status", "read_registers", "write_register", "set_pc",
++				"read_memory", "write_memory", "read_string",
++				"disassemble", "evaluate",
++				"set_breakpoint", "remove_breakpoint", "list_breakpoints",
++				"set_memcheck", "remove_memcheck", "list_memchecks",
++				"pause", "resume", "step", "step_over",
++				"get_threads", "get_modules",
++				"is_valid_address", "clear_breakpoints",
++				"rrv_gt_vsync_snapshot", "rrv_gt_vsync_events"
++			};
++			for (const char* c : cmds) j.valStr(c);
++			j.endArray();
++			j.endObject();
++		}
++
++		return j.str();
++	}
++
++	// ============================================================
++	// TCP Server
++	// ============================================================
++	static std::atomic<bool> s_running{false};
++	static std::thread s_serverThread;
++	static socket_t s_listenSocket = SOCKET_INVALID;
++
++	static void clientHandler(socket_t clientSock)
++	{
++		std::string buffer;
++		char recvBuf[4096];
++
++		while (s_running.load())
++		{
++			int bytes = recv(clientSock, recvBuf, sizeof(recvBuf) - 1, 0);
++			if (bytes <= 0) break;
++
++			recvBuf[bytes] = '\0';
++			buffer += recvBuf;
++
++			// Process complete lines
++			size_t newlinePos;
++			while ((newlinePos = buffer.find('\n')) != std::string::npos)
++			{
++				std::string line = buffer.substr(0, newlinePos);
++				buffer = buffer.substr(newlinePos + 1);
++
++				// Trim
++				while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
++					line.pop_back();
++
++				if (line.empty()) continue;
++
++				std::string response = handleCommand(line);
++				response += "\n";
++
++				size_t sent = 0;
++				while (sent < response.size())
++				{
++					const int n = send(clientSock, response.c_str() + sent, (int)(response.size() - sent), 0);
++					if (n <= 0) break;
++					sent += static_cast<size_t>(n);
++				}
++				if (sent < response.size()) break;
++			}
++		}
++
++		CLOSE_SOCKET(clientSock);
++	}
++
++	static void serverLoop(int port)
++	{
++#ifdef _WIN32
++		WSADATA wsaData;
++		WSAStartup(MAKEWORD(2, 2), &wsaData);
++#endif
++
++		s_listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
++		if (s_listenSocket == SOCKET_INVALID)
++		{
++			fprintf(stderr, "[DebugServer] Failed to create socket\n");
++			return;
++		}
++
++		int opt = 1;
++		setsockopt(s_listenSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
++
++		struct sockaddr_in addr = {};
++		addr.sin_family = AF_INET;
++		addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // localhost only
++		addr.sin_port = htons((u_short)port);
++
++		if (bind(s_listenSocket, (struct sockaddr*)&addr, sizeof(addr)) != 0)
++		{
++			fprintf(stderr, "[DebugServer] Failed to bind on port %d\n", port);
++			CLOSE_SOCKET(s_listenSocket);
++			s_listenSocket = SOCKET_INVALID;
++			return;
++		}
++
++		if (listen(s_listenSocket, 2) != 0)
++		{
++			fprintf(stderr, "[DebugServer] Failed to listen\n");
++			CLOSE_SOCKET(s_listenSocket);
++			s_listenSocket = SOCKET_INVALID;
++			return;
++		}
++
++		fprintf(stderr, "[DebugServer] Listening on 127.0.0.1:%d\n", port);
++
++		while (s_running.load())
++		{
++			// Use select with timeout to allow clean shutdown
++			fd_set readSet;
++			FD_ZERO(&readSet);
++			FD_SET(s_listenSocket, &readSet);
++
++			struct timeval tv;
++			tv.tv_sec = 1;
++			tv.tv_usec = 0;
++
++			int selectResult = select((int)s_listenSocket + 1, &readSet, nullptr, nullptr, &tv);
++			if (selectResult <= 0) continue;
++
++			socket_t clientSock = accept(s_listenSocket, nullptr, nullptr);
++			if (clientSock == SOCKET_INVALID) continue;
++
++			fprintf(stderr, "[DebugServer] Client connected\n");
++
++			// Handle client in a new thread
++			std::thread(clientHandler, clientSock).detach();
++		}
++
++		CLOSE_SOCKET(s_listenSocket);
++		s_listenSocket = SOCKET_INVALID;
++
++#ifdef _WIN32
++		WSACleanup();
++#endif
++	}
++
++	void Start(int port)
++	{
++		if (s_running.load()) return;
++		s_running.store(true);
++		s_serverThread = std::thread(serverLoop, port);
++		s_serverThread.detach();
++	}
++
++	void Stop()
++	{
++		s_running.store(false);
++		if (s_listenSocket != SOCKET_INVALID)
++		{
++			CLOSE_SOCKET(s_listenSocket);
++			s_listenSocket = SOCKET_INVALID;
++		}
++	}
++
++	bool IsRunning()
++	{
++		return s_running.load();
++	}
++
++	void OnBreakpointHit()
++	{
++		// Future: notify connected clients of breakpoint events
++	}
++
++} // namespace DebugServer
+diff --git a/pcsx2/DebugTools/DebugServer.h b/pcsx2/DebugTools/DebugServer.h
+new file mode 100644
+index 0000000..9a9e341
+--- /dev/null
++++ b/pcsx2/DebugTools/DebugServer.h
+@@ -0,0 +1,93 @@
++// ---------------------------------------------------------------------------
++// RRV-Recomp provenance note (see CLAUDE.md "Reference / oracle discipline")
++//
++//   Upstream:  https://github.com/hkmodd/PCSX2-MCP
++//              pcsx2-plugin/DebugServer.{cpp,h}, MIT licensed (header below).
++//   Vendored:  2026-08-22, against pinned PCSX2
++//              d5f75c9e42064a77036466f1f4594b0507888633.
++//   RRV edits: (1) DebugInterface memory accessors renamed read*/write* ->
++//                  Read*/Write* and `bool valid` -> `bool* valid`, matching
++//                  common/MemoryInterface.h at the pinned revision;
++//              (2) BiosThread::StackTop() does not exist at the pin -> 0;
++//              (3) MipsStackWalk::Walk() takes 5 args at the pin, not 6;
++//              (4) start/stop is gated on RRV_GT_DEBUG_SERVER (default OFF) so
++//                  this is a probe, not a behaviour change to the oracle.
++//   2026-09-24: (5) read-only Gate-3 paused EE VSync event/snapshot probe
++//               against the current fd9d310 PCSX2 pin.
++//
++// MIT is GPL-3.0 compatible; the combined work stays GPL-3.0.
++// ---------------------------------------------------------------------------
++// SPDX-FileCopyrightText: 2026 PS2Recomp Debug Bridge
++// SPDX-License-Identifier: MIT
++//
++// PCSX2 Debug Server — JSON/TCP API wrapping DebugInterface
++// Drop this into pcsx2/DebugTools/ and add to CMakeLists.txt
++//
++// Features:
++//   - Full 128-bit register R/W (all 7 categories: GPR, CP0, FPR, FCR, VU0F, VU0I, GSPRIV)
++//   - Native PCSX2 disassembly
++//   - Expression evaluation with symbol lookup
++//   - Conditional breakpoints with expression conditions
++//   - Memory watchpoints (read/write/onChange)
++//   - Thread list, module list
++//   - Pause/Resume/Step execution control
++//   - Memory R/W (8/16/32/64/128 bit)
++//   - Stack walk
++
++#pragma once
++
++#include <string>
++#include <thread>
++#include <atomic>
++#include <functional>
++#include <cstdint>
++
++namespace DebugServer
++{
++	// RRV Gate-3 reference probe. Only the EE CPU thread writes these records.
++	// The TCP reader requires a paused EE before copying the bounded ring.
++	enum class VSyncProbeKind : uint32_t
++	{
++		Reset = 1, ModeChange, StartScheduled, StartAsserted,
++		StartSuppressed, FieldTransition, FieldSuppressed, EndAsserted,
++		EndSuppressed
++	};
++
++	struct VSyncProbeSnapshot
++	{
++		uint64_t ee_cycle, generation, last_sequence;
++		uint64_t vsync_start_cycle, csr, smode1, smode2, syncv;
++		uint32_t intc_stat, intc_mask, frame, vsync_mode, vsync_delta_cycles;
++		uint32_t video_mode, gs_video_mode, gs_is_interlaced;
++		uint32_t smode1_cmod, syncv_vfp_odd;
++		uint32_t render_cycles, blank_cycles, gsblank_cycles;
++		uint32_t hrender_cycles, hblank_cycles, hsync_error, scanlines;
++		double frame_rate;
++	};
++
++	struct VSyncProbeEvent
++	{
++		uint64_t sequence, scheduled_ee_cycle, csr_before;
++		uint32_t intc_before;
++		VSyncProbeKind kind;
++		VSyncProbeSnapshot state;
++	};
++
++	VSyncProbeSnapshot GetVSyncProbeSnapshot();
++	uint64_t LastVSyncEventSequence();
++	void RecordVSyncEvent(VSyncProbeKind kind, uint64_t scheduled_ee_cycle,
++		uint64_t csr_before, uint32_t intc_before);
++	// Start the debug server on the given TCP port
++	// Call this once from PCSX2 initialization (e.g. in VMManager::Initialize)
++	void Start(int port = 21512);
++
++	// Stop the server and close all connections
++	void Stop();
++
++	// Check if server is running
++	bool IsRunning();
++
++	// Called when a breakpoint is hit — wakes up any waiting step/continue
++	void OnBreakpointHit();
++
++} // namespace DebugServer
+diff --git a/pcsx2/VMManager.cpp b/pcsx2/VMManager.cpp
+index 892b335..ea71622 100644
+--- a/pcsx2/VMManager.cpp
++++ b/pcsx2/VMManager.cpp
+@@ -8,6 +8,7 @@
+ #include "Counters.h"
+ #include "DEV9/DEV9.h"
+ #include "DebugTools/DebugInterface.h"
++#include "DebugTools/DebugServer.h"
+ #include "DebugTools/SymbolImporter.h"
+ #include "Elfheader.h"
+ #include "FW.h"
+@@ -1647,12 +1648,25 @@ VMBootResult VMManager::Initialize(const VMBootParameters& boot_params, Error* e
+ 		}
+ 	}
+ 
++	// RRV probe: opt-in MCP/TCP debug server. With RRV_GT_DEBUG_SERVER unset,
++	// no listener starts and the VSync event recorder drops records.
++	//   RRV_GT_DEBUG_SERVER=1        listen on the default port (21512)
++	//   RRV_GT_DEBUG_SERVER=<port>   listen on <port>
++	if (const char* rrv_ds = std::getenv("RRV_GT_DEBUG_SERVER"))
++	{
++		const int port = std::atoi(rrv_ds);
++		DebugServer::Start(port > 1 ? port : 21512);
++	}
++
+ 	PerformanceMetrics::Clear();
+ 	return VMBootResult::StartupSuccess;
+ }
+ 
+ void VMManager::Shutdown(bool save_resume_state)
+ {
++	if (DebugServer::IsRunning())
++		DebugServer::Stop();
++
+ 	// we'll probably already be stopping (this is how Qt calls shutdown),
+ 	// but just in case, so any of the stuff we call here knows we don't have a valid VM.
+ 	s_state.store(VMState::Stopping, std::memory_order_release);

@@ -1,0 +1,44 @@
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+index cb04479..a22f6eb 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+@@ -2721,8 +2721,8 @@ void GSRendererHW::RoundSpriteOffset()
+ 			}
+ 		}
+ #endif
+-		// RRV Gate-6 full-frame extension (GSRrvSetRoundSpriteUOnly): skip V
+-		// rounding on vertically minified sprites.
++		// RRV Gate-6 full-frame extension (GSRrvSetRoundSpriteUOnly): vertically
++		// minified sprites round V on the progressive grid (else branch below).
+ 		if (!s_rrv_round_sprite_u_only || std::abs(static_cast<int>(v[i + 1].V) - static_cast<int>(v[i].V)) <= std::abs(Ly) + 8)
+ 		{
+ 		if (linear)
+@@ -2747,6 +2747,28 @@ void GSRendererHW::RoundSpriteOffset()
+ 			}
+ 		}
+ 		}
++		else if (!linear)
++		{
++			// Minified sprite in full-frame mode: round V on the progressive
++			// grid (twice the field rows) instead of the native field grid, so
++			// the first and last progressive rows sample exactly the first and
++			// last texel rows at every scale (no texel-row bleed at 4x).
++			const int pY0 = Y0 * 2;
++			const int pY1 = Y1 * 2;
++			const int pLy = Ly * 2;
++			const u16 pty0 = Interpolate_UV(alpha0(pLy, pY0, pY1), v[i].V, v[i + 1].V);
++			const u16 pty1 = Interpolate_UV(alpha1(pLy, pY0, pY1), v[i].V, v[i + 1].V);
++			if (pty0 <= pty1)
++			{
++				v[i].V = pty0;
++				v[i + 1].V = pty1 + 16;
++			}
++			else
++			{
++				v[i].V = pty0 + 15;
++				v[i + 1].V = pty1;
++			}
++		}
+ 
+ #ifdef DEBUG_U
+ 		if (debug)

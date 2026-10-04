@@ -1,0 +1,154 @@
+diff --git a/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm b/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
+index d8d30f3..626bb68 100644
+--- a/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
++++ b/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
+@@ -17,6 +17,10 @@
+ #include "imgui.h"
+ 
+ #include <thread>
++#include <cstdio>
++#include <cstdlib>
++#include <memory>
++#include <string>
+ #include <cstring>
+ 
+ #ifdef __APPLE__
+@@ -29,6 +33,127 @@
+ 
+ namespace
+ {
++// RRV frame pacing for the bridge's direct present (RR5-specific product
++// change, not PCSX2 behaviour). The GS field service that presents runs on the
++// GS worker after a variable amount of EE and GS host work, so with display
++// sync the drawables reach the compositor at 59.94 Hz plus about +-3 ms of
++// jitter; on a 120 Hz (or 60 Hz) display that jitter crosses refresh edges
++// and some frames stay up one refresh longer and others one shorter: visible
++// judder with steady audio (Namco logo, 2026-09-30). The pacer schedules each
++// drawable with presentDrawable:atTime: on an even 1001/60000 s grid that sits
++// just after the latest submit (ratchets later on a late frame, creeps 2 us per
++// frame earlier otherwise, re-anchors after a pause or a burst). Host-only:
++// the guest never sees it. Measured on a 120 Hz display, v136: frames held for
++// the wrong number of refreshes 3-21% -> 0-4%, at +6-9 ms display latency.
++// RRV_PCSX2_GS_PRESENT_PACING=0 turns it off; RRV_PCSX2_GS_PRESENT_MARGIN_US
++// (default 2000) is the submit-to-target margin; RRV_PCSX2_GS_PRESENT_CREEP_US
++// (default 2; 20 or 60 cut ~2-4 ms of latency but bring back 10-13% judder). RRV_PCSX2_GS_PRESENT_TRACE=<path> writes one line per present
++// "submit target presented" (CACurrentMediaTime seconds; presented is the
++// drawable's on-screen time, 0 if it was never shown) at exit.
++struct RrvPresentPacer
++{
++	static constexpr double kPeriod = 1001.0 / 60000.0;
++	static constexpr size_t kTraceRows = 1u << 20;
++	bool configured = false, pace = true, have = false;
++	double margin = 0.002, creep = 2e-6, target = 0.0;
++	u64 presents = 0, late = 0, reanchors = 0;
++	std::string trace_path;
++	std::unique_ptr<double[]> submit, planned;
++	std::unique_ptr<std::atomic<double>[]> shown;
++	void Configure()
++	{
++		if (configured)
++			return;
++		configured = true;
++		if (const char* v = std::getenv("RRV_PCSX2_GS_PRESENT_PACING"); v && v[0] == '0')
++			pace = false;
++		if (const char* v = std::getenv("RRV_PCSX2_GS_PRESENT_MARGIN_US"); v && v[0])
++			margin = std::strtod(v, nullptr) * 1e-6;
++		if (const char* v = std::getenv("RRV_PCSX2_GS_PRESENT_CREEP_US"); v && v[0])
++			creep = std::strtod(v, nullptr) * 1e-6;
++		if (const char* v = std::getenv("RRV_PCSX2_GS_PRESENT_TRACE"); v && v[0])
++		{
++			trace_path = v;
++			submit = std::make_unique<double[]>(kTraceRows);
++			planned = std::make_unique<double[]>(kTraceRows);
++			shown = std::make_unique<std::atomic<double>[]>(kTraceRows);
++		}
++		std::fprintf(stderr, "[pcsx2-gs-bridge] present pacing=%d margin_us=%.0f trace=%s\n", pace ? 1 : 0,
++			margin * 1e6, trace_path.empty() ? "off" : trace_path.c_str());
++		static const bool at_exit = [] { std::atexit([] { Get().Write(); }); return true; }();
++		(void)at_exit;
++	}
++	static RrvPresentPacer& Get()
++	{
++		static RrvPresentPacer p;
++		return p;
++	}
++	// Returns the atTime target, or 0 to present as soon as possible.
++	double Plan(double now)
++	{
++		const double earliest = now + margin;
++		if (!have)
++		{
++			have = true;
++			target = earliest;
++			return target;
++		}
++		const double next = target + kPeriod;
++		if (earliest > next + 2.0 * kPeriod || next > earliest + 2.0 * kPeriod)
++		{
++			++reanchors;
++			target = earliest;
++		}
++		else if (earliest > next)
++		{
++			++late;
++			target = earliest;
++		}
++		else
++			target = std::max(earliest, next - creep);
++		return target;
++	}
++	void Present(id<MTLCommandBuffer> buf, id<MTLDrawable> drawable, bool fifo)
++	{
++		Configure();
++		const double now = CACurrentMediaTime();
++		const double at = (pace && fifo) ? Plan(now) : 0.0;
++		const u64 row = presents++;
++		if (submit && row < kTraceRows)
++		{
++			submit[row] = now;
++			planned[row] = at;
++			shown[row].store(0.0, std::memory_order_relaxed);
++			if (@available(macOS 10.15.4, *))
++			{
++				std::atomic<double>* slot = &shown[row];
++				[drawable addPresentedHandler:^(id<MTLDrawable> d) {
++					slot->store(d.presentedTime, std::memory_order_relaxed);
++				}];
++			}
++		}
++		if (at > 0.0)
++			[buf presentDrawable:drawable atTime:at];
++		else
++			[buf presentDrawable:drawable];
++	}
++	void Write()
++	{
++		std::fprintf(stderr, "[pcsx2-gs-bridge] present pacing presents=%llu late=%llu reanchors=%llu\n",
++			static_cast<unsigned long long>(presents), static_cast<unsigned long long>(late),
++			static_cast<unsigned long long>(reanchors));
++		if (!submit)
++			return;
++		FILE* f = std::fopen(trace_path.c_str(), "w");
++		if (!f)
++			return;
++		const u64 rows = std::min<u64>(presents, kTraceRows);
++		for (u64 i = 0; i < rows; ++i)
++			std::fprintf(f, "%.6f %.6f %.6f\n", submit[i], planned[i], shown[i].load(std::memory_order_relaxed));
++		std::fclose(f);
++	}
++};
++
+ rrv::metal_lifetime::Ring s_rrv_metal_lifetime;
+ std::atomic<u64> s_rrv_last_present_config{0};
+ std::atomic<u64> s_rrv_last_interlace_config{0};
+@@ -1709,7 +1834,9 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 		const bool use_present_drawable = m_use_present_drawable == UsePresentDrawable::Always ||
+ 			(m_use_present_drawable == UsePresentDrawable::IfVsync && m_vsync_mode == GSVSyncMode::FIFO);
+ 
+-		if (use_present_drawable)
++		if (use_present_drawable && m_window_info.surface_handle)
++			RrvPresentPacer::Get().Present(m_current_render_cmdbuf, m_current_drawable, m_vsync_mode == GSVSyncMode::FIFO);
++		else if (use_present_drawable)
+ 			[m_current_render_cmdbuf presentDrawable:m_current_drawable];
+ 		else
+ 			[m_current_render_cmdbuf addScheduledHandler:[drawable = std::move(m_current_drawable)](id<MTLCommandBuffer>){

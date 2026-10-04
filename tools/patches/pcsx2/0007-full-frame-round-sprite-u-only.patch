@@ -1,0 +1,117 @@
+diff --git a/pcsx2/GS/GS.cpp b/pcsx2/GS/GS.cpp
+index 270b94a..5332cd0 100644
+--- a/pcsx2/GS/GS.cpp
++++ b/pcsx2/GS/GS.cpp
+@@ -87,6 +87,11 @@ u64 GSRrvGetFieldOfyCanonicalCount()
+ 	return GSState::s_rrv_ofy_canonical_count.load(std::memory_order_relaxed);
+ }
+ 
++void GSRrvSetRoundSpriteUOnly(bool u_only)
++{
++	GSState::s_rrv_round_sprite_u_only = u_only;
++}
++
+ static GSRendererType GSCurrentRenderer;
+ 
+ GSRendererType GSGetCurrentRenderer()
+diff --git a/pcsx2/GS/GS.h b/pcsx2/GS/GS.h
+index e650ffc..c9ea562 100644
+--- a/pcsx2/GS/GS.h
++++ b/pcsx2/GS/GS.h
+@@ -93,6 +93,11 @@ u64 GSRrvGetDirectPresentCount();
+ // one progressive raster grid. from == to (the default) is a no-op.
+ void GSRrvSetFieldOfyCanonical(u32 from_ofy, u32 to_ofy);
+ u64 GSRrvGetFieldOfyCanonicalCount();
++// RRV Gate-6 full-frame extension. When set, the HW RoundSprite fix rounds only
++// U (horizontal). Full mode rasterizes the vertical axis at 448 progressive rows;
++// rounding V back to the native 224-row field texel grid would drop the rows the
++// other field shows (RR5 fonts sample alternate texel rows per field).
++void GSRrvSetRoundSpriteUOnly(bool u_only);
+ void GSvsync(u32 field, bool registers_written);
+ int GSfreeze(FreezeAction mode, freezeData* data);
+ std::string GSGetBaseSnapshotFilename();
+diff --git a/pcsx2/GS/GSState.cpp b/pcsx2/GS/GSState.cpp
+index 78826cc..adc99bc 100644
+--- a/pcsx2/GS/GSState.cpp
++++ b/pcsx2/GS/GSState.cpp
+@@ -25,6 +25,7 @@ u64 GSState::s_transfer_n = 0;
+ u32 GSState::s_rrv_ofy_from = 0;
+ u32 GSState::s_rrv_ofy_to = 0;
+ std::atomic<u64> GSState::s_rrv_ofy_canonical_count{0};
++bool GSState::s_rrv_round_sprite_u_only = false;
+ 
+ static __fi bool IsAutoFlushEnabled()
+ {
+diff --git a/pcsx2/GS/GSState.h b/pcsx2/GS/GSState.h
+index 786f015..655330a 100644
+--- a/pcsx2/GS/GSState.h
++++ b/pcsx2/GS/GSState.h
+@@ -324,6 +324,7 @@ public:
+ 	static u32 s_rrv_ofy_from;
+ 	static u32 s_rrv_ofy_to;
+ 	static std::atomic<u64> s_rrv_ofy_canonical_count;
++	static bool s_rrv_round_sprite_u_only;
+ 
+ 	GSPerfMon m_perfmon_frame; // Track stat across a frame.
+ 	GSPerfMon m_perfmon_draw;  // Track stat across a draw.
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+index 4821e02..d2e01ce 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+@@ -2721,7 +2721,9 @@ void GSRendererHW::RoundSpriteOffset()
+ 			}
+ 		}
+ #endif
+-#if 1
++		// RRV Gate-6 full-frame extension: U-only rounding (GSRrvSetRoundSpriteUOnly).
++		if (!s_rrv_round_sprite_u_only)
++		{
+ 		if (linear)
+ 		{
+ 			const int Lv = v[i + 1].V - v[i].V;
+@@ -2743,7 +2745,7 @@ void GSRendererHW::RoundSpriteOffset()
+ 				v[i + 1].V = ty1;
+ 			}
+ 		}
+-#endif
++		}
+ 
+ #ifdef DEBUG_U
+ 		if (debug)
+diff --git a/pcsx2/GS/GS.h b/pcsx2/GS/GS.h
+index c9ea562..310b0be 100644
+--- a/pcsx2/GS/GS.h
++++ b/pcsx2/GS/GS.h
+@@ -93,10 +93,12 @@ u64 GSRrvGetDirectPresentCount();
+ // one progressive raster grid. from == to (the default) is a no-op.
+ void GSRrvSetFieldOfyCanonical(u32 from_ofy, u32 to_ofy);
+ u64 GSRrvGetFieldOfyCanonicalCount();
+-// RRV Gate-6 full-frame extension. When set, the HW RoundSprite fix rounds only
+-// U (horizontal). Full mode rasterizes the vertical axis at 448 progressive rows;
+-// rounding V back to the native 224-row field texel grid would drop the rows the
+-// other field shows (RR5 fonts sample alternate texel rows per field).
++// RRV Gate-6 full-frame extension. When set, the HW RoundSprite fix leaves V
++// alone on sprites that are vertically minified (texel span > pixel span, e.g.
++// RR5 fonts drawing a full-height glyph into a half-height field sprite, each
++// field sampling alternate texel rows). Full mode rasterizes 448 progressive
++// rows, so rounding V to the native field texel grid would drop the rows the
++// other field shows. 1:1 sprites (post-processing page strips) keep V rounding.
+ void GSRrvSetRoundSpriteUOnly(bool u_only);
+ void GSvsync(u32 field, bool registers_written);
+ int GSfreeze(FreezeAction mode, freezeData* data);
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+index d2e01ce..cb04479 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+@@ -2721,8 +2721,9 @@ void GSRendererHW::RoundSpriteOffset()
+ 			}
+ 		}
+ #endif
+-		// RRV Gate-6 full-frame extension: U-only rounding (GSRrvSetRoundSpriteUOnly).
+-		if (!s_rrv_round_sprite_u_only)
++		// RRV Gate-6 full-frame extension (GSRrvSetRoundSpriteUOnly): skip V
++		// rounding on vertically minified sprites.
++		if (!s_rrv_round_sprite_u_only || std::abs(static_cast<int>(v[i + 1].V) - static_cast<int>(v[i].V)) <= std::abs(Ly) + 8)
+ 		{
+ 		if (linear)
+ 		{

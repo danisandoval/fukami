@@ -1,0 +1,32 @@
+# ---------- Game material and local artefacts: never commit ----------
+*.iso
+*.bin
+*.elf
+*.irx
+*.chd
+*.cue
+*.img
+*.nrg
+*.mdf
+*.gsr
+*.gs
+*.rrvsnap
+*.irf
+*.texblob
+*.gstrace
+*.p2s
+# The game code, VU blocks and hot functions generated from your own ELF (scripts/fukami_generate.py)
+/generated/
+# Dependencies, builds, packaged runtimes and apps
+/build/
+/build-*/
+/runtime/
+/runtime-deps/
+/local/
+/rom/
+/tmp/
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+.vscode/

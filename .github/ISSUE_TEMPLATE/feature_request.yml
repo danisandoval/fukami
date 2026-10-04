@@ -1,0 +1,12 @@
+name: Feature request
+description: Suggest an improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like, and why?
+    validations: {required: true}
+  - type: markdown
+    attributes:
+      value: Changes to how the game behaves are only accepted as optional, documented enhancements. No requests for game files or copy-protection work.

@@ -1,0 +1,3342 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b0c3945..815b32e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -48,6 +48,21 @@ add_subdirectory(common)
+ # make pcsx2
+ add_subdirectory(pcsx2)
+ 
++if(DEFINED RRV_PCSX2_GS_BRIDGE_SOURCE_DIR)
++    # Escape hatch only. Forcing PCSX2's C reference scanline was the bridge's
++    # original workaround for not owning PCSX2's code reserve, and on ARM64 that
++    # reference path does NOT match the JIT rasterizer the reference runner uses
++    # (measured: dark 0.083 vs 0.014 on the same stream) -- it was the whole of
++    # KNOWN_ISSUES #21. The bridge now allocates the code reserve itself, so the
++    # JIT is the default and this stays OFF.
++    option(RRV_PCSX2_GS_BRIDGE_C_SCANLINE
++           "Force PCSX2's C reference scanline instead of the SW JIT rasterizer" OFF)
++    if(RRV_PCSX2_GS_BRIDGE_C_SCANLINE)
++        target_compile_definitions(PCSX2 PRIVATE RRV_PCSX2_GS_C_SCANLINE=1)
++    endif()
++    add_subdirectory("${RRV_PCSX2_GS_BRIDGE_SOURCE_DIR}" pcsx2-gs-bridge)
++endif()
++
+ if(ENABLE_QT_UI)
+ 	add_subdirectory(pcsx2-qt)
+ endif()
+diff --git a/pcsx2/Config.h b/pcsx2/Config.h
+index 93bbb89..00a1346 100644
+--- a/pcsx2/Config.h
++++ b/pcsx2/Config.h
+@@ -811,6 +811,7 @@ struct Pcsx2Config
+ 					UserHacks_NativePaletteDraw : 1,
+ 					UserHacks_EstimateTextureRegion : 1,
+ 					UserHacks_DrawBuffering : 1,
++					UserHacks_RewriteLargeST : 1,
+ 					FXAA : 1,
+ 					ShadeBoost : 1,
+ 					DumpGSData : 1,
+diff --git a/pcsx2/GS/GS.cpp b/pcsx2/GS/GS.cpp
+index 8291c3b..9655d33 100644
+--- a/pcsx2/GS/GS.cpp
++++ b/pcsx2/GS/GS.cpp
+@@ -22,6 +22,9 @@
+ #include "GS/Renderers/HW/GSTextureReplacements.h"
+ #include "VMManager.h"
+ 
++#include <atomic>
++#include <cstring>
++
+ #ifdef ENABLE_OPENGL
+ #include "GS/Renderers/OpenGL/GSDeviceOGL.h"
+ #endif
+@@ -55,6 +58,22 @@
+ #include <fstream>
+ 
+ Pcsx2Config::GSOptions GSConfig;
++static std::atomic<u64> s_rrv_direct_present_count{0};
++
++void GSRrvResetDirectPresentCount()
++{
++	s_rrv_direct_present_count.store(0, std::memory_order_relaxed);
++}
++
++void GSRrvRecordDirectPresent()
++{
++	s_rrv_direct_present_count.fetch_add(1, std::memory_order_relaxed);
++}
++
++u64 GSRrvGetDirectPresentCount()
++{
++	return s_rrv_direct_present_count.load(std::memory_order_relaxed);
++}
+ 
+ static GSRendererType GSCurrentRenderer;
+ 
+@@ -416,6 +435,62 @@ void GSReadLocalMemoryUnsync(u8* mem, u32 qwc, u64 BITBLITBUF, u64 TRXPOS, u64 T
+ 	g_gs_renderer->ReadLocalMemoryUnsync(mem, qwc, GIFRegBITBLTBUF{BITBLITBUF}, GIFRegTRXPOS{TRXPOS}, GIFRegTRXREG{TRXREG});
+ }
+ 
++void GSSyncRasterizer()
++{
++	// RRV GS-bridge extension. Every bridge entry point that reads GS local
++	// memory behind the renderer's back must call this first: with
++	// GSOptions::SWExtraThreads > 0 the software rasterizer's workers are still
++	// writing the framebuffer/Z pages when Transfer() returns, and PCSX2's own
++	// equivalents (GSInitAndReadFIFO -> InitReadFIFO -> InvalidateLocalMem,
++	// GetOutput -> Sync(1)) do exactly this on the paths it owns. Cheap when
++	// nothing is queued; a no-op with a single-threaded or hardware renderer.
++	if (g_gs_renderer)
++		g_gs_renderer->RrvSyncRasterizer();
++}
++
++bool GSReadLocalMemoryChecked(u8* mem, u32 byte_count, u64 BITBLITBUF, u64 TRXPOS, u64 TRXREG)
++{
++	if (!g_gs_renderer || !mem)
++		return false;
++	GSSyncRasterizer();
++	return g_gs_renderer->RrvReadLocalMemoryChecked(
++		mem, byte_count, GIFRegBITBLTBUF{BITBLITBUF}, GIFRegTRXPOS{TRXPOS}, GIFRegTRXREG{TRXREG});
++}
++
++bool GSSnapshotLocalMemory(u8* mem, u32 size)
++{
++	if (!g_gs_renderer || !mem || size != GSLocalMemory::m_vmsize)
++		return false;
++
++	// The bridge invokes this only in its serialized GS context. Flush finalizes
++	// the current primitive, ReadbackTextureCache materializes Hardware/Metal's
++	// authoritative render/depth targets into the CPU-visible GS VM, and the
++	// rasterizer sync retires multithreaded Software work. A bare memcpy here is
++	// not sufficient: on Hardware renderers m_mem deliberately trails the GPU
++	// target cache until PCSX2 performs this same readback operation.
++	g_gs_renderer->Flush(GSState::GSFlushReason::LOADSTATE);
++	g_gs_renderer->RrvSyncRasterizer();
++	g_gs_renderer->ReadbackTextureCache();
++	std::memcpy(mem, g_gs_renderer->m_mem.vm8(), GSLocalMemory::m_vmsize);
++	return true;
++}
++
++bool GSRestoreLocalMemory(const u8* mem, u32 size)
++{
++	if (!g_gs_renderer || !mem || size != GSLocalMemory::m_vmsize)
++		return false;
++
++	g_gs_renderer->Flush(GSState::GSFlushReason::LOADSTATE);
++	// A queued draw would otherwise land on top of the image we just restored.
++	g_gs_renderer->RrvSyncRasterizer();
++	std::memcpy(g_gs_renderer->m_mem.vm8(), mem, GSLocalMemory::m_vmsize);
++	// The CPU-visible VM changed outside normal GS transfer paths. No cached
++	// source/target may outlive it, and CLUT state must reload on next use.
++	g_gs_renderer->m_mem.ResetCLUT();
++	g_gs_renderer->PurgeTextureCache(true, true, true);
++	return true;
++}
++
+ void GSgifTransfer(const u8* mem, u32 size)
+ {
+ 	g_gs_renderer->Transfer<3>(mem, size);
+diff --git a/pcsx2/GS/GS.h b/pcsx2/GS/GS.h
+index 892f406..5efe287 100644
+--- a/pcsx2/GS/GS.h
++++ b/pcsx2/GS/GS.h
+@@ -66,10 +66,26 @@ void GSgifSoftReset(u32 mask);
+ void GSwriteCSR(u32 csr);
+ void GSInitAndReadFIFO(u8* mem, u32 size);
+ void GSReadLocalMemoryUnsync(u8* mem, u32 qwc, u64 BITBLITBUF, u64 TRXPOS, u64 TRXREG);
++// RRV GS-bridge extension: validate and consume one already-issued native
++// local-to-host transaction. The GSState transfer cursor remains authoritative.
++bool GSReadLocalMemoryChecked(u8* mem, u32 byte_count, u64 BITBLITBUF, u64 TRXPOS, u64 TRXREG);
++// RRV GS-bridge extension: synchronous full 4 MiB GS local-memory transfer.
++// Callers serialize these with all GIF/CRTC work; restoring invalidates cached
++// renderer surfaces before they can be sampled again.
++bool GSSnapshotLocalMemory(u8* mem, u32 size);
++bool GSRestoreLocalMemory(const u8* mem, u32 size);
++// RRV GS-bridge extension: retire every queued software-rasterizer job. Must be
++// called before any direct read of GS local memory when SWExtraThreads > 0.
++void GSSyncRasterizer();
+ void GSgifTransfer(const u8* mem, u32 size);
+ void GSgifTransfer1(u8* mem, u32 addr);
+ void GSgifTransfer2(u8* mem, u32 size);
+ void GSgifTransfer3(u8* mem, u32 size);
++// RRV direct-present instrumentation. The Metal device records a count only
++// after it has acquired a drawable and scheduled its actual presentation.
++void GSRrvResetDirectPresentCount();
++void GSRrvRecordDirectPresent();
++u64 GSRrvGetDirectPresentCount();
+ void GSvsync(u32 field, bool registers_written);
+ int GSfreeze(FreezeAction mode, freezeData* data);
+ std::string GSGetBaseSnapshotFilename();
+diff --git a/pcsx2/GS/GSLocalMemory.h b/pcsx2/GS/GSLocalMemory.h
+index d4786e4..d4a9100 100644
+--- a/pcsx2/GS/GSLocalMemory.h
++++ b/pcsx2/GS/GSLocalMemory.h
+@@ -515,6 +515,7 @@ public:
+ 	__forceinline u8* vm8() const { return m_vm8; }
+ 	__forceinline u16* vm16() const { return reinterpret_cast<u16*>(m_vm8); }
+ 	__forceinline u32* vm32() const { return reinterpret_cast<u32*>(m_vm8); }
++	void ResetCLUT() { m_clut.Reset(); }
+ 
+ 	GSOffset GetOffset(u32 bp, u32 bw, u32 psm) const
+ 	{
+diff --git a/pcsx2/GS/GSState.cpp b/pcsx2/GS/GSState.cpp
+index e8b9f37..f8dc1b0 100644
+--- a/pcsx2/GS/GSState.cpp
++++ b/pcsx2/GS/GSState.cpp
+@@ -3048,6 +3048,80 @@ void GSState::Read(u8* mem, int len)
+ 		m_env.TRXDIR.XDIR = 3;
+ }
+ 
++bool GSState::RrvReadLocalMemoryChecked(u8* mem, u32 byte_count, GIFRegBITBLTBUF BITBLTBUF,
++	GIFRegTRXPOS TRXPOS, GIFRegTRXREG TRXREG)
++{
++	// Keep descriptor validation in PCSX2 beside the transfer state. The
++	// bridge's ABI descriptors are provenance, never a second cursor.
++	constexpr u64 bitbltbuf_mask = 0x3fffull | (0x3full << 16) | (0x3full << 24) |
++		(0x3fffull << 32) | (0x3full << 48) | (0x3full << 56);
++	constexpr u64 trxpos_mask = 0x7ffull | (0x7ffull << 16) | (0x7ffull << 32) |
++		(0x7ffull << 48) | (0x3ull << 59);
++	constexpr u64 trxreg_mask = 0xfffull | (0xfffull << 32);
++	const auto descriptor_matches = [](u64 actual, u64 expected, u64 mask) {
++		return ((actual ^ expected) & mask) == 0;
++	};
++
++	if (!mem || byte_count == 0 || m_env.TRXDIR.XDIR != 1 || m_tr.write ||
++		!descriptor_matches(BITBLTBUF.U64, m_tr.m_blit.U64, bitbltbuf_mask) ||
++		!descriptor_matches(TRXPOS.U64, m_tr.m_pos.U64, trxpos_mask) ||
++		!descriptor_matches(TRXREG.U64, m_tr.m_reg.U64, trxreg_mask) ||
++		// A descriptor rewrite while a download is live must not turn the
++		// original cursor into a read of new environment state.
++		!descriptor_matches(m_env.BITBLTBUF.U64, m_tr.m_blit.U64, bitbltbuf_mask) ||
++		!descriptor_matches(m_env.TRXPOS.U64, m_tr.m_pos.U64, trxpos_mask) ||
++		!descriptor_matches(m_env.TRXREG.U64, m_tr.m_reg.U64, trxreg_mask))
++	{
++		return false;
++	}
++
++	const u64 width = m_tr.m_reg.RRW;
++	const u64 height = m_tr.m_reg.RRH;
++	// fd9d310c's native ReadImageX PSMT4 branch does not advance its output
++	// byte pointer. Do not expose a fabricated/corrupted FIFO for a format the
++	// pinned native reader cannot produce deterministically; this remains a
++	// fail-closed adapter, not a bridge-side decoder.
++	if (m_tr.m_blit.SPSM == PSMT4)
++		return false;
++	const u16 trbpp = GSLocalMemory::m_psm[m_tr.m_blit.SPSM].trbpp;
++	if (width == 0 || height == 0 || trbpp == 0)
++		return false;
++	const u64 transfer_bits = width * height * trbpp;
++	const u64 transfer_bytes = (transfer_bits + 7u) >> 3;
++	if (transfer_bytes == 0 || transfer_bytes > GSLocalMemory::m_vmsize)
++		return false;
++
++	if (m_tr.total == 0)
++	{
++		if (m_tr.start != 0 || m_tr.end != 0 || m_tr.w != static_cast<int>(width) ||
++			m_tr.h != static_cast<int>(height) || m_tr.x != static_cast<int>(m_tr.m_pos.SSAX) ||
++			m_tr.y != static_cast<int>(m_tr.m_pos.SSAY))
++			return false;
++	}
++	else if (m_tr.total != static_cast<int>(transfer_bytes) || m_tr.start != 0 ||
++		m_tr.end < 0 || m_tr.end >= m_tr.total)
++	{
++		return false;
++	}
++
++	const u64 consumed = static_cast<u64>(m_tr.end);
++	const u64 remaining = transfer_bytes - consumed;
++	if (byte_count > remaining || (byte_count != remaining && (byte_count & 15u) != 0))
++		return false;
++	const u64 qwc = (static_cast<u64>(byte_count) + 15u) / 16u;
++	if (qwc == 0 || qwc > static_cast<u64>(INT_MAX))
++		return false;
++
++	InitReadFIFO(mem, static_cast<int>(qwc));
++	ReadFIFO(mem, static_cast<int>(qwc));
++	const u64 expected_end = consumed + byte_count;
++	if (m_tr.end != static_cast<int>(expected_end))
++		return false;
++	if (expected_end == transfer_bytes)
++		return m_env.TRXDIR.XDIR == 3;
++	return m_env.TRXDIR.XDIR == 1;
++}
++
+ void GSState::Move()
+ {
+ 	// ffxii uses this to move the top/bottom of the scrolling menus offscreen and then blends them back over the text to create a shading effect
+@@ -6838,6 +6912,147 @@ GIFRegTEX0 GSState::GetTex0Layer(u32 lod)
+ 	return TEX0;
+ }
+ 
++// GPL-3.0+ backport provenance: PCSX2 #13970, upstream commit
++// 77bec5e0f5fe2d9c677716f3b227f45e5aab2010. This preserves PCSX2's
++// HW-only large-ST rewrite predicate and vertex normalization behavior.
++template <u32 primclass>
++void GSState::RewriteVerticesIfLargeSTImpl(const GSVector4& large_val, bool check_clamp_mode)
++{
++	// Need texture mapping with ST, and reject index counts which cannot be
++	// safely rewritten into the u16 index buffer.
++	if (PRIM->TME && PRIM->FST == 0)
++	{
++		const float tw = static_cast<float>(1 << m_context->TEX0.TW);
++		const float th = static_cast<float>(1 << m_context->TEX0.TH);
++		const GSVector4 tsize = GSVector4(tw, th, 1.0f, 1.0f);
++
++		const GIFRegCLAMP& clamp = m_context->CLAMP;
++		const GSVector4 clamp_mask =
++			check_clamp_mode ?
++				GSVector4::cast(GSVector4i(
++					(clamp.WMS == CLAMP_CLAMP || clamp.WMS == CLAMP_REGION_CLAMP) ? 0xFFFFFFFF : 0,
++					(clamp.WMT == CLAMP_CLAMP || clamp.WMT == CLAMP_REGION_CLAMP) ? 0xFFFFFFFF : 0,
++					0,
++					0)) :
++				GSVector4::cast(GSVector4i::cxpr(0xFFFFFFFF));
++
++		const GSVector4 tex_bbox = m_vt.m_min.t.xyxy(m_vt.m_max.t) / tsize.xyxy();
++		const bool large_st = ((tex_bbox.abs() >= large_val) & clamp_mask).mask() || m_vt.nan.value;
++
++		if (large_st)
++		{
++			GL_PUSH("Large ST detected, rewriting vertices.");
++			if (m_index->tail > UINT16_MAX)
++			{
++				GL_INS("Too many vertices to rewrite safely, exiting.");
++				DevCon.Warning("Large ST detected but too many vertices to rewrite safely.");
++				return;
++			}
++
++			constexpr int n = GSUtil::GetClassVertexCount(primclass);
++
++			while (m_max_vertex_count < m_index->tail)
++				GrowVertexBuffer();
++
++			GSVertex* RESTRICT vertex = m_vertex->buff;
++			GSVertex* RESTRICT vertex_copy = m_vertex->buff_copy;
++			u16* RESTRICT index = m_index->buff;
++			const int count = static_cast<int>(m_index->tail);
++
++			for (int i = 0; i < count; i += n)
++			{
++				GSVector4 stcq[n];
++
++				for (int j = 0; j < n; j++)
++					stcq[j] = GSVector4::cast(GSVector4i(vertex[index[i + j]].m[0]));
++
++				GSVector4 uv[n];
++				GSVector4 small{}, big{}, nan{};
++				for (int j = 0; j < n; j++)
++				{
++					const GSVector4 q = primclass == GS_SPRITE_CLASS ? stcq[1].wwww() : stcq[j].wwww();
++					uv[j] = (stcq[j] / q).xyzw(GSVector4::zero());
++					small |= (uv[j] <= -large_val);
++					big |= (uv[j] >= large_val);
++					nan |= (uv[j] != uv[j]);
++				}
++
++				GSVector4 uv_new = GSVector4::zero();
++				uv_new = uv_new.blend32(-large_val, small);
++				uv_new = uv_new.blend32(large_val, big);
++				uv_new = uv_new.blend32(GSVector4::zero(), (small & big) | nan);
++
++				const GSVector4 rewrite = (((small | big) & clamp_mask) | nan).xyxy(GSVector4::zero());
++
++				if ((rewrite.mask() & 3) == 3)
++				{
++					for (int j = 0; j < n; j++)
++						stcq[j] = stcq[j].template insert32<0, 3>(GSVector4::m_one);
++				}
++
++				for (int j = 0; j < n; j++)
++				{
++					const GSVector4 q = (primclass == GS_SPRITE_CLASS) ? stcq[1].wwww() : stcq[j].wwww();
++					stcq[j] = stcq[j].blend32(uv_new * q, rewrite);
++
++					vertex_copy[i + j].m[0] = GSVector4i::cast(stcq[j]);
++					vertex_copy[i + j].m[1] = vertex[index[i + j]].m[1];
++					index[i + j] = i + j;
++				}
++			}
++
++			std::swap(m_vertex->buff, m_vertex->buff_copy);
++			m_vertex->head = m_vertex->next = m_vertex->tail = m_index->tail;
++
++			GSVector4 tmin = GSVector4::cxpr(FLT_MAX);
++			GSVector4 tmax = GSVector4::cxpr(-FLT_MAX);
++			for (int i = 0; i < count; i += n)
++			{
++				for (int j = 0; j < n; j++)
++				{
++					GSVector4 stcq = GSVector4::cast(GSVector4i(m_vertex->buff[i + j].m[0]));
++					const float q = (primclass == GS_SPRITE_CLASS) ? m_vertex->buff[i + 1].RGBAQ.Q : stcq.w;
++					stcq = (stcq / q).xyzw(stcq);
++
++					tmin = tmin.min(stcq);
++					tmax = tmax.max(stcq);
++				}
++			}
++			m_vt.m_min.t = tmin.xyww() * tsize;
++			m_vt.m_max.t = tmax.xyww() * tsize;
++			m_vt.m_eq.stq = (m_vt.m_min.t == m_vt.m_max.t).mask();
++
++			if (GSConfig.ShouldDump(s_n, g_perfmon.GetFrame()) && GSConfig.SaveInfo)
++			{
++				DumpVertices(GetDrawDumpPath("%05lld_vertices_st_rewrite.txt",
++					static_cast<long long>(s_n)));
++			}
++		}
++	}
++}
++
++void GSState::RewriteVerticesIfLargeST(const GSVector4& large_val, bool check_clamp_mode)
++{
++	switch (m_vt.m_primclass)
++	{
++		case GS_POINT_CLASS:
++			RewriteVerticesIfLargeSTImpl<GS_POINT_CLASS>(large_val, check_clamp_mode);
++			break;
++		case GS_LINE_CLASS:
++			RewriteVerticesIfLargeSTImpl<GS_LINE_CLASS>(large_val, check_clamp_mode);
++			break;
++		case GS_SPRITE_CLASS:
++			RewriteVerticesIfLargeSTImpl<GS_SPRITE_CLASS>(large_val, check_clamp_mode);
++			break;
++		case GS_TRIANGLE_CLASS:
++			RewriteVerticesIfLargeSTImpl<GS_TRIANGLE_CLASS>(large_val, check_clamp_mode);
++			break;
++		default:
++			pxFail("Invalid primclass");
++			break;
++	}
++}
++
+ // GSTransferBuffer
+ 
+ GSState::GSTransferBuffer::GSTransferBuffer()
+@@ -7484,4 +7699,3 @@ void GSState::GSPCRTCRegs::CalculateDisplayOffset(bool scanmask)
+ 		}
+ 	}
+ }
+-
+diff --git a/pcsx2/GS/GSState.h b/pcsx2/GS/GSState.h
+index 1b45bc2..8a2469b 100644
+--- a/pcsx2/GS/GSState.h
++++ b/pcsx2/GS/GSState.h
+@@ -505,6 +505,13 @@ public:
+ 	virtual void InvalidateVideoMem(const GIFRegBITBLTBUF& BITBLTBUF, const GSVector4i& r) {}
+ 	virtual void InvalidateLocalMem(const GIFRegBITBLTBUF& BITBLTBUF, const GSVector4i& r, bool clut = false) {}
+ 
++	// RRV GS-bridge extension: block until every queued rasterizer job has
++	// retired. The bridge reads GS local memory directly (savestates, GS dumps
++	// and the guest's own local->host image downloads), which the software
++	// renderer's worker threads would otherwise still be writing into. A
++	// single-threaded renderer has nothing in flight, so the base is a no-op.
++	virtual void RrvSyncRasterizer() {}
++
+ 	virtual void Move();
+ 
+ 	GSVector4i GetTEX0Rect(const GSDrawingContext& prev_ctx);
+@@ -517,6 +524,10 @@ public:
+ 	void WriteCSR(u32 csr) { m_regs->CSR.U32[1] = csr; }
+ 	void ReadFIFO(u8* mem, int size);
+ 	void ReadLocalMemoryUnsync(u8* mem, int qwc, GIFRegBITBLTBUF BITBLTBUF, GIFRegTRXPOS TRXPOS, GIFRegTRXREG TRXREG);
++	// RRV GS-bridge extension. This accepts only the live local-to-host
++	// transfer armed by GIFRegHandlerTRXDIR; it owns no bridge-side cursor.
++	bool RrvReadLocalMemoryChecked(u8* mem, u32 byte_count, GIFRegBITBLTBUF BITBLTBUF,
++		GIFRegTRXPOS TRXPOS, GIFRegTRXREG TRXREG);
+ 	template<int index> void Transfer(const u8* mem, u32 size);
+ 	int Freeze(freezeData* fd, bool sizeonly);
+ 	int Defrost(const freezeData* fd);
+@@ -541,6 +552,9 @@ public:
+ 	bool SpriteDrawWithoutGaps();
+ 	void CalculatePrimitiveCoversWithoutGaps();
+ 	GIFRegTEX0 GetTex0Layer(u32 lod);
++	template <u32 primclass>
++	void RewriteVerticesIfLargeSTImpl(const GSVector4& large_val, bool check_clamp_mode);
++	void RewriteVerticesIfLargeST(const GSVector4& large_val, bool check_clamp_mode);
+ };
+ 
+ // We put this in the header because of Multi-ISA.
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+index 98483f2..4821e02 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+@@ -2902,6 +2902,16 @@ void GSRendererHW::Draw()
+ 	// First pass texture shuffle detection using context/vertices.
+ 	DetectTextureShuffle();
+ 
++	// GPL-3.0+ backport provenance: PCSX2 #13970, upstream commit
++	// 77bec5e0f5fe2d9c677716f3b227f45e5aab2010. Ridge Racer V uses large
++	// ST coordinates in reflection-map draws, which otherwise cause speckling.
++	if (GSConfig.UserHacks_RewriteLargeST)
++	{
++		// The upstream threshold fixes the affected reflection draws without
++		// changing ordinary normalized-ST material draws.
++		RewriteVerticesIfLargeST(GSVector4::cxpr(16.0f), false);
++	}
++
+ 	// When the format is 24bit (Z or C), DATE ceases to function.
+ 	// It was believed that in 24bit mode all pixels pass because alpha doesn't exist
+ 	// however after testing this on a PS2 it turns out nothing passes, it ignores the draw.
+diff --git a/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm b/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
+index 6bf6af8..d8d30f3 100644
+--- a/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
++++ b/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
+@@ -5,6 +5,7 @@
+ #include "GS/GSGL.h"
+ #include "GS/Renderers/Metal/GSMetalCPPAccessible.h"
+ #include "GS/Renderers/Metal/GSDeviceMTL.h"
++#include "GS/Renderers/Metal/RRVMetalLifetimeDiag.h"
+ #include "GS/Renderers/Metal/GSTextureMTL.h"
+ #include "GS/GSPerfMon.h"
+ #include "GS/GSShaderCompileIndicator.h"
+@@ -15,6 +16,9 @@
+ #include "cpuinfo.h"
+ #include "imgui.h"
+ 
++#include <thread>
++#include <cstring>
++
+ #ifdef __APPLE__
+ #include "GSMTLSharedHeader.h"
+ 
+@@ -23,6 +27,147 @@
+ 	return simd::make_float2(vec.x, vec.y);
+ }
+ 
++namespace
++{
++rrv::metal_lifetime::Ring s_rrv_metal_lifetime;
++std::atomic<u64> s_rrv_last_present_config{0};
++std::atomic<u64> s_rrv_last_interlace_config{0};
++
++u64 RrvMetalLifetimePointer(id object)
++{
++	return static_cast<u64>(reinterpret_cast<uintptr_t>((__bridge void*)object));
++}
++
++u64 RrvMetalLifetimeThread()
++{
++	return static_cast<u64>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
++}
++
++const char* RrvMetalLifetimeEventName(rrv::metal_lifetime::Event event)
++{
++	using Event = rrv::metal_lifetime::Event;
++	switch (event)
++	{
++		case Event::Attach: return "attach";
++		case Event::Detach: return "detach";
++		case Event::UpdateWindow: return "update-window";
++		case Event::DestroySurface: return "destroy-surface";
++		case Event::Destroy: return "destroy";
++		case Event::CommandBufferCreate: return "command-buffer-create";
++		case Event::Commit: return "commit";
++		case Event::Complete: return "complete";
++		case Event::SpinComplete: return "spin-complete";
++		case Event::DrawableAcquire: return "drawable-acquire";
++		case Event::DrawablePresent: return "drawable-present";
++		case Event::DeviceReady: return "device-ready";
++		case Event::PipelineReady: return "pipeline-ready";
++		case Event::PresentConfig: return "present-config";
++		case Event::InterlaceConfig: return "interlace-config";
++	}
++	return "unknown";
++}
++
++void RrvMetalLifetimeRecordRaw(rrv::metal_lifetime::Event event, u64 command_buffer, u64 queue,
++	u64 layer, u64 drawable, u64 draw, u64 status, u64 surface_width = 0,
++	u64 surface_height = 0, u64 pixel_format = 0, u64 reacquire_before_complete = 0)
++{
++	if (!s_rrv_metal_lifetime.enabled())
++		return;
++	s_rrv_metal_lifetime.record(event, command_buffer, queue, layer, drawable, draw, status,
++		RrvMetalLifetimeThread(), surface_width, surface_height, pixel_format, reacquire_before_complete);
++}
++
++void RrvMetalLifetimeSurface(CAMetalLayer* layer, u64* surface_width, u64* surface_height, u64* pixel_format)
++{
++	*surface_width = 0;
++	*surface_height = 0;
++	*pixel_format = 0;
++	if (!layer)
++		return;
++	const CGSize size = [layer drawableSize];
++	*surface_width = static_cast<u64>(size.width);
++	*surface_height = static_cast<u64>(size.height);
++	*pixel_format = static_cast<u64>([layer pixelFormat]);
++}
++
++void RrvMetalLifetimeRecord(rrv::metal_lifetime::Event event, id<MTLCommandBuffer> command_buffer,
++	id<MTLCommandQueue> queue, CAMetalLayer* layer, id<CAMetalDrawable> drawable, u64 draw,
++	u64 reacquire_before_complete = 0)
++{
++	if (!s_rrv_metal_lifetime.enabled())
++		return;
++	u64 surface_width, surface_height, pixel_format;
++	RrvMetalLifetimeSurface(layer, &surface_width, &surface_height, &pixel_format);
++	RrvMetalLifetimeRecordRaw(event, RrvMetalLifetimePointer(command_buffer), RrvMetalLifetimePointer(queue),
++		RrvMetalLifetimePointer(layer), RrvMetalLifetimePointer(drawable), draw,
++		command_buffer ? static_cast<u64>([command_buffer status]) : 0,
++		surface_width, surface_height, pixel_format, reacquire_before_complete);
++}
++
++u64 RrvMetalLifetimeFloatBits(float value)
++{
++	u32 bits;
++	std::memcpy(&bits, &value, sizeof(bits));
++	return bits;
++}
++
++u64 RrvMetalLifetimeConfigSignature(const GSVector4& source, const GSVector4& target, u64 source_width,
++	u64 source_height, u64 target_width, u64 target_height, u64 selector, u64 filter, u64 pipeline)
++{
++	u64 hash = 1469598103934665603ull;
++	const auto mix = [&hash](u64 value) { hash = (hash ^ value) * 1099511628211ull; };
++	mix(RrvMetalLifetimeFloatBits(source.x)); mix(RrvMetalLifetimeFloatBits(source.y));
++	mix(RrvMetalLifetimeFloatBits(source.z)); mix(RrvMetalLifetimeFloatBits(source.w));
++	mix(RrvMetalLifetimeFloatBits(target.x)); mix(RrvMetalLifetimeFloatBits(target.y));
++	mix(RrvMetalLifetimeFloatBits(target.z)); mix(RrvMetalLifetimeFloatBits(target.w));
++	mix(source_width); mix(source_height); mix(target_width); mix(target_height);
++	mix(selector); mix(filter); mix(pipeline);
++	return hash;
++}
++
++void RrvMetalLifetimeRecordConfigIfChanged(rrv::metal_lifetime::Event event, std::atomic<u64>& previous,
++	u64 signature, id pipeline, id<MTLTexture> output,
++	id<MTLCommandQueue> queue, CAMetalLayer* layer, id<CAMetalDrawable> drawable, u64 draw)
++{
++	if (!s_rrv_metal_lifetime.enabled() || previous.exchange(signature, std::memory_order_relaxed) == signature)
++		return;
++	const u64 output_width = output ? static_cast<u64>([output width]) : 0;
++	const u64 output_height = output ? static_cast<u64>([output height]) : 0;
++	const u64 output_format = output ? static_cast<u64>([output pixelFormat]) : 0;
++	RrvMetalLifetimeRecordRaw(event, RrvMetalLifetimePointer(pipeline), RrvMetalLifetimePointer(queue),
++		RrvMetalLifetimePointer(layer), RrvMetalLifetimePointer(drawable), draw, signature,
++		output_width, output_height, output_format);
++}
++} // namespace
++
++// LLDB: `expr -- GSRrvMetalLifetimeDump()` after a failed run. These hooks are
++// intentionally local to the renderer and are not exported through the bridge ABI.
++extern "C" void GSRrvMetalLifetimeDump()
++{
++	const rrv::metal_lifetime::Snapshot snapshot = s_rrv_metal_lifetime.snapshot();
++	Console.WriteLn("RRV Metal lifetime: first=%llu next=%llu overwritten=%llu gaps=%llu records=%llu",
++		static_cast<unsigned long long>(snapshot.first_ticket), static_cast<unsigned long long>(snapshot.next_ticket),
++		static_cast<unsigned long long>(snapshot.overwritten), static_cast<unsigned long long>(snapshot.gaps),
++		static_cast<unsigned long long>(snapshot.count));
++	for (u64 index = 0; index < snapshot.count; ++index)
++	{
++		const rrv::metal_lifetime::Record& record = snapshot.records[index];
++		Console.WriteLn("RRV Metal lifetime: ticket=%llu lifecycle=%llu event=%s cb=0x%llx queue=0x%llx layer=0x%llx drawable=0x%llx draw=%llu status=%llu thread=0x%llx size=%llux%llu format=%llu reacquire-pending=%llu",
++			static_cast<unsigned long long>(record.ticket), static_cast<unsigned long long>(record.lifecycle),
++			RrvMetalLifetimeEventName(record.event), static_cast<unsigned long long>(record.command_buffer),
++			static_cast<unsigned long long>(record.queue), static_cast<unsigned long long>(record.layer),
++			static_cast<unsigned long long>(record.drawable), static_cast<unsigned long long>(record.draw),
++			static_cast<unsigned long long>(record.status), static_cast<unsigned long long>(record.thread),
++			static_cast<unsigned long long>(record.surface_width), static_cast<unsigned long long>(record.surface_height),
++			static_cast<unsigned long long>(record.pixel_format), static_cast<unsigned long long>(record.reacquire_before_complete));
++	}
++}
++
++extern "C" void GSRrvMetalLifetimeSnapshot()
++{
++	GSRrvMetalLifetimeDump();
++}
++
+ GSDevice* MakeGSDeviceMTL()
+ {
+ 	return new GSDeviceMTL();
+@@ -195,6 +340,7 @@
+ 	if (!m_texture_upload_cmdbuf)
+ 	{
+ 		m_texture_upload_cmdbuf = MRCRetain([m_queue commandBuffer]);
++		RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::CommandBufferCreate, m_texture_upload_cmdbuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 		m_texture_upload_encoder = MRCRetain([m_texture_upload_cmdbuf blitCommandEncoder]);
+ 		pxAssertRel(m_texture_upload_encoder, "Failed to create texture upload encoder!");
+ 		[m_texture_upload_cmdbuf setLabel:@"Texture Upload"];
+@@ -221,6 +367,7 @@
+ 	if (!m_vertex_upload_cmdbuf)
+ 	{
+ 		m_vertex_upload_cmdbuf = MRCRetain([m_queue commandBuffer]);
++		RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::CommandBufferCreate, m_vertex_upload_cmdbuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 		m_vertex_upload_encoder = MRCRetain([m_vertex_upload_cmdbuf blitCommandEncoder]);
+ 		pxAssertRel(m_vertex_upload_encoder, "Failed to create vertex upload encoder!");
+ 		[m_vertex_upload_cmdbuf setLabel:@"Vertex Upload"];
+@@ -235,6 +382,7 @@
+ 	{
+ 		m_encoders_in_current_cmdbuf = 0;
+ 		m_current_render_cmdbuf = MRCRetain([m_queue commandBuffer]);
++		RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::CommandBufferCreate, m_current_render_cmdbuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 		pxAssertRel(m_current_render_cmdbuf, "Failed to create draw command buffer!");
+ 		[m_current_render_cmdbuf setLabel:@"Draw"];
+ 	}
+@@ -282,6 +430,7 @@
+ 	else if (m_vertex_upload_cmdbuf)
+ 	{
+ 		[m_vertex_upload_encoder endEncoding];
++		RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Commit, m_vertex_upload_cmdbuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 		[m_vertex_upload_cmdbuf commit];
+ 		m_vertex_upload_encoder = nil;
+ 		m_vertex_upload_cmdbuf = nil;
+@@ -289,6 +438,7 @@
+ 	if (m_texture_upload_cmdbuf)
+ 	{
+ 		[m_texture_upload_encoder endEncoding];
++		RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Commit, m_texture_upload_cmdbuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 		[m_texture_upload_cmdbuf commit];
+ 		m_texture_upload_encoder = nil;
+ 		m_texture_upload_cmdbuf = nil;
+@@ -344,12 +494,14 @@
+ 				dev->DrawCommandBufferFinished(draw, buf);
+ 		}];
+ 	}
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Commit, m_current_render_cmdbuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 	[m_current_render_cmdbuf commit];
+ 	m_current_render_cmdbuf = nil;
+ 	m_current_draw++;
+ 	if (spin_cycles)
+ 	{
+ 		id<MTLCommandBuffer> spinCmdBuf = [m_queue commandBuffer];
++		RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::CommandBufferCreate, spinCmdBuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 		[spinCmdBuf setLabel:@"Spin"];
+ 		id<MTLComputeCommandEncoder> spinCmdEncoder = [spinCmdBuf computeCommandEncoder];
+ 		[spinCmdEncoder setLabel:@"Spin"];
+@@ -359,8 +511,15 @@
+ 		[spinCmdEncoder setBuffer:m_spin_buffer offset:0 atIndex:1];
+ 		[spinCmdEncoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+ 		[spinCmdEncoder endEncoding];
+-		[spinCmdBuf addCompletedHandler:[backref = m_backref, spin_cycles](id<MTLCommandBuffer> buf)
++		const bool diag_enabled = s_rrv_metal_lifetime.enabled();
++		const u64 diag_queue = diag_enabled ? RrvMetalLifetimePointer(m_queue) : 0;
++		const u64 diag_layer = diag_enabled ? RrvMetalLifetimePointer(m_layer) : 0;
++		const u64 diag_drawable = diag_enabled ? RrvMetalLifetimePointer(m_current_drawable) : 0;
++		const u64 diag_draw = m_current_draw;
++		[spinCmdBuf addCompletedHandler:[backref = m_backref, spin_cycles, diag_enabled, diag_queue, diag_layer, diag_drawable, diag_draw](id<MTLCommandBuffer> buf)
+ 		{
++			if (diag_enabled && s_rrv_metal_lifetime.enabled())
++				RrvMetalLifetimeRecordRaw(rrv::metal_lifetime::Event::SpinComplete, RrvMetalLifetimePointer(buf), diag_queue, diag_layer, diag_drawable, diag_draw, static_cast<u64>([buf status]));
+ #pragma clang diagnostic push
+ #pragma clang diagnostic ignored "-Wunguarded-availability"
+ 			u64 begin = [buf GPUStartTime] * s_to_ns;
+@@ -370,6 +529,7 @@
+ 			if (GSDeviceMTL* dev = backref->second)
+ 				dev->m_spin_manager.SpinCompleted(spin_cycles, static_cast<u32>(begin), static_cast<u32>(end));
+ 		}];
++		RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Commit, spinCmdBuf, m_queue, m_layer, m_current_drawable, diag_draw);
+ 		[spinCmdBuf commit];
+ 	}
+ }
+@@ -725,10 +885,21 @@ static constexpr MTLPixelFormat ConvertPixelFormat(GSTexture::Format format)
+ void GSDeviceMTL::DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, ShaderInterlace shader, Filter filter, const InterlaceConstantBuffer& cb)
+ { @autoreleasepool {
+ 	id<MTLCommandBuffer> cmdbuf = GetRenderCmdBuf();
++	id<MTLRenderPipelineState> pipeline = m_interlace_pipeline[static_cast<int>(shader)];
++	if (s_rrv_metal_lifetime.enabled())
++	{
++		id<MTLTexture> output = dTex ? static_cast<GSTextureMTL*>(dTex)->GetTexture() : nil;
++		const GSVector2i source_size = sTex->GetSize();
++		const GSVector2i target_size = dTex ? dTex->GetSize() : GetWindowSize();
++		const u64 signature = RrvMetalLifetimeConfigSignature(sRect, dRect, source_size.x, source_size.y,
++			target_size.x, target_size.y, static_cast<u64>(shader), static_cast<u64>(filter), RrvMetalLifetimePointer(pipeline));
++		RrvMetalLifetimeRecordConfigIfChanged(rrv::metal_lifetime::Event::InterlaceConfig, s_rrv_last_interlace_config,
++			signature, pipeline, output, m_queue, m_layer, m_current_drawable, m_current_draw);
++	}
+ 	GSScopedDebugGroupMTL dbg(cmdbuf, @"DoInterlace");
+ 
+ 	const bool can_discard = shader == ShaderInterlace::WEAVE || shader == ShaderInterlace::MAD_BUFFER;
+-	DoStretchRect(sTex, sRect, dTex, dRect, m_interlace_pipeline[static_cast<int>(shader)], filter,
++	DoStretchRect(sTex, sRect, dTex, dRect, pipeline, filter,
+ 		!can_discard ? LoadAction::DontCareIfFull : LoadAction::Load, &cb, sizeof(cb));
+ }}
+ 
+@@ -863,19 +1034,32 @@ static void OnMainThread(Fn&& fn)
+ void GSDeviceMTL::AttachSurfaceOnMainThread()
+ {
+ 	pxAssert([NSThread isMainThread]);
+-	m_layer = MRCRetain([CAMetalLayer layer]);
++	// RRV's direct-present bridge supplies a caller-owned CAMetalLayer through
++	// WindowInfo. PCSX2 retains it only for the active GS device and continues
++	// to own the Metal device, queue, drawable acquisition and presentation.
++	// Normal PCSX2 hosts leave surface_handle null and retain the stock layer.
++	m_layer = m_window_info.surface_handle ?
++		MRCRetain((__bridge CAMetalLayer*)m_window_info.surface_handle) :
++		MRCRetain([CAMetalLayer layer]);
+ 	[m_layer setDrawableSize:CGSizeMake(m_window_info.surface_width, m_window_info.surface_height)];
+ 	[m_layer setDevice:m_dev.dev];
+ 	m_view = MRCRetain((__bridge NSView*)m_window_info.window_handle);
+ 	[m_view setWantsLayer:YES];
+ 	[m_view setLayer:m_layer];
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Attach, nil, m_queue, m_layer, nil, m_current_draw);
+ }
+ 
+ void GSDeviceMTL::DetachSurfaceOnMainThread()
+ {
+ 	pxAssert([NSThread isMainThread]);
+-	[m_view setLayer:nullptr];
+-	[m_view setWantsLayer:NO];
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Detach, nil, m_queue, m_layer, m_current_drawable, m_current_draw);
++	// The bridge borrows a layer owned by RRV. It must leave that caller-owned
++	// AppKit state attached during shutdown; only its own retain is released.
++	if (!m_window_info.surface_handle)
++	{
++		[m_view setLayer:nullptr];
++		[m_view setWantsLayer:NO];
++	}
+ 	m_view = nullptr;
+ 	m_layer = nullptr;
+ }
+@@ -982,6 +1166,8 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 
+ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
+ { @autoreleasepool {
++	s_rrv_metal_lifetime.configureAtCreate();
++	s_rrv_metal_lifetime.startLifecycle();
+ 	if (!GSDevice::Create(vsync_mode, allow_present_throttle))
+ 		return false;
+ 
+@@ -1000,11 +1186,16 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 			Console.Warning("Metal: Couldn't find adapter %s, using default", GSConfig.Adapter.c_str());
+ 		m_dev = GSMTLDevice(MRCTransfer(MTLCreateSystemDefaultDevice()));
+ 		if (!m_dev.dev)
++		{
+ 			Host::ReportErrorAsync(TRANSLATE_SV("GSDeviceMTL", "No Metal Devices Available"), TRANSLATE_SV("GSDeviceMTL", "No Metal-supporting GPUs were found.  PCSX2 requires a Metal GPU (available on all Macs from 2012 onwards)."));
++			return false;
++		}
+ 	}
+ 
+ 	m_name = [[m_dev.dev name] UTF8String];
+ 	m_queue = MRCTransfer([m_dev.dev newCommandQueue]);
++	if (s_rrv_metal_lifetime.enabled())
++		RrvMetalLifetimeRecordRaw(rrv::metal_lifetime::Event::DeviceReady, RrvMetalLifetimePointer(m_dev.dev), RrvMetalLifetimePointer(m_queue), 0, 0, 0, 0);
+ 
+ 	m_pass_desc = MRCTransfer([MTLRenderPassDescriptor new]);
+ 	[m_pass_desc colorAttachments][0].loadAction = MTLLoadActionClear;
+@@ -1086,6 +1277,7 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 	m_spin_buffer = MRCTransfer([m_dev.dev newBufferWithLength:4 options:spin_opts]);
+ 	[m_spin_buffer setLabel:@"Spin Buffer"];
+ 	id<MTLCommandBuffer> initCommands = [m_queue commandBuffer];
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::CommandBufferCreate, initCommands, m_queue, m_layer, nil, m_current_draw);
+ 	id<MTLBlitCommandEncoder> clearSpinBuffer = [initCommands blitCommandEncoder];
+ 	[clearSpinBuffer fillBuffer:m_spin_buffer range:NSMakeRange(0, 4) value:0];
+ 	[clearSpinBuffer updateFence:m_spin_fence];
+@@ -1338,13 +1530,19 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 	pdesc.colorAttachments[0].pixelFormat = layer_px_fmt;
+ 	m_imgui_pipeline = MakePipeline(pdesc, LoadShader(@"vs_imgui"), LoadShader(@"ps_imgui"), @"imgui");
+ 
++	if (s_rrv_metal_lifetime.enabled())
++		RrvMetalLifetimeRecordRaw(rrv::metal_lifetime::Event::PipelineReady, RrvMetalLifetimePointer(m_dev.dev), RrvMetalLifetimePointer(m_queue), RrvMetalLifetimePointer(m_layer), 0, m_current_draw, 0);
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Commit, initCommands, m_queue, m_layer, nil, m_current_draw);
+ 	[initCommands commit];
+ 	return true;
+ }}
+ 
+ void GSDeviceMTL::Destroy()
+ { @autoreleasepool {
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Destroy, nil, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 	FlushEncoders();
++	if (s_rrv_metal_lifetime.enabled())
++		GSRrvMetalLifetimeDump();
+ 	std::lock_guard<std::mutex> guard(m_backref->first);
+ 	m_backref->second = nullptr;
+ 
+@@ -1356,6 +1554,7 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 
+ void GSDeviceMTL::DestroySurface()
+ {
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::DestroySurface, nil, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 	if (!m_layer)
+ 		return;
+ 	OnMainThread([this]{ DetachSurfaceOnMainThread(); });
+@@ -1364,6 +1563,7 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 
+ bool GSDeviceMTL::UpdateWindow()
+ {
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::UpdateWindow, nil, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 	DestroySurface();
+ 
+ 	if (!AcquireWindow(false))
+@@ -1408,6 +1608,7 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 
+ void GSDeviceMTL::ResizeWindow(u32 new_window_width, u32 new_window_height, float new_window_scale)
+ {
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::UpdateWindow, nil, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 	m_window_info.surface_scale = new_window_scale;
+ 	if (!m_layer ||
+ 		(m_window_info.surface_width == new_window_width && m_window_info.surface_height == new_window_height))
+@@ -1426,6 +1627,7 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ void GSDeviceMTL::UpdateTexture(id<MTLTexture> texture, u32 x, u32 y, u32 width, u32 height, const void* data, u32 data_stride)
+ {
+ 	id<MTLCommandBuffer> cmdbuf = [m_queue commandBuffer];
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::CommandBufferCreate, cmdbuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 	id<MTLBlitCommandEncoder> enc = [cmdbuf blitCommandEncoder];
+ 	size_t bytes = data_stride * height;
+ 	MRCOwned<id<MTLBuffer>> buf = MRCTransfer([m_dev.dev newBufferWithLength:bytes options:m_resource_options_shared_wc]);
+@@ -1440,6 +1642,7 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 	   destinationLevel:0
+ 	  destinationOrigin:MTLOriginMake(0, 0, 0)];
+ 	[enc endEncoding];
++	RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::Commit, cmdbuf, m_queue, m_layer, m_current_drawable, m_current_draw);
+ 	[cmdbuf commit];
+ }
+ 
+@@ -1456,6 +1659,12 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 	}
+ 	id<MTLCommandBuffer> buf = GetRenderCmdBuf();
+ 	m_current_drawable = MRCRetain([m_layer nextDrawable]);
++	if (s_rrv_metal_lifetime.enabled())
++	{
++		const u64 diag_drawable = RrvMetalLifetimePointer(m_current_drawable);
++		const u64 reacquire_before_complete = s_rrv_metal_lifetime.drawableIsPending(diag_drawable) ? 1 : 0;
++		RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::DrawableAcquire, buf, m_queue, m_layer, m_current_drawable, m_current_draw, reacquire_before_complete);
++	}
+ 	EndRenderPass();
+ 	if (!m_current_drawable)
+ 	{
+@@ -1480,6 +1689,23 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 	EndRenderPass();
+ 	if (m_current_drawable)
+ 	{
++		if (s_rrv_metal_lifetime.enabled())
++		{
++			const u64 diag_queue = RrvMetalLifetimePointer(m_queue);
++			const u64 diag_layer = RrvMetalLifetimePointer(m_layer);
++			const u64 diag_drawable = RrvMetalLifetimePointer(m_current_drawable);
++			const u64 diag_draw = m_current_draw;
++			s_rrv_metal_lifetime.markDrawablePresented(diag_drawable);
++			RrvMetalLifetimeRecord(rrv::metal_lifetime::Event::DrawablePresent, m_current_render_cmdbuf, m_queue, m_layer, m_current_drawable, diag_draw);
++			[m_current_render_cmdbuf addCompletedHandler:[diag_queue, diag_layer, diag_drawable, diag_draw](id<MTLCommandBuffer> buf)
++			{
++				if (s_rrv_metal_lifetime.enabled())
++				{
++					s_rrv_metal_lifetime.markDrawableCompleted(diag_drawable);
++					RrvMetalLifetimeRecordRaw(rrv::metal_lifetime::Event::Complete, RrvMetalLifetimePointer(buf), diag_queue, diag_layer, diag_drawable, diag_draw, static_cast<u64>([buf status]));
++				}
++			}];
++		}
+ 		const bool use_present_drawable = m_use_present_drawable == UsePresentDrawable::Always ||
+ 			(m_use_present_drawable == UsePresentDrawable::IfVsync && m_vsync_mode == GSVSyncMode::FIFO);
+ 
+@@ -1489,6 +1715,10 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 			[m_current_render_cmdbuf addScheduledHandler:[drawable = std::move(m_current_drawable)](id<MTLCommandBuffer>){
+ 				[drawable present];
+ 			}];
++		// Count only the bridge's external-surface presentation after an actual
++		// drawable was acquired and its presentation was scheduled.
++		if (m_window_info.surface_handle)
++			GSRrvRecordDirectPresent();
+ 	}
+ 	FlushEncoders();
+ 	FrameCompleted();
+@@ -1772,6 +2002,15 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 	cb.SetTarget(dRect, ds);
+ 	cb.SetTime(shaderTime);
+ 	id<MTLRenderPipelineState> pipe = m_present_pipeline[static_cast<int>(shader)];
++	if (!dTex && s_rrv_metal_lifetime.enabled())
++	{
++		id<MTLTexture> output = m_current_drawable ? [m_current_drawable texture] : nil;
++		const GSVector2i source_size = sTex->GetSize();
++		const u64 signature = RrvMetalLifetimeConfigSignature(sRect, dRect, source_size.x, source_size.y,
++			ds.x, ds.y, static_cast<u64>(shader), static_cast<u64>(filter), RrvMetalLifetimePointer(pipe));
++		RrvMetalLifetimeRecordConfigIfChanged(rrv::metal_lifetime::Event::PresentConfig, s_rrv_last_present_config,
++			signature, pipe, output, m_queue, m_layer, m_current_drawable, m_current_draw);
++	}
+ 
+ 	if (dTex)
+ 	{
+diff --git a/pcsx2/GS/Renderers/Metal/GSMTLDeviceInfo.mm b/pcsx2/GS/Renderers/Metal/GSMTLDeviceInfo.mm
+index 7649f59..2257b22 100644
+--- a/pcsx2/GS/Renderers/Metal/GSMTLDeviceInfo.mm
++++ b/pcsx2/GS/Renderers/Metal/GSMTLDeviceInfo.mm
+@@ -10,14 +10,19 @@
+ 
+ static id<MTLLibrary> loadMainLibrary(id<MTLDevice> dev, NSString* name)
+ {
+-	NSString* path = [[NSBundle mainBundle] pathForResource:name ofType:@"metallib"];
+-	if (!path)
++	// RRV's canonical package reader has established EmuFolders::Resources
++	// from the verified bridge image. Do not consult the process bundle here:
++	// that would make another package authoritative after relocation.
++	std::string ssname = std::string([name UTF8String]) + ".metallib";
++	std::string sspath = Path::Combine(EmuFolders::Resources, ssname);
++	NSString* path = [[NSString alloc] initWithBytes:sspath.data() length:sspath.length() encoding:NSUTF8StringEncoding];
++	id<MTLLibrary> library = [dev newLibraryWithFile:path error:nullptr];
++	if (library)
+ 	{
+-		std::string ssname = std::string([name UTF8String]) + ".metallib";
+-		std::string sspath = Path::Combine(EmuFolders::Resources, ssname);
+-		path = [[NSString alloc] initWithBytes:sspath.data() length:sspath.length() encoding:NSUTF8StringEncoding];
++		std::fprintf(stderr, "RRV: selected packaged Metal library %s\n", sspath.c_str());
++		std::fflush(stderr);
+ 	}
+-	return path ? [dev newLibraryWithFile:path error:nullptr] : nullptr;
++	return library;
+ }
+ 
+ static MRCOwned<id<MTLLibrary>> loadMainLibrary(id<MTLDevice> dev)
+@@ -33,7 +38,7 @@
+ 			return MRCTransfer(lib);
+ 	if (id<MTLLibrary> lib = loadMainLibrary(dev, @"default"))
+ 		return MRCTransfer(lib);
+-	return MRCTransfer([dev newDefaultLibrary]);
++	return {};
+ }
+ 
+ static GSMTLDevice::MetalVersion detectLibraryVersion(id<MTLLibrary> lib)
+diff --git a/pcsx2/GS/Renderers/Metal/RRVMetalLifetimeDiag.h b/pcsx2/GS/Renderers/Metal/RRVMetalLifetimeDiag.h
+new file mode 100644
+index 0000000..1a1c558
+--- /dev/null
++++ b/pcsx2/GS/Renderers/Metal/RRVMetalLifetimeDiag.h
+@@ -0,0 +1,230 @@
++// SPDX-FileCopyrightText: 2026 RRV-Recomp contributors
++// SPDX-License-Identifier: GPL-3.0+
++//
++// A deliberately small, process-lifetime diagnostic ring for the Metal
++// boundary.  It is not a renderer ownership mechanism: it never retains,
++// releases, dereferences, waits on, or otherwise changes the lifetime of the
++// objects whose pointer values it records.
++
++#pragma once
++
++#include <array>
++#include <atomic>
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++
++namespace rrv::metal_lifetime
++{
++inline constexpr std::uint64_t kCapacity = 512;
++inline constexpr std::uint64_t kDrawableSlots = 8;
++inline constexpr std::uint64_t kBusyBit = std::uint64_t{1} << 63;
++
++enum class Event : std::uint64_t
++{
++	Attach = 1,
++	Detach,
++	UpdateWindow,
++	DestroySurface,
++	Destroy,
++	CommandBufferCreate,
++	Commit,
++	Complete,
++	SpinComplete,
++	DrawableAcquire,
++	DrawablePresent,
++	DeviceReady,
++	PipelineReady,
++	PresentConfig,
++	InterlaceConfig,
++};
++
++struct Record
++{
++	std::uint64_t ticket = 0;
++	std::uint64_t lifecycle = 0;
++	std::uint64_t command_buffer = 0;
++	std::uint64_t queue = 0;
++	std::uint64_t layer = 0;
++	std::uint64_t drawable = 0;
++	std::uint64_t draw = 0;
++	std::uint64_t status = 0;
++	std::uint64_t thread = 0;
++	std::uint64_t surface_width = 0;
++	std::uint64_t surface_height = 0;
++	std::uint64_t pixel_format = 0;
++	std::uint64_t reacquire_before_complete = 0;
++	Event event = Event::Attach;
++};
++
++struct Snapshot
++{
++	std::uint64_t first_ticket = 0;
++	std::uint64_t next_ticket = 1;
++	std::uint64_t overwritten = 0;
++	std::uint64_t gaps = 0;
++	std::uint64_t count = 0;
++	std::array<Record, kCapacity> records{};
++};
++
++class Ring final
++{
++	struct Slot
++	{
++		// `generation` is the ticket of a fully-published slot. The high bit is
++		// a writer lease, so snapshot readers never consume partial fields.
++		std::atomic<std::uint64_t> generation{0};
++		std::atomic<std::uint64_t> lifecycle{0};
++		std::atomic<std::uint64_t> command_buffer{0};
++		std::atomic<std::uint64_t> queue{0};
++		std::atomic<std::uint64_t> layer{0};
++		std::atomic<std::uint64_t> drawable{0};
++		std::atomic<std::uint64_t> draw{0};
++		std::atomic<std::uint64_t> status{0};
++		std::atomic<std::uint64_t> thread{0};
++		std::atomic<std::uint64_t> event{0};
++		std::atomic<std::uint64_t> surface_width{0};
++		std::atomic<std::uint64_t> surface_height{0};
++		std::atomic<std::uint64_t> pixel_format{0};
++		std::atomic<std::uint64_t> reacquire_before_complete{0};
++	};
++
++	std::array<Slot, kCapacity> m_slots{};
++	std::atomic<std::uint64_t> m_next_ticket{1};
++	std::atomic<std::uint64_t> m_lifecycle{0};
++	std::atomic<bool> m_configured{false};
++	std::atomic<bool> m_enabled{false};
++	// Eight slots cover the normal Metal drawable ring without allocating or
++	// retaining it. A hash collision can only make this diagnostic conservative
++	// (a missed flag), never alter presentation ownership.
++	std::array<std::atomic<std::uint64_t>, kDrawableSlots> m_pending_drawables{};
++
++public:
++	void configureAtCreate()
++	{
++		bool expected = false;
++		if (m_configured.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
++		{
++			const char* value = std::getenv("RRV_METAL_LIFETIME_DIAG");
++			m_enabled.store(value && std::strcmp(value, "1") == 0, std::memory_order_release);
++		}
++	}
++
++	void startLifecycle()
++	{
++		if (m_enabled.load(std::memory_order_relaxed))
++			m_lifecycle.fetch_add(1, std::memory_order_relaxed);
++	}
++
++	bool enabled() const { return m_enabled.load(std::memory_order_relaxed); }
++
++	// Test-only setup has no production call sites. It allows the fixed-size
++	// protocol to be stressed without reading the process environment.
++	void enableForTest()
++	{
++		m_configured.store(true, std::memory_order_relaxed);
++		m_enabled.store(true, std::memory_order_relaxed);
++		m_lifecycle.store(1, std::memory_order_relaxed);
++	}
++
++	void record(Event event, std::uint64_t command_buffer, std::uint64_t queue,
++		std::uint64_t layer, std::uint64_t drawable, std::uint64_t draw,
++		std::uint64_t status, std::uint64_t thread, std::uint64_t surface_width = 0,
++		std::uint64_t surface_height = 0, std::uint64_t pixel_format = 0,
++		std::uint64_t reacquire_before_complete = 0)
++	{
++		if (!m_enabled.load(std::memory_order_relaxed))
++			return;
++
++		const std::uint64_t ticket = m_next_ticket.fetch_add(1, std::memory_order_relaxed);
++		Slot& slot = m_slots[ticket % kCapacity];
++		std::uint64_t generation = slot.generation.load(std::memory_order_acquire);
++		// Never wait for another recorder, including a completion callback. A busy,
++		// newer, or contended slot drops this ticket; snapshot() reports that gap.
++		if ((generation & kBusyBit) || generation >= ticket ||
++			!slot.generation.compare_exchange_strong(generation, ticket | kBusyBit,
++				std::memory_order_acquire, std::memory_order_acquire))
++			return;
++
++		slot.lifecycle.store(m_lifecycle.load(std::memory_order_relaxed), std::memory_order_relaxed);
++		slot.command_buffer.store(command_buffer, std::memory_order_relaxed);
++		slot.queue.store(queue, std::memory_order_relaxed);
++		slot.layer.store(layer, std::memory_order_relaxed);
++		slot.drawable.store(drawable, std::memory_order_relaxed);
++		slot.draw.store(draw, std::memory_order_relaxed);
++		slot.status.store(status, std::memory_order_relaxed);
++		slot.thread.store(thread, std::memory_order_relaxed);
++		slot.event.store(static_cast<std::uint64_t>(event), std::memory_order_relaxed);
++		slot.surface_width.store(surface_width, std::memory_order_relaxed);
++		slot.surface_height.store(surface_height, std::memory_order_relaxed);
++		slot.pixel_format.store(pixel_format, std::memory_order_relaxed);
++		slot.reacquire_before_complete.store(reacquire_before_complete, std::memory_order_relaxed);
++		slot.generation.store(ticket, std::memory_order_release);
++	}
++
++	bool drawableIsPending(std::uint64_t drawable) const
++	{
++		return enabled() && drawable != 0 && m_pending_drawables[(drawable >> 4) % kDrawableSlots].load(std::memory_order_acquire) == drawable;
++	}
++
++	void markDrawablePresented(std::uint64_t drawable)
++	{
++		if (enabled() && drawable != 0)
++			m_pending_drawables[(drawable >> 4) % kDrawableSlots].store(drawable, std::memory_order_release);
++	}
++
++	void markDrawableCompleted(std::uint64_t drawable)
++	{
++		if (!enabled() || drawable == 0)
++			return;
++		std::atomic<std::uint64_t>& pending = m_pending_drawables[(drawable >> 4) % kDrawableSlots];
++		std::uint64_t expected = drawable;
++		pending.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
++	}
++
++	void forceBusySlotForTest(std::uint64_t ticket)
++	{
++		m_slots[ticket % kCapacity].generation.store(ticket | kBusyBit, std::memory_order_release);
++	}
++
++	Snapshot snapshot() const
++	{
++		Snapshot result;
++		result.next_ticket = m_next_ticket.load(std::memory_order_acquire);
++		result.first_ticket = result.next_ticket > kCapacity ? result.next_ticket - kCapacity : 1;
++		result.overwritten = result.first_ticket - 1;
++		for (std::uint64_t ticket = result.first_ticket; ticket < result.next_ticket; ++ticket)
++		{
++			const Slot& slot = m_slots[ticket % kCapacity];
++			const std::uint64_t before = slot.generation.load(std::memory_order_acquire);
++			if (before != ticket)
++			{
++				++result.gaps;
++				continue;
++			}
++			Record& record = result.records[result.count];
++			record.ticket = ticket;
++			record.lifecycle = slot.lifecycle.load(std::memory_order_relaxed);
++			record.command_buffer = slot.command_buffer.load(std::memory_order_relaxed);
++			record.queue = slot.queue.load(std::memory_order_relaxed);
++			record.layer = slot.layer.load(std::memory_order_relaxed);
++			record.drawable = slot.drawable.load(std::memory_order_relaxed);
++			record.draw = slot.draw.load(std::memory_order_relaxed);
++			record.status = slot.status.load(std::memory_order_relaxed);
++			record.thread = slot.thread.load(std::memory_order_relaxed);
++			record.surface_width = slot.surface_width.load(std::memory_order_relaxed);
++			record.surface_height = slot.surface_height.load(std::memory_order_relaxed);
++			record.pixel_format = slot.pixel_format.load(std::memory_order_relaxed);
++			record.reacquire_before_complete = slot.reacquire_before_complete.load(std::memory_order_relaxed);
++			record.event = static_cast<Event>(slot.event.load(std::memory_order_relaxed));
++			if (slot.generation.load(std::memory_order_acquire) != ticket)
++			{
++				++result.gaps;
++				continue;
++			}
++			++result.count;
++		}
++		return result;
++	}
++};
++} // namespace rrv::metal_lifetime
+diff --git a/pcsx2/GS/Renderers/SW/GSDrawScanline.cpp b/pcsx2/GS/Renderers/SW/GSDrawScanline.cpp
+index f18adbd..451e707 100644
+--- a/pcsx2/GS/Renderers/SW/GSDrawScanline.cpp
++++ b/pcsx2/GS/Renderers/SW/GSDrawScanline.cpp
+@@ -10,8 +10,10 @@
+ 
+ #include <fstream>
+ 
+-// Comment to disable all dynamic code generation.
++// The GS-only RRV bridge does not initialize PCSX2's VM-wide JIT code map.
++#if !defined(RRV_PCSX2_GS_C_SCANLINE)
+ #define ENABLE_JIT_RASTERIZER
++#endif
+ 
+ #if MULTI_ISA_COMPILE_ONCE
+ // Lack of a better home
+@@ -30,13 +32,17 @@ GSDrawScanline::GSDrawScanline()
+ 	: m_sp_map("GSSetupPrim")
+ 	, m_ds_map("GSDrawScanline")
+ {
++#if !defined(RRV_PCSX2_GS_C_SCANLINE)
+ 	GSCodeReserve::ResetMemory();
++#endif
+ }
+ 
+ GSDrawScanline::~GSDrawScanline()
+ {
++#if !defined(RRV_PCSX2_GS_C_SCANLINE)
+ 	if (const size_t used = GSCodeReserve::GetMemoryUsed(); used > 0)
+ 		DevCon.WriteLn("SW JIT generated %zu bytes of code", used);
++#endif
+ }
+ 
+ bool GSDrawScanline::ShouldUseCDrawScanline(u64 key)
+@@ -115,10 +121,12 @@ void GSDrawScanline::BeginDraw(const GSRasterizerData& data, GSScanlineLocalData
+ 
+ void GSDrawScanline::ResetCodeCache()
+ {
++#if !defined(RRV_PCSX2_GS_C_SCANLINE)
+ 	Console.Warning("GS Software JIT cache overflow, resetting.");
+ 	m_sp_map.Clear();
+ 	m_ds_map.Clear();
+ 	GSCodeReserve::ResetMemory();
++#endif
+ }
+ 
+ bool GSDrawScanline::SetupDraw(GSRasterizerData& data)
+diff --git a/pcsx2/GS/Renderers/SW/GSDrawScanlineCodeGenerator.arm64.cpp b/pcsx2/GS/Renderers/SW/GSDrawScanlineCodeGenerator.arm64.cpp
+index c1602e4..d69d856 100644
+--- a/pcsx2/GS/Renderers/SW/GSDrawScanlineCodeGenerator.arm64.cpp
++++ b/pcsx2/GS/Renderers/SW/GSDrawScanlineCodeGenerator.arm64.cpp
+@@ -1800,7 +1800,9 @@ void GSDrawScanlineCodeGenerator::WriteZBuf()
+ 		armAsm->Smin(v1.V4S(), v1.V4S(), v7.V4S());
+ 	}
+ 
+-	bool fast = m_sel.ztest ? m_sel.zpsm < 2 : m_sel.zpsm == 0 && m_sel.notest;
++	// PSMZ24 shares a 32-bit storage lane whose high byte is not depth.  The
++	// ARM64 bulk path loses those preserved bits; use the per-pixel RMW path.
++	bool fast = m_sel.ztest ? m_sel.zpsm == 0 : m_sel.zpsm == 0 && m_sel.notest;
+ 
+ 	WritePixel(v1, w9, w1, true, fast, m_sel.zpsm, 1);
+ }
+diff --git a/pcsx2/GS/Renderers/SW/GSRendererSW.h b/pcsx2/GS/Renderers/SW/GSRendererSW.h
+index a1a2c34..2393863 100644
+--- a/pcsx2/GS/Renderers/SW/GSRendererSW.h
++++ b/pcsx2/GS/Renderers/SW/GSRendererSW.h
+@@ -68,6 +68,12 @@ protected:
+ 	void Draw() override;
+ 	void Queue(GSRingHeap::SharedPtr<GSRasterizerData>& item);
+ 	void Sync(int reason);
++
++public:
++	// RRV GS-bridge extension: see GSState::RrvSyncRasterizer.
++	void RrvSyncRasterizer() override { Sync(-1); }
++
++protected:
+ 	void InvalidateVideoMem(const GIFRegBITBLTBUF& BITBLTBUF, const GSVector4i& r) override;
+ 	void InvalidateLocalMem(const GIFRegBITBLTBUF& BITBLTBUF, const GSVector4i& r, bool clut = false) override;
+
+diff --git a/pcsx2/GS/GSState.cpp b/pcsx2/GS/GSState.cpp
+index f8dc1b0..4c7cb14 100644
+--- a/pcsx2/GS/GSState.cpp
++++ b/pcsx2/GS/GSState.cpp
+@@ -3456,7 +3456,15 @@ void GSState::Transfer(const u8* mem, u32 size)
+ 						} while (path.StepReg() && size > 0 && path.reg != 0);
+ 					}
+ 
++					// A split path-3 PACKED payload can finish the current loop while retaining
++					// a residual QWC for the next GIFtag. Do not enter PACKED fallback here.
++					if constexpr (index == 3)
++					{
++						if (size == 0 || path.nloop == 0)
++							break;
++					}
++
+ 					// all data available? usually is
+ 
+ 					total = path.nloop * path.nreg;
+ 
+diff --git a/pcsx2/GS/Renderers/HW/GSTextureCache.cpp b/pcsx2/GS/Renderers/HW/GSTextureCache.cpp
+index 440e279..bf37073 100644
+--- a/pcsx2/GS/Renderers/HW/GSTextureCache.cpp
++++ b/pcsx2/GS/Renderers/HW/GSTextureCache.cpp
+@@ -11,6 +11,7 @@
+ #include "GS/GSXXH.h"
+ 
+ #include "common/Console.h"
++#include "common/AlignedMalloc.h"
+ #include "common/BitUtils.h"
+ #include "common/HashCombine.h"
+ #include "common/SmallString.h"
+@@ -18,6 +19,7 @@
+ #include "fmt/format.h"
+ 
+ #include <cinttypes>
++#include <limits>
+ #include <math.h>
+ 
+ #ifdef __APPLE__
+@@ -30,6 +32,51 @@ std::unique_ptr<GSTextureCache> g_texture_cache;
+ 
+ static u8* s_unswizzle_buffer;
+ 
++// ReadTexture expands every target pixel to u32, including 16/24-bit formats.
++// Check before aligning, multiplying by height, or narrowing to its int pitch.
++static bool GetTargetUpdateScratchLayout(size_t width, size_t height, int& pitch, size_t& required_size)
++{
++	constexpr size_t max_size = std::numeric_limits<size_t>::max();
++	constexpr size_t alignment_mask = VECTOR_ALIGNMENT - 1;
++	if (width == 0 || height == 0 || width > (max_size - alignment_mask) / sizeof(u32))
++		return false;
++
++	const size_t aligned_pitch = VectorAlign(width * sizeof(u32));
++	if (aligned_pitch > static_cast<size_t>(std::numeric_limits<int>::max()) || height > max_size / aligned_pitch)
++		return false;
++
++	pitch = static_cast<int>(aligned_pitch);
++	required_size = aligned_pitch * height;
++	return true;
++}
++
++static constexpr size_t s_unswizzle_buffer_size = 9 * 1024 * 1024;
++using UnswizzleScratchBuffer = std::unique_ptr<u8, decltype(&_aligned_free)>;
++
++// Readers write their complete aligned rectangle. Consumers can start within
++// it and advance one complete pitch per row, so both spans must fit.
++static bool GetUnswizzleScratch(size_t pitch, size_t write_height, size_t write_row_size, size_t consumer_offset, size_t consumer_size,
++	UnswizzleScratchBuffer& oversized_buffer, u8*& scratch)
++{
++	constexpr size_t max_size = std::numeric_limits<size_t>::max();
++	if (pitch == 0 || write_height == 0 || write_height > max_size / pitch || write_row_size > max_size - ((write_height - 1) * pitch) || consumer_offset > max_size - consumer_size)
++		return false;
++
++	const size_t write_size = ((write_height - 1) * pitch) + write_row_size;
++	const size_t required_size = std::max(write_size, consumer_offset + consumer_size);
++	oversized_buffer.reset();
++	scratch = s_unswizzle_buffer;
++	if (required_size <= s_unswizzle_buffer_size)
++		return true;
++
++	oversized_buffer.reset(static_cast<u8*>(_aligned_malloc(required_size, VECTOR_ALIGNMENT)));
++	if (!oversized_buffer)
++		return false;
++
++	scratch = oversized_buffer.get();
++	return true;
++}
++
+ /// List of candidates for purging when the hash cache gets too large.
+ static std::vector<std::pair<GSTextureCache::HashCacheMap::iterator, s32>> s_hash_cache_purge_list;
+ 
+@@ -7016,7 +7063,9 @@ GSTextureCache::HashCacheEntry* GSTextureCache::LookupHashCache(const GIFRegTEX0
+ 
+ 	// need the hash either for replacing, dumping or caching.
+ 	// if dumping/replacing is on, we compute the clut hash regardless, since replacements aren't indexed
+-	HashCacheKey key{HashCacheKey::Create(TEX0, TEXA, (dump || replace || !paltex) ? clut : nullptr, lod, region)};
++	HashCacheKey key;
++	if (!HashCacheKey::Create(TEX0, TEXA, (dump || replace || !paltex) ? clut : nullptr, lod, region, key))
++		return nullptr;
+ 
+ 	// handle dumping first, this is mostly isolated.
+ 	if (dump)
+@@ -7670,10 +7719,26 @@ void GSTextureCache::Source::Update(const GSVector4i& rect, int level)
+ 		}
+ 	}
+ 
++	if (m_write.failed)
++	{
++		m_write.failed = false;
++		m_write.count = 0;
++		m_valid.reset();
++		m_complete_layers &= ~(1u << level);
++		return;
++	}
++
+ 	if (blocks > 0)
+ 	{
+ 		g_perfmon.Put(GSPerfMon::Unswizzle, bs.x * bs.y * blocks << (m_palette ? 2 : 0));
+ 		Flush(m_write.count, level, off);
++		if (m_write.failed)
++		{
++			m_write.failed = false;
++			m_write.count = 0;
++			m_valid.reset();
++			m_complete_layers &= ~(1u << level);
++		}
+ 	}
+ }
+ 
+@@ -7703,6 +7768,9 @@ void GSTextureCache::Source::Write(const GSVector4i& r, int layer, const GSOffse
+ 	if (!m_write.rect)
+ 		m_write.rect = static_cast<GSVector4i*>(_aligned_malloc(3 * sizeof(GSVector4i), 16));
+ 
++	if (m_write.failed)
++		return;
++
+ 	m_write.rect[m_write.count++] = r;
+ 
+ 	while (m_write.count >= 2)
+@@ -7766,6 +7834,9 @@ void GSTextureCache::Source::Flush(u32 count, int layer, const GSOffset& off)
+ 
+ 	pitch = VectorAlign(pitch);
+ 
++	UnswizzleScratchBuffer oversized_buffer(nullptr, &_aligned_free);
++	u8* scratch = s_unswizzle_buffer;
++
+ 	for (u32 i = 0; i < count; i++)
+ 	{
+ 		const GSVector4i r(m_write.rect[i]);
+@@ -7787,11 +7858,30 @@ void GSTextureCache::Source::Flush(u32 count, int layer, const GSOffset& off)
+ 		if (rint.width() == 0 || rint.height() == 0)
+ 			continue;
+ 
+-		rtx(mem, off, r, s_unswizzle_buffer, pitch, m_TEXA);
++		const size_t row_offset = static_cast<size_t>(std::max(tex_r.top - r.top, 0)) * static_cast<size_t>(pitch);
++		const size_t column_offset = static_cast<size_t>(std::max(tex_r.left - r.left, 0)) << (m_palette ? 0 : 2);
++		if (row_offset > std::numeric_limits<size_t>::max() - column_offset ||
++			static_cast<size_t>(rint.height()) > std::numeric_limits<size_t>::max() / static_cast<size_t>(pitch))
++		{
++			Console.Error("Invalid scratch layout for source update");
++			m_write.failed = true;
++			return;
++		}
++		const size_t source_offset = row_offset + column_offset;
++		const size_t source_size = static_cast<size_t>(rint.height()) * static_cast<size_t>(pitch);
++		const size_t raw_row_size = static_cast<size_t>(r.width()) << (m_palette ? 0 : 2);
++		if (!GetUnswizzleScratch(static_cast<size_t>(pitch), static_cast<size_t>(r.height()), raw_row_size, source_offset, source_size,
++			oversized_buffer, scratch))
++		{
++			Console.Error("Failed to allocate scratch for source update");
++			m_write.failed = true;
++			return; // Source::Update invalidates the pending writes for a full retry.
++		}
++
++		rtx(mem, off, r, scratch, pitch, m_TEXA);
+ 
+ 		// need to offset if we're a region texture
+-		const u8* src = s_unswizzle_buffer + (pitch * static_cast<u32>(std::max(tex_r.top - r.top, 0))) +
+-		                (static_cast<u32>(std::max(tex_r.left - r.left, 0)) << (m_palette ? 0 : 2));
++		const u8* src = scratch + source_offset;
+ 		m_texture->Update(rint - tex_r.xyxy(), src, pitch, layer);
+ 	}
+ 
+@@ -7807,7 +7897,9 @@ void GSTextureCache::Source::Flush(u32 count, int layer, const GSOffset& off)
+ void GSTextureCache::Source::PreloadLevel(int level)
+ {
+ 	// m_TEX0 is adjusted for mips (messy, should be changed).
+-	const HashType hash = HashTexture(m_TEX0, m_TEXA, m_region);
++	HashType hash;
++	if (!HashTexture(m_TEX0, m_TEXA, m_region, hash))
++		return;
+ 
+ 	// Layer is complete again, regardless of whether the hash matches or not (and we reupload).
+ 	const u8 layer_bit = static_cast<u8>(1) << level;
+@@ -7983,15 +8075,44 @@ void GSTextureCache::Target::Update(bool cannot_scale)
+ 
+ 		const GSVector4i read_r = m_dirty.GetDirtyRect(i, m_TEX0, total_rect, true);
+ 		const GSVector4i t_r(read_r - t_offset);
++		int pitch = 0;
++		size_t required_size = 0;
++		std::unique_ptr<u8, decltype(&_aligned_free)> oversized_buffer(nullptr, &_aligned_free);
++		u8* scratch = s_unswizzle_buffer;
++		if (!mapped || ((m_TEX0.PSM & 0xf) != PSMCT24 && m_dirty[i].rgba.c.a && bpp >= 16))
++		{
++			if (!GetTargetUpdateScratchLayout(read_r.width(), read_r.height(), pitch, required_size)) [[unlikely]]
++			{
++				Console.Error("Invalid %dx%d scratch layout for target update", read_r.width(), read_r.height());
++				if (mapped)
++					t->Unmap();
++				g_gs_device->Recycle(t);
++				return; // Keep dirty rectangles for a later retry; nothing has been drawn to the target.
++			}
++
++			// Retain the existing 9 MiB scratch path for normal updates, without clipping larger reads.
++			if (required_size > 9 * 1024 * 1024)
++			{
++				oversized_buffer.reset(static_cast<u8*>(_aligned_malloc(required_size, VECTOR_ALIGNMENT)));
++				if (!oversized_buffer) [[unlikely]]
++				{
++					Console.Error("Failed to allocate %zu bytes of scratch for target update", required_size);
++					if (mapped)
++						t->Unmap();
++					g_gs_device->Recycle(t);
++					return;
++				}
++				scratch = oversized_buffer.get();
++			}
++		}
+ 		if (mapped)
+ 		{
+ 			if ((m_TEX0.PSM & 0xf) != PSMCT24 && m_dirty[i].rgba.c.a && bpp >= 16)
+ 			{
+ 				// TODO: Only read once in 32bit and copy to the mapped texture. Bit out of scope of this PR and not a huge impact.
+-				const int pitch = VectorAlign(read_r.width() * sizeof(u32));
+-				g_gs_renderer->m_mem.ReadTexture(off, read_r, s_unswizzle_buffer, pitch, TEXA);
++				g_gs_renderer->m_mem.ReadTexture(off, read_r, scratch, pitch, TEXA);
+ 
+-				std::pair<u8, u8> new_alpha_minmax = GSGetRGBA8AlphaMinMax(s_unswizzle_buffer, read_r.width(), read_r.height(), pitch);
++				std::pair<u8, u8> new_alpha_minmax = GSGetRGBA8AlphaMinMax(scratch, read_r.width(), read_r.height(), pitch);
+ 				alpha_minmax.first = std::min(alpha_minmax.first, new_alpha_minmax.first);
+ 				alpha_minmax.second = std::max(alpha_minmax.second, new_alpha_minmax.second);
+ 			}
+@@ -8001,17 +8122,16 @@ void GSTextureCache::Target::Update(bool cannot_scale)
+ 		}
+ 		else
+ 		{
+-			const int pitch = VectorAlign(read_r.width() * sizeof(u32));
+-			g_gs_renderer->m_mem.ReadTexture(off, read_r, s_unswizzle_buffer, pitch, TEXA);
++			g_gs_renderer->m_mem.ReadTexture(off, read_r, scratch, pitch, TEXA);
+ 
+ 			if ((m_TEX0.PSM & 0xf) != PSMCT24 && m_dirty[i].rgba.c.a && bpp >= 16)
+ 			{
+-				std::pair<u8, u8> new_alpha_minmax = GSGetRGBA8AlphaMinMax(s_unswizzle_buffer, read_r.width(), read_r.height(), pitch);
++				std::pair<u8, u8> new_alpha_minmax = GSGetRGBA8AlphaMinMax(scratch, read_r.width(), read_r.height(), pitch);
+ 				alpha_minmax.first = std::min(alpha_minmax.first, new_alpha_minmax.first);
+ 				alpha_minmax.second = std::max(alpha_minmax.second, new_alpha_minmax.second);
+ 			}
+ 
+-			t->Update(t_r, s_unswizzle_buffer, pitch);
++			t->Update(t_r, scratch, pitch);
+ 		}
+ 
+ 		GSDevice::MultiStretchRect& drect = drects[ndrects++];
+@@ -9013,7 +9133,7 @@ __fi static GSTextureCache::HashType FinishBlockHash(BlockHashState& st)
+ 	return GSXXH3_64bits_digest(&st);
+ }
+ 
+-static void HashTextureLevel(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, GSTextureCache::SourceRegion region, BlockHashState& hash_st, u8* temp)
++static bool HashTextureLevel(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, GSTextureCache::SourceRegion region, BlockHashState& hash_st)
+ {
+ 	const GSLocalMemory::psm_t& psm = GSLocalMemory::m_psm[TEX0.PSM];
+ 	const GSVector2i& bs = psm.bs;
+@@ -9041,6 +9161,19 @@ static void HashTextureLevel(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, GST
+ 		const u32 pitch = VectorAlign(static_cast<u32>(block_rect.z) << (palette ? 0 : 2));
+ 		const u32 row_size = static_cast<u32>(tw) << (palette ? 0 : 2);
+ 		const GSLocalMemory::readTexture rtx = palette ? psm.rtxP : psm.rtx;
++		const size_t source_offset = (static_cast<size_t>(pitch) * static_cast<u32>(rect.top - block_rect.top)) +
++			static_cast<u32>(rect.left - block_rect.left);
++		const size_t source_size = (pitch == row_size) ?
++			(static_cast<size_t>(pitch) * static_cast<u32>(th)) :
++			(static_cast<size_t>(pitch) * static_cast<u32>(th - 1) + row_size);
++		UnswizzleScratchBuffer oversized_buffer(nullptr, &_aligned_free);
++		u8* temp = s_unswizzle_buffer;
++		const size_t block_row_size = static_cast<size_t>(block_rect.width()) << (palette ? 0 : 2);
++		if (!GetUnswizzleScratch(pitch, static_cast<size_t>(block_rect.height()), block_row_size, source_offset, source_size, oversized_buffer, temp))
++		{
++			Console.Error("Failed to allocate scratch for texture hash");
++			return false;
++		}
+ 
+ 		// Use temp buffer for expanding, since we may not need to update.
+ 		rtx(mem, off, block_rect, temp, pitch, TEXA);
+@@ -9073,14 +9206,19 @@ static void HashTextureLevel(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, GST
+ 			}
+ 		}
+ 	}
++
++	return true;
+ }
+ 
+-GSTextureCache::HashType GSTextureCache::HashTexture(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, SourceRegion region)
++bool GSTextureCache::HashTexture(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, SourceRegion region, HashType& hash)
+ {
+ 	BlockHashState hash_st;
+ 	BlockHashReset(hash_st);
+-	HashTextureLevel(TEX0, TEXA, region, hash_st, s_unswizzle_buffer);
+-	return FinishBlockHash(hash_st);
++	if (!HashTextureLevel(TEX0, TEXA, region, hash_st))
++		return false;
++
++	hash = FinishBlockHash(hash_st);
++	return true;
+ }
+ 
+ void GSTextureCache::PreloadTexture(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, SourceRegion region, GSLocalMemory& mem,
+@@ -9144,11 +9282,11 @@ GSTextureCache::HashCacheKey::HashCacheKey()
+ 	TEXA.U64 = 0;
+ }
+ 
+-GSTextureCache::HashCacheKey GSTextureCache::HashCacheKey::Create(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, const u32* clut, const GSVector2i* lod, SourceRegion region)
++bool GSTextureCache::HashCacheKey::Create(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, const u32* clut, const GSVector2i* lod, SourceRegion region, HashCacheKey& ret)
+ {
+ 	const GSLocalMemory::psm_t& psm = GSLocalMemory::m_psm[TEX0.PSM];
+ 
+-	HashCacheKey ret;
++	ret = {};
+ 	ret.TEX0.U64 = TEX0.U64 & 0x00000003FFF00000ULL; // PSM, TW, TH
+ 	ret.TEXA.U64 = (psm.pal == 0 && psm.fmt > 0) ? (TEXA.U64 & 0x000000FF000080FFULL) : 0;
+ 	ret.CLUTHash = clut ? GSTextureCache::PaletteKeyHash{}({clut, psm.pal}) : 0;
+@@ -9159,7 +9297,8 @@ GSTextureCache::HashCacheKey GSTextureCache::HashCacheKey::Create(const GIFRegTE
+ 	BlockHashReset(hash_st);
+ 
+ 	// base level is always hashed
+-	HashTextureLevel(TEX0, TEXA, region, hash_st, s_unswizzle_buffer);
++	if (!HashTextureLevel(TEX0, TEXA, region, hash_st))
++		return false;
+ 
+ 	if (lod)
+ 	{
+@@ -9169,13 +9308,14 @@ GSTextureCache::HashCacheKey GSTextureCache::HashCacheKey::Create(const GIFRegTE
+ 		for (int i = 1; i < nmips; i++)
+ 		{
+ 			const GIFRegTEX0 MIP_TEX0{g_gs_renderer->GetTex0Layer(basemip + i)};
+-			HashTextureLevel(MIP_TEX0, TEXA, region.AdjustForMipmap(i), hash_st, s_unswizzle_buffer);
++			if (!HashTextureLevel(MIP_TEX0, TEXA, region.AdjustForMipmap(i), hash_st))
++				return false;
+ 		}
+ 	}
+ 
+ 	ret.TEX0Hash = FinishBlockHash(hash_st);
+ 
+-	return ret;
++	return true;
+ }
+ 
+ GSTextureCache::HashCacheKey GSTextureCache::HashCacheKey::WithRemovedCLUTHash() const
+diff --git a/pcsx2/GS/Renderers/HW/GSTextureCache.h b/pcsx2/GS/Renderers/HW/GSTextureCache.h
+index 605fe1d..485b1da 100644
+--- a/pcsx2/GS/Renderers/HW/GSTextureCache.h
++++ b/pcsx2/GS/Renderers/HW/GSTextureCache.h
+@@ -109,7 +109,7 @@ public:
+ 
+ 		HashCacheKey();
+ 
+-		static HashCacheKey Create(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, const u32* clut, const GSVector2i* lod, SourceRegion region);
++		static bool Create(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, const u32* clut, const GSVector2i* lod, SourceRegion region, HashCacheKey& key);
+ 
+ 		HashCacheKey WithRemovedCLUTHash() const;
+ 		void RemoveCLUTHash();
+@@ -295,6 +295,7 @@ public:
+ 		{
+ 			GSVector4i* rect;
+ 			u32 count;
++			bool failed;
+ 		} m_write = {};
+ 
+ 		void PreloadLevel(int level);
+@@ -480,7 +481,7 @@ protected:
+ 	void AgeHashCache();
+ 
+ 	static void PreloadTexture(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, SourceRegion region, GSLocalMemory& mem, bool paltex, GSTexture* tex, u32 level, std::pair<u8, u8>* alpha_minmax);
+-	static HashType HashTexture(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, SourceRegion region);
++	static bool HashTexture(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, SourceRegion region, HashType& hash);
+ 
+ 	// TODO: virtual void Write(Source* s, const GSVector4i& r) = 0;
+ 	// TODO: virtual void Write(Target* t, const GSVector4i& r) = 0;
+diff --git a/pcsx2/GS/GS.cpp b/pcsx2/GS/GS.cpp
+index 9655d33..270b94a 100644
+--- a/pcsx2/GS/GS.cpp
++++ b/pcsx2/GS/GS.cpp
+@@ -75,6 +75,18 @@ u64 GSRrvGetDirectPresentCount()
+ 	return s_rrv_direct_present_count.load(std::memory_order_relaxed);
+ }
+ 
++void GSRrvSetFieldOfyCanonical(u32 from_ofy, u32 to_ofy)
++{
++	GSState::s_rrv_ofy_from = from_ofy & 0xFFFFu;
++	GSState::s_rrv_ofy_to = to_ofy & 0xFFFFu;
++	GSState::s_rrv_ofy_canonical_count.store(0, std::memory_order_relaxed);
++}
++
++u64 GSRrvGetFieldOfyCanonicalCount()
++{
++	return GSState::s_rrv_ofy_canonical_count.load(std::memory_order_relaxed);
++}
++
+ static GSRendererType GSCurrentRenderer;
+ 
+ GSRendererType GSGetCurrentRenderer()
+diff --git a/pcsx2/GS/GS.h b/pcsx2/GS/GS.h
+index 5efe287..e650ffc 100644
+--- a/pcsx2/GS/GS.h
++++ b/pcsx2/GS/GS.h
+@@ -86,6 +86,13 @@ void GSgifTransfer3(u8* mem, u32 size);
+ void GSRrvResetDirectPresentCount();
+ void GSRrvRecordDirectPresent();
+ u64 GSRrvGetDirectPresentCount();
++// RRV Gate-6 full-frame extension. When from != to, every XYOFFSET_1/2 write
++// whose OFY equals `from` is stored with OFY = `to` before any draw, culling,
++// scissor or texture-cache decision uses it. The bridge uses this to put both
++// field parities of a half-line (sceGsSetHalfOffset-style) odd-field offset on
++// one progressive raster grid. from == to (the default) is a no-op.
++void GSRrvSetFieldOfyCanonical(u32 from_ofy, u32 to_ofy);
++u64 GSRrvGetFieldOfyCanonicalCount();
+ void GSvsync(u32 field, bool registers_written);
+ int GSfreeze(FreezeAction mode, freezeData* data);
+ std::string GSGetBaseSnapshotFilename();
+diff --git a/pcsx2/GS/GSState.cpp b/pcsx2/GS/GSState.cpp
+index be5fb0d..78826cc 100644
+--- a/pcsx2/GS/GSState.cpp
++++ b/pcsx2/GS/GSState.cpp
+@@ -22,6 +22,9 @@
+ u64 GSState::s_n = 0;
+ u64 GSState::s_last_transfer_draw_n = 0;
+ u64 GSState::s_transfer_n = 0;
++u32 GSState::s_rrv_ofy_from = 0;
++u32 GSState::s_rrv_ofy_to = 0;
++std::atomic<u64> GSState::s_rrv_ofy_canonical_count{0};
+ 
+ static __fi bool IsAutoFlushEnabled()
+ {
+@@ -1907,7 +1910,14 @@ void GSState::GIFRegHandlerXYOFFSET(const GIFReg* RESTRICT r)
+ {
+ 	GL_REG("XYOFFSET_%d = 0x%x_%x", i, r->U32[1], r->U32[0]);
+ 
+-	const u64 r_masked = r->U64 & XYOFFSET_REG_MASK;
++	u64 r_masked = r->U64 & XYOFFSET_REG_MASK;
++
++	// RRV Gate-6 full-frame extension: canonical field OFY (off unless set).
++	if (s_rrv_ofy_from != s_rrv_ofy_to && static_cast<u32>((r_masked >> 32) & 0xFFFFu) == s_rrv_ofy_from)
++	{
++		r_masked = (r_masked & 0x0000FFFFULL) | (static_cast<u64>(s_rrv_ofy_to) << 32);
++		s_rrv_ofy_canonical_count.fetch_add(1, std::memory_order_relaxed);
++	}
+ 
+ 	if (i == m_prev_env.PRIM.CTXT)
+ 	{
+diff --git a/pcsx2/GS/GSState.h b/pcsx2/GS/GSState.h
+index 8a2469b..786f015 100644
+--- a/pcsx2/GS/GSState.h
++++ b/pcsx2/GS/GSState.h
+@@ -14,6 +14,8 @@
+ #include "GS/GSVector.h"
+ #include "GSAlignedClass.h"
+ 
++#include <atomic>
++
+ class GSDumpBase;
+ 
+ class GSState : public GSAlignedClass<32>
+@@ -318,6 +320,11 @@ public:
+ 	static u64 s_last_transfer_draw_n;
+ 	static u64 s_transfer_n;
+ 
++	// RRV Gate-6 full-frame extension, see GSRrvSetFieldOfyCanonical().
++	static u32 s_rrv_ofy_from;
++	static u32 s_rrv_ofy_to;
++	static std::atomic<u64> s_rrv_ofy_canonical_count;
++
+ 	GSPerfMon m_perfmon_frame; // Track stat across a frame.
+ 	GSPerfMon m_perfmon_draw;  // Track stat across a draw.
+ 
+diff --git a/pcsx2/GS/GS.cpp b/pcsx2/GS/GS.cpp
+index 270b94a..5332cd0 100644
+--- a/pcsx2/GS/GS.cpp
++++ b/pcsx2/GS/GS.cpp
+@@ -87,6 +87,11 @@ u64 GSRrvGetFieldOfyCanonicalCount()
+ 	return GSState::s_rrv_ofy_canonical_count.load(std::memory_order_relaxed);
+ }
+ 
++void GSRrvSetRoundSpriteUOnly(bool u_only)
++{
++	GSState::s_rrv_round_sprite_u_only = u_only;
++}
++
+ static GSRendererType GSCurrentRenderer;
+ 
+ GSRendererType GSGetCurrentRenderer()
+diff --git a/pcsx2/GS/GS.h b/pcsx2/GS/GS.h
+index e650ffc..c9ea562 100644
+--- a/pcsx2/GS/GS.h
++++ b/pcsx2/GS/GS.h
+@@ -93,6 +93,11 @@ u64 GSRrvGetDirectPresentCount();
+ // one progressive raster grid. from == to (the default) is a no-op.
+ void GSRrvSetFieldOfyCanonical(u32 from_ofy, u32 to_ofy);
+ u64 GSRrvGetFieldOfyCanonicalCount();
++// RRV Gate-6 full-frame extension. When set, the HW RoundSprite fix rounds only
++// U (horizontal). Full mode rasterizes the vertical axis at 448 progressive rows;
++// rounding V back to the native 224-row field texel grid would drop the rows the
++// other field shows (RR5 fonts sample alternate texel rows per field).
++void GSRrvSetRoundSpriteUOnly(bool u_only);
+ void GSvsync(u32 field, bool registers_written);
+ int GSfreeze(FreezeAction mode, freezeData* data);
+ std::string GSGetBaseSnapshotFilename();
+diff --git a/pcsx2/GS/GSState.cpp b/pcsx2/GS/GSState.cpp
+index 78826cc..adc99bc 100644
+--- a/pcsx2/GS/GSState.cpp
++++ b/pcsx2/GS/GSState.cpp
+@@ -25,6 +25,7 @@ u64 GSState::s_transfer_n = 0;
+ u32 GSState::s_rrv_ofy_from = 0;
+ u32 GSState::s_rrv_ofy_to = 0;
+ std::atomic<u64> GSState::s_rrv_ofy_canonical_count{0};
++bool GSState::s_rrv_round_sprite_u_only = false;
+ 
+ static __fi bool IsAutoFlushEnabled()
+ {
+diff --git a/pcsx2/GS/GSState.h b/pcsx2/GS/GSState.h
+index 786f015..655330a 100644
+--- a/pcsx2/GS/GSState.h
++++ b/pcsx2/GS/GSState.h
+@@ -324,6 +324,7 @@ public:
+ 	static u32 s_rrv_ofy_from;
+ 	static u32 s_rrv_ofy_to;
+ 	static std::atomic<u64> s_rrv_ofy_canonical_count;
++	static bool s_rrv_round_sprite_u_only;
+ 
+ 	GSPerfMon m_perfmon_frame; // Track stat across a frame.
+ 	GSPerfMon m_perfmon_draw;  // Track stat across a draw.
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+index 4821e02..d2e01ce 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+@@ -2721,7 +2721,9 @@ void GSRendererHW::RoundSpriteOffset()
+ 			}
+ 		}
+ #endif
+-#if 1
++		// RRV Gate-6 full-frame extension: U-only rounding (GSRrvSetRoundSpriteUOnly).
++		if (!s_rrv_round_sprite_u_only)
++		{
+ 		if (linear)
+ 		{
+ 			const int Lv = v[i + 1].V - v[i].V;
+@@ -2743,7 +2745,7 @@ void GSRendererHW::RoundSpriteOffset()
+ 				v[i + 1].V = ty1;
+ 			}
+ 		}
+-#endif
++		}
+ 
+ #ifdef DEBUG_U
+ 		if (debug)
+diff --git a/pcsx2/GS/GS.h b/pcsx2/GS/GS.h
+index c9ea562..310b0be 100644
+--- a/pcsx2/GS/GS.h
++++ b/pcsx2/GS/GS.h
+@@ -93,10 +93,12 @@ u64 GSRrvGetDirectPresentCount();
+ // one progressive raster grid. from == to (the default) is a no-op.
+ void GSRrvSetFieldOfyCanonical(u32 from_ofy, u32 to_ofy);
+ u64 GSRrvGetFieldOfyCanonicalCount();
+-// RRV Gate-6 full-frame extension. When set, the HW RoundSprite fix rounds only
+-// U (horizontal). Full mode rasterizes the vertical axis at 448 progressive rows;
+-// rounding V back to the native 224-row field texel grid would drop the rows the
+-// other field shows (RR5 fonts sample alternate texel rows per field).
++// RRV Gate-6 full-frame extension. When set, the HW RoundSprite fix leaves V
++// alone on sprites that are vertically minified (texel span > pixel span, e.g.
++// RR5 fonts drawing a full-height glyph into a half-height field sprite, each
++// field sampling alternate texel rows). Full mode rasterizes 448 progressive
++// rows, so rounding V to the native field texel grid would drop the rows the
++// other field shows. 1:1 sprites (post-processing page strips) keep V rounding.
+ void GSRrvSetRoundSpriteUOnly(bool u_only);
+ void GSvsync(u32 field, bool registers_written);
+ int GSfreeze(FreezeAction mode, freezeData* data);
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+index d2e01ce..cb04479 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+@@ -2721,8 +2721,9 @@ void GSRendererHW::RoundSpriteOffset()
+ 			}
+ 		}
+ #endif
+-		// RRV Gate-6 full-frame extension: U-only rounding (GSRrvSetRoundSpriteUOnly).
+-		if (!s_rrv_round_sprite_u_only)
++		// RRV Gate-6 full-frame extension (GSRrvSetRoundSpriteUOnly): skip V
++		// rounding on vertically minified sprites.
++		if (!s_rrv_round_sprite_u_only || std::abs(static_cast<int>(v[i + 1].V) - static_cast<int>(v[i].V)) <= std::abs(Ly) + 8)
+ 		{
+ 		if (linear)
+ 		{
+diff --git a/pcsx2/GS/GS.cpp b/pcsx2/GS/GS.cpp
+index 5332cd0..dab6413 100644
+--- a/pcsx2/GS/GS.cpp
++++ b/pcsx2/GS/GS.cpp
+@@ -92,6 +92,17 @@ void GSRrvSetRoundSpriteUOnly(bool u_only)
+ 	GSState::s_rrv_round_sprite_u_only = u_only;
+ }
+ 
++void GSRrvSetDropLargeSTTriangles(bool drop)
++{
++	GSState::s_rrv_drop_large_st_triangles = drop;
++	GSState::s_rrv_dropped_large_st_triangles.store(0, std::memory_order_relaxed);
++}
++
++u64 GSRrvGetDroppedLargeSTTriangles()
++{
++	return GSState::s_rrv_dropped_large_st_triangles.load(std::memory_order_relaxed);
++}
++
+ static GSRendererType GSCurrentRenderer;
+ 
+ GSRendererType GSGetCurrentRenderer()
+diff --git a/pcsx2/GS/GS.h b/pcsx2/GS/GS.h
+index 310b0be..30838bd 100644
+--- a/pcsx2/GS/GS.h
++++ b/pcsx2/GS/GS.h
+@@ -100,6 +100,10 @@ u64 GSRrvGetFieldOfyCanonicalCount();
+ // rows, so rounding V to the native field texel grid would drop the rows the
+ // other field shows. 1:1 sprites (post-processing page strips) keep V rounding.
+ void GSRrvSetRoundSpriteUOnly(bool u_only);
++// RRV Gate-6 extension: when set, UserHacks_RewriteLargeST also collapses
++// every triangle whose ST it had to rewrite (degenerate Q), so it draws nothing.
++void GSRrvSetDropLargeSTTriangles(bool drop);
++u64 GSRrvGetDroppedLargeSTTriangles();
+ void GSvsync(u32 field, bool registers_written);
+ int GSfreeze(FreezeAction mode, freezeData* data);
+ std::string GSGetBaseSnapshotFilename();
+diff --git a/pcsx2/GS/GSState.cpp b/pcsx2/GS/GSState.cpp
+index adc99bc..ca7a11a 100644
+--- a/pcsx2/GS/GSState.cpp
++++ b/pcsx2/GS/GSState.cpp
+@@ -26,6 +26,8 @@ u32 GSState::s_rrv_ofy_from = 0;
+ u32 GSState::s_rrv_ofy_to = 0;
+ std::atomic<u64> GSState::s_rrv_ofy_canonical_count{0};
+ bool GSState::s_rrv_round_sprite_u_only = false;
++bool GSState::s_rrv_drop_large_st_triangles = false;
++std::atomic<u64> GSState::s_rrv_dropped_large_st_triangles{0};
+ 
+ static __fi bool IsAutoFlushEnabled()
+ {
+@@ -7018,6 +7020,15 @@ void GSState::RewriteVerticesIfLargeSTImpl(const GSVector4& large_val, bool chec
+ 					vertex_copy[i + j].m[1] = vertex[index[i + j]].m[1];
+ 					index[i + j] = i + j;
+ 				}
++
++				// RRV Gate-6 diagnostic (GSRrvSetDropLargeSTTriangles): collapse a
++				// triangle whose ST had to be rewritten, so it rasterizes nothing.
++				if (primclass == GS_TRIANGLE_CLASS && s_rrv_drop_large_st_triangles && (rewrite.mask() & 3) != 0)
++				{
++					for (int j = 1; j < n; j++)
++						vertex_copy[i + j].m[1] = vertex_copy[i].m[1];
++					s_rrv_dropped_large_st_triangles.fetch_add(1, std::memory_order_relaxed);
++				}
+ 			}
+ 
+ 			std::swap(m_vertex->buff, m_vertex->buff_copy);
+diff --git a/pcsx2/GS/GSState.h b/pcsx2/GS/GSState.h
+index 655330a..1c73d15 100644
+--- a/pcsx2/GS/GSState.h
++++ b/pcsx2/GS/GSState.h
+@@ -325,6 +325,8 @@ public:
+ 	static u32 s_rrv_ofy_to;
+ 	static std::atomic<u64> s_rrv_ofy_canonical_count;
+ 	static bool s_rrv_round_sprite_u_only;
++	static bool s_rrv_drop_large_st_triangles;
++	static std::atomic<u64> s_rrv_dropped_large_st_triangles;
+ 
+ 	GSPerfMon m_perfmon_frame; // Track stat across a frame.
+ 	GSPerfMon m_perfmon_draw;  // Track stat across a draw.
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+index cb04479..a22f6eb 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+@@ -2721,8 +2721,8 @@ void GSRendererHW::RoundSpriteOffset()
+ 			}
+ 		}
+ #endif
+-		// RRV Gate-6 full-frame extension (GSRrvSetRoundSpriteUOnly): skip V
+-		// rounding on vertically minified sprites.
++		// RRV Gate-6 full-frame extension (GSRrvSetRoundSpriteUOnly): vertically
++		// minified sprites round V on the progressive grid (else branch below).
+ 		if (!s_rrv_round_sprite_u_only || std::abs(static_cast<int>(v[i + 1].V) - static_cast<int>(v[i].V)) <= std::abs(Ly) + 8)
+ 		{
+ 		if (linear)
+@@ -2747,6 +2747,28 @@ void GSRendererHW::RoundSpriteOffset()
+ 			}
+ 		}
+ 		}
++		else if (!linear)
++		{
++			// Minified sprite in full-frame mode: round V on the progressive
++			// grid (twice the field rows) instead of the native field grid, so
++			// the first and last progressive rows sample exactly the first and
++			// last texel rows at every scale (no texel-row bleed at 4x).
++			const int pY0 = Y0 * 2;
++			const int pY1 = Y1 * 2;
++			const int pLy = Ly * 2;
++			const u16 pty0 = Interpolate_UV(alpha0(pLy, pY0, pY1), v[i].V, v[i + 1].V);
++			const u16 pty1 = Interpolate_UV(alpha1(pLy, pY0, pY1), v[i].V, v[i + 1].V);
++			if (pty0 <= pty1)
++			{
++				v[i].V = pty0;
++				v[i + 1].V = pty1 + 16;
++			}
++			else
++			{
++				v[i].V = pty0 + 15;
++				v[i + 1].V = pty1;
++			}
++		}
+ 
+ #ifdef DEBUG_U
+ 		if (debug)
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 815b32e..5e325f3 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -49,16 +49,15 @@ add_subdirectory(common)
+ add_subdirectory(pcsx2)
+ 
+ if(DEFINED RRV_PCSX2_GS_BRIDGE_SOURCE_DIR)
+-    # Escape hatch only. Forcing PCSX2's C reference scanline was the bridge's
+-    # original workaround for not owning PCSX2's code reserve, and on ARM64 that
+-    # reference path does NOT match the JIT rasterizer the reference runner uses
+-    # (measured: dark 0.083 vs 0.014 on the same stream) -- it was the whole of
+-    # KNOWN_ISSUES #21. The bridge now allocates the code reserve itself, so the
+-    # JIT is the default and this stays OFF.
+-    option(RRV_PCSX2_GS_BRIDGE_C_SCANLINE
+-           "Force PCSX2's C reference scanline instead of the SW JIT rasterizer" OFF)
+-    if(RRV_PCSX2_GS_BRIDGE_C_SCANLINE)
+-        target_compile_definitions(PCSX2 PRIVATE RRV_PCSX2_GS_C_SCANLINE=1)
++    # The SW rasterizer (CPU sprite rendering in the Metal profile) draws with
++    # ahead-of-time specialised C functions (GSDrawScanlineStaticKeys.inc),
++    # verified pixel-identical to the ARM64 JIT; no code is generated at run
++    # time and no JIT memory is mapped. ON restores PCSX2's runtime JIT, for
++    # the differential check (RRV_PCSX2_GS_SW_DIFF) only.
++    option(RRV_PCSX2_GS_BRIDGE_SW_JIT
++           "Diagnostic: use PCSX2's runtime SW rasterizer JIT instead of the static functions" OFF)
++    if(RRV_PCSX2_GS_BRIDGE_SW_JIT)
++        target_compile_definitions(PCSX2 PUBLIC RRV_PCSX2_GS_SW_JIT=1)
+     endif()
+     add_subdirectory("${RRV_PCSX2_GS_BRIDGE_SOURCE_DIR}" pcsx2-gs-bridge)
+ endif()
+diff --git a/pcsx2/GS/Renderers/SW/GSDrawScanline.cpp b/pcsx2/GS/Renderers/SW/GSDrawScanline.cpp
+index 451e707..1940823 100644
+--- a/pcsx2/GS/Renderers/SW/GSDrawScanline.cpp
++++ b/pcsx2/GS/Renderers/SW/GSDrawScanline.cpp
+@@ -8,10 +8,18 @@
+ 
+ #include "common/Console.h"
+ 
++#include <cstdio>
++#include <cstdlib>
+ #include <fstream>
+-
+-// The GS-only RRV bridge does not initialize PCSX2's VM-wide JIT code map.
+-#if !defined(RRV_PCSX2_GS_C_SCANLINE)
++#include <map>
++#include <mutex>
++#include <string>
++
++// RRV bridge: the runtime JIT rasterizer is a diagnostic opt-in
++// (RRV_PCSX2_GS_BRIDGE_SW_JIT=ON). The product build draws with
++// ahead-of-time specialised C functions (GSDrawScanlineStaticKeys.inc) and
++// the generic C functions for any selector not in that table.
++#if defined(RRV_PCSX2_GS_SW_JIT)
+ #define ENABLE_JIT_RASTERIZER
+ #endif
+ 
+@@ -29,17 +37,19 @@ static __forceinline const GSScanlineGlobalData& GlobalFromLocal(const GSScanlin
+ }
+ 
+ GSDrawScanline::GSDrawScanline()
++#if defined(ENABLE_JIT_RASTERIZER)
+ 	: m_sp_map("GSSetupPrim")
+ 	, m_ds_map("GSDrawScanline")
++#endif
+ {
+-#if !defined(RRV_PCSX2_GS_C_SCANLINE)
++#if defined(ENABLE_JIT_RASTERIZER)
+ 	GSCodeReserve::ResetMemory();
+ #endif
+ }
+ 
+ GSDrawScanline::~GSDrawScanline()
+ {
+-#if !defined(RRV_PCSX2_GS_C_SCANLINE)
++#if defined(ENABLE_JIT_RASTERIZER)
+ 	if (const size_t used = GSCodeReserve::GetMemoryUsed(); used > 0)
+ 		DevCon.WriteLn("SW JIT generated %zu bytes of code", used);
+ #endif
+@@ -121,7 +131,7 @@ void GSDrawScanline::BeginDraw(const GSRasterizerData& data, GSScanlineLocalData
+ 
+ void GSDrawScanline::ResetCodeCache()
+ {
+-#if !defined(RRV_PCSX2_GS_C_SCANLINE)
++#if defined(ENABLE_JIT_RASTERIZER)
+ 	Console.Warning("GS Software JIT cache overflow, resetting.");
+ 	m_sp_map.Clear();
+ 	m_ds_map.Clear();
+@@ -133,6 +143,8 @@ bool GSDrawScanline::SetupDraw(GSRasterizerData& data)
+ {
+ 	const GSScanlineGlobalData& global = data.global;
+ 
++	RrvNoteSelector(global.sel);
++
+ #ifdef ENABLE_JIT_RASTERIZER
+ 	data.draw_scanline = m_ds_map[global.sel];
+ 	if (!data.draw_scanline) [[unlikely]]
+@@ -175,21 +187,23 @@ bool GSDrawScanline::SetupDraw(GSRasterizerData& data)
+ 
+ 	return (data.setup_prim = m_sp_map[sel]) != nullptr;
+ #else
+-	data.setup_prim = &GSDrawScanline::CSetupPrim;
+-	data.draw_scanline = &GSDrawScanline::CDrawScanline;
+-	data.draw_edge = global.sel.aa1 ? &GSDrawScanline::CDrawEdge : nullptr;
++	GetStaticFunctions(global.sel, data.setup_prim, data.draw_scanline, data.draw_edge);
+ 	return true;
+ #endif
+ }
+ 
+ void GSDrawScanline::UpdateDrawStats(u64 frame, u64 ticks, int actual, int total, int prims)
+ {
++#if defined(ENABLE_JIT_RASTERIZER)
+ 	m_ds_map.UpdateStats(frame, ticks, actual, total, prims);
++#endif
+ }
+ 
+ void GSDrawScanline::PrintStats()
+ {
++#if defined(ENABLE_JIT_RASTERIZER)
+ 	m_ds_map.PrintStats();
++#endif
+ }
+ 
+ #if _M_SSE >= 0x501
+@@ -204,8 +218,11 @@ typedef GSVector4  VectorF;
+ 
+ void GSDrawScanline::CSetupPrim(const GSVertexSW* vertex, const u16* index, const GSVertexSW& dscan, GSScanlineLocalData& local)
+ {
+-	const GSScanlineGlobalData& global = GlobalFromLocal(local);
+-	GSScanlineSelector sel = global.sel;
++	CSetupPrim(vertex, index, dscan, local, GlobalFromLocal(local).sel);
++}
++
++__ri void GSDrawScanline::CSetupPrim(const GSVertexSW* vertex, const u16* index, const GSVertexSW& dscan, GSScanlineLocalData& local, GSScanlineSelector sel)
++{
+ 
+ 	bool has_z = sel.zb != 0;
+ 	bool has_f = sel.fb && sel.fge;
+@@ -345,10 +362,15 @@ void GSDrawScanline::CSetupPrim(const GSVertexSW* vertex, const u16* index, cons
+ 			VectorF dr = dc.xxxx();
+ 			VectorF db = dc.zzzz();
+ 
++			// RRV: pack the masked 16-bit steps with UNSIGNED saturation (pu32,
++			// i.e. keep the low 16 bits), as both SW JITs do (x86 packusdw,
++			// ARM64 trn1). Signed saturation (ps32) turned every negative colour
++			// step into +0x7fff, so gouraud colours that decrease across a span
++			// wrapped to black: the dark-tick lattice of KNOWN_ISSUES #21.
+ 			for (int i = 0; i < vlen; i++)
+ 			{
+-				VectorI r = (VectorI(dr * load_shift(i)) & mask16).ps32();
+-				VectorI b = (VectorI(db * load_shift(i)) & mask16).ps32();
++				VectorI r = (VectorI(dr * load_shift(i)) & mask16).pu32();
++				VectorI b = (VectorI(db * load_shift(i)) & mask16).pu32();
+ 
+ 				local.d[i].rb = r.upl16(b);
+ 			}
+@@ -358,8 +380,8 @@ void GSDrawScanline::CSetupPrim(const GSVertexSW* vertex, const u16* index, cons
+ 
+ 			for (int i = 0; i < vlen; i++)
+ 			{
+-				VectorI g = (VectorI(dg * load_shift(i)) & mask16).ps32();
+-				VectorI a = (VectorI(da * load_shift(i)) & mask16).ps32();
++				VectorI g = (VectorI(dg * load_shift(i)) & mask16).pu32();
++				VectorI a = (VectorI(da * load_shift(i)) & mask16).pu32();
+ 
+ 				local.d[i].ga = g.upl16(a);
+ 			}
+@@ -475,6 +497,31 @@ __ri static bool TestAlpha(T& test, T& fm, T& zm, const T& ga, const GSScanlineG
+ 
+ static const int s_offsets[] = {0, 2, 8, 10, 16, 18, 24, 26}; // columnTable16[0]
+ 
++#if defined(ARCH_ARM64) && _M_SSE < 0x501
++// RRV: per-pixel mipmap LOD, (-log2(Q) * (1 << L) + K) * 0x10000 clamped to
++// [0, mxl], computed with the same instruction sequence as
++// GSDrawScanlineCodeGenerator::SampleTextureLOD (ARM64): degree-2 log2
++// polynomial and the final scale by FMA, then FMINNM/FMAXNM and FCVTZS.
++__ri static GSVector4i RrvArm64PerPixelLod(const GSVector4& q, const GSScanlineGlobalData& global)
++{
++	const uint32x4_t qu = vreinterpretq_u32_f32(q.v4s);
++	const int32x4_t exp = vsubq_s32(vreinterpretq_s32_u32(vshrq_n_u32(vshlq_n_u32(qu, 1), 24)), vdupq_n_s32(127));
++	const float32x4_t e = vcvtq_f32_s32(exp);
++	const float32x4_t one = vdupq_n_f32(global.const_log2_coef[3]);
++	const float32x4_t m = vreinterpretq_f32_u32(vorrq_u32(vshrq_n_u32(vshlq_n_u32(qu, 9), 9), vreinterpretq_u32_f32(one)));
++	const float32x4_t c0 = vdupq_n_f32(global.const_log2_coef[0]);
++	const float32x4_t c1 = vdupq_n_f32(global.const_log2_coef[1]);
++	const float32x4_t c2 = vdupq_n_f32(global.const_log2_coef[2]);
++	const float32x4_t p1 = vfmaq_f32(c1, m, c0); // c0 * m + c1
++	const float32x4_t p2 = vfmaq_f32(c2, p1, m); // (c0 * m + c1) * m + c2
++	const float32x4_t lg = vfmaq_f32(e, vsubq_f32(m, one), p2); // log2(q)
++	float32x4_t lod = vfmaq_f32(global.k.v4s, lg, global.l.v4s); // k + log2(q) * l
++	lod = vminnmq_f32(lod, global.mxl.v4s);
++	lod = vmaxnmq_f32(lod, vdupq_n_f32(0.0f));
++	return GSVector4i(vcvtq_s32_f32(lod));
++}
++#endif
++
+ template <class T>
+ __ri static void WritePixel(const T& src, int addr, int i, u32 psm, const GSScanlineGlobalData& global)
+ {
+@@ -754,9 +801,17 @@ __ri void GSDrawScanline::CDrawScanline(int pixels, int left, int top, const GSV
+ 
+ 					if (!sel.lcm)
+ 					{
++#if defined(ARCH_ARM64) && _M_SSE < 0x501
++						// RRV: the ARM64 SW JIT evaluates the LOD with fused multiply-adds
++						// and a truncating convert; do exactly the same so the C path is
++						// bit-identical to it (the unfused, rounded form differed by one
++						// LOD fraction step: +-1 in a channel of trilinear texels).
++						VectorI lod = RrvArm64PerPixelLod(q, global);
++#else
+ 						VectorF tmp = q.log2(3) * global.l + global.k; // (-log2(Q) * (1 << L) + K) * 0x10000
+ 
+ 						VectorI lod = VectorI(tmp.sat(VectorF::zero(), global.mxl), false);
++#endif
+ 
+ 						if (sel.mmin == 1) // round-off mode
+ 						{
+@@ -1991,3 +2046,199 @@ void GSDrawScanline::DrawRect(const GSVector4i& r, const GSVertexSW& v, GSScanli
+ 		}
+ 	}
+ }
++
++// ---------------------------------------------------------------------------
++// RRV bridge: ahead-of-time specialised rasterizer functions.
++//
++// The generic C functions above take the selector at run time. Instantiating
++// them with the selector as a compile-time constant lets the compiler fold
++// every `sel.*` branch, which is what the runtime JIT does by generating code
++// per selector. GSDrawScanlineStaticKeys.inc lists the selectors to
++// instantiate (selector keys only: no game data). Selectors that are not in
++// the table use the generic C functions, which draw the same pixels.
++// ---------------------------------------------------------------------------
++
++template <u64 KEY>
++void GSDrawScanline::CDrawScanlineT(int pixels, int left, int top, const GSVertexSW& scan, GSScanlineLocalData& local)
++{
++	CDrawScanline(pixels, left, top, scan, local, GSScanlineSelector(KEY));
++}
++
++template <u64 KEY>
++void GSDrawScanline::CSetupPrimT(const GSVertexSW* vertex, const u16* index, const GSVertexSW& dscan, GSScanlineLocalData& local)
++{
++	CSetupPrim(vertex, index, dscan, local, GSScanlineSelector(KEY));
++}
++
++u64 GSDrawScanline::SetupPrimKey(GSScanlineSelector global_sel)
++{
++	// The fields CSetupPrim / the SetupPrim JIT read (same subset as the JIT
++	// function map key in SetupDraw).
++	GSScanlineSelector sel;
++	sel.key = 0;
++	sel.iip = global_sel.iip;
++	sel.tfx = global_sel.tfx;
++	sel.tcc = global_sel.tcc;
++	sel.fst = global_sel.fst;
++	sel.fge = global_sel.fge;
++	sel.prim = global_sel.prim;
++	sel.fb = global_sel.fb;
++	sel.zb = global_sel.zb;
++	sel.zoverflow = global_sel.zoverflow;
++	sel.zequal = global_sel.zequal;
++	sel.notest = global_sel.notest;
++	return sel.key;
++}
++
++u64 GSDrawScanline::EdgeKey(GSScanlineSelector global_sel)
++{
++	GSScanlineSelector sel = global_sel;
++	sel.zwrite = 0;
++	sel.edge = 1;
++	return sel.key;
++}
++
++namespace
++{
++	struct RrvStaticDrawScanline
++	{
++		u64 key;
++		GSDrawScanline::DrawScanlinePtr fn;
++	};
++
++	struct RrvStaticSetupPrim
++	{
++		u64 key;
++		GSDrawScanline::SetupPrimPtr fn;
++	};
++} // namespace
++
++#define RRV_SW_DS_KEY(k) {UINT64_C(k), &GSDrawScanline::CDrawScanlineT<UINT64_C(k)>},
++#define RRV_SW_SP_KEY(k)
++static const RrvStaticDrawScanline s_rrv_static_ds[] = {
++#include "GS/Renderers/SW/GSDrawScanlineStaticKeys.inc"
++	{~UINT64_C(0), nullptr}, // sentinel, sorts last
++};
++#undef RRV_SW_DS_KEY
++#undef RRV_SW_SP_KEY
++
++#define RRV_SW_DS_KEY(k)
++#define RRV_SW_SP_KEY(k) {UINT64_C(k), &GSDrawScanline::CSetupPrimT<UINT64_C(k)>},
++static const RrvStaticSetupPrim s_rrv_static_sp[] = {
++#include "GS/Renderers/SW/GSDrawScanlineStaticKeys.inc"
++	{~UINT64_C(0), nullptr}, // sentinel, sorts last
++};
++#undef RRV_SW_DS_KEY
++#undef RRV_SW_SP_KEY
++
++template <class T, size_t N>
++static decltype(T::fn) RrvLookupStatic(const T (&table)[N], u64 key)
++{
++	// Tables are emitted sorted by key (the generator sorts them; checked once).
++	size_t lo = 0, hi = N - 1; // exclude the sentinel
++	while (lo < hi)
++	{
++		const size_t mid = (lo + hi) / 2;
++		if (table[mid].key < key)
++			lo = mid + 1;
++		else
++			hi = mid;
++	}
++	return (lo < N - 1 && table[lo].key == key) ? table[lo].fn : nullptr;
++}
++
++template <class T, size_t N>
++static bool RrvTableSorted(const T (&table)[N])
++{
++	for (size_t i = 1; i < N; i++)
++	{
++		if (!(table[i - 1].key < table[i].key))
++			return false;
++	}
++	return true;
++}
++
++void GSDrawScanline::GetStaticFunctions(GSScanlineSelector sel, SetupPrimPtr& setup_prim, DrawScanlinePtr& draw_scanline, DrawScanlinePtr& draw_edge)
++{
++	static const bool s_sorted = [] {
++		const bool ok = RrvTableSorted(s_rrv_static_ds) && RrvTableSorted(s_rrv_static_sp);
++		if (!ok)
++			std::fprintf(stderr, "[pcsx2-sw] static rasterizer table is not sorted; using generic C functions only\n");
++		return ok;
++	}();
++
++	DrawScanlinePtr ds = s_sorted ? RrvLookupStatic(s_rrv_static_ds, sel.key) : nullptr;
++	SetupPrimPtr sp = s_sorted ? RrvLookupStatic(s_rrv_static_sp, SetupPrimKey(sel)) : nullptr;
++
++	draw_scanline = ds ? ds : static_cast<DrawScanlinePtr>(&GSDrawScanline::CDrawScanline);
++	setup_prim = sp ? sp : static_cast<SetupPrimPtr>(&GSDrawScanline::CSetupPrim);
++
++	if (sel.aa1)
++	{
++		DrawScanlinePtr de = s_sorted ? RrvLookupStatic(s_rrv_static_ds, EdgeKey(sel)) : nullptr;
++		draw_edge = de ? de : &GSDrawScanline::CDrawEdge;
++	}
++	else
++	{
++		draw_edge = nullptr;
++	}
++}
++
++size_t GSDrawScanline::StaticTableSize()
++{
++	return std::size(s_rrv_static_ds) - 1;
++}
++
++// RRV_PCSX2_GS_SW_KEYS=<path>: record every rasterizer selector used (the
++// draw key, its edge key for AA1 draws, and the SetupPrim key), rewriting
++// <path> whenever a new one appears. This is how the static table is
++// harvested. Keys are GS register-state bit fields, not game data.
++void GSDrawScanline::RrvNoteSelector(GSScanlineSelector sel)
++{
++	static const char* const s_path = [] {
++		const char* p = std::getenv("RRV_PCSX2_GS_SW_KEYS");
++		return (p && p[0]) ? p : nullptr;
++	}();
++	if (!s_path)
++		return;
++
++	static std::mutex s_mutex;
++	static std::map<u64, u64> s_ds; // key -> draws
++	static std::map<u64, u64> s_sp;
++	static u64 s_total = 0;
++
++	std::lock_guard<std::mutex> lock(s_mutex);
++	bool added = false;
++	auto note = [&added](std::map<u64, u64>& m, u64 k) {
++		auto [it, inserted] = m.try_emplace(k, 0);
++		it->second++;
++		added |= inserted;
++	};
++	note(s_ds, sel.key);
++	if (sel.aa1)
++		note(s_ds, EdgeKey(sel));
++	note(s_sp, SetupPrimKey(sel));
++	s_total++;
++
++	if (!added && (s_total & 4095) != 0)
++		return;
++
++	const std::string tmp = std::string(s_path) + ".tmp";
++	FILE* f = std::fopen(tmp.c_str(), "w");
++	if (!f)
++		return;
++	std::fprintf(f, "# rrv pcsx2 sw rasterizer selectors: draws=%llu static_table=%zu\n",
++		static_cast<unsigned long long>(s_total), StaticTableSize());
++	for (const auto& [k, n] : s_ds)
++	{
++		std::fprintf(f, "ds %016llX %llu %s %s\n", static_cast<unsigned long long>(k), static_cast<unsigned long long>(n),
++			RrvLookupStatic(s_rrv_static_ds, k) ? "static" : "generic", GSScanlineSelector(k).to_string().c_str());
++	}
++	for (const auto& [k, n] : s_sp)
++	{
++		std::fprintf(f, "sp %016llX %llu %s\n", static_cast<unsigned long long>(k), static_cast<unsigned long long>(n),
++			RrvLookupStatic(s_rrv_static_sp, k) ? "static" : "generic");
++	}
++	std::fclose(f);
++	std::rename(tmp.c_str(), s_path);
++}
+diff --git a/pcsx2/GS/Renderers/SW/GSDrawScanline.h b/pcsx2/GS/Renderers/SW/GSDrawScanline.h
+index 48612d3..5fbb349 100644
+--- a/pcsx2/GS/Renderers/SW/GSDrawScanline.h
++++ b/pcsx2/GS/Renderers/SW/GSDrawScanline.h
+@@ -5,6 +5,9 @@
+ 
+ #include "GS/GSState.h"
+ 
++// RRV bridge: the SW JIT is compiled only into diagnostic builds
++// (RRV_PCSX2_GS_BRIDGE_SW_JIT=ON defines RRV_PCSX2_GS_SW_JIT).
++#if defined(RRV_PCSX2_GS_SW_JIT)
+ #ifdef ARCH_X86
+ #include "GS/Renderers/SW/GSSetupPrimCodeGenerator.all.h"
+ #include "GS/Renderers/SW/GSDrawScanlineCodeGenerator.all.h"
+@@ -13,6 +16,9 @@
+ #include "GS/Renderers/SW/GSSetupPrimCodeGenerator.arm64.h"
+ #include "GS/Renderers/SW/GSDrawScanlineCodeGenerator.arm64.h"
+ #endif
++#endif
++#include "GS/Renderers/SW/GSScanlineEnvironment.h"
++#include "GS/Renderers/SW/GSVertexSW.h"
+ 
+ struct GSScanlineLocalData;
+ 
+@@ -22,8 +28,10 @@ class GSRasterizerData;
+ 
+ class GSDrawScanline : public GSVirtualAlignedClass<32>
+ {
++#if defined(RRV_PCSX2_GS_SW_JIT)
+ 	friend GSSetupPrimCodeGenerator;
+ 	friend GSDrawScanlineCodeGenerator;
++#endif
+ 
+ public:
+ 	GSDrawScanline();
+@@ -51,13 +59,30 @@ public:
+ 	void UpdateDrawStats(u64 frame, u64 ticks, int actual, int total, int prims);
+ 	void PrintStats();
+ 
+-private:
+-	GSCodeGeneratorFunctionMap<GSSetupPrimCodeGenerator, u64, SetupPrimPtr> m_sp_map;
+-	GSCodeGeneratorFunctionMap<GSDrawScanlineCodeGenerator, u64, DrawScanlinePtr> m_ds_map;
++	/// RRV bridge: the ahead-of-time specialised functions for a selector,
++	/// falling back to the generic C functions (see GSDrawScanlineStaticKeys.inc).
++	static void GetStaticFunctions(GSScanlineSelector sel, SetupPrimPtr& setup_prim, DrawScanlinePtr& draw_scanline, DrawScanlinePtr& draw_edge);
++	static size_t StaticTableSize();
++	static u64 SetupPrimKey(GSScanlineSelector sel);
++	static u64 EdgeKey(GSScanlineSelector sel);
++	static void RrvNoteSelector(GSScanlineSelector sel);
++
++	template <u64 KEY>
++	static void CDrawScanlineT(int pixels, int left, int top, const GSVertexSW& scan, GSScanlineLocalData& local);
++	template <u64 KEY>
++	static void CSetupPrimT(const GSVertexSW* vertex, const u16* index, const GSVertexSW& dscan, GSScanlineLocalData& local);
+ 
+ 	static void CSetupPrim(const GSVertexSW* vertex, const u16* index, const GSVertexSW& dscan, GSScanlineLocalData& local);
+ 	static void CDrawScanline(int pixels, int left, int top, const GSVertexSW& scan, GSScanlineLocalData& local);
+ 	static void CDrawEdge(int pixels, int left, int top, const GSVertexSW& scan, GSScanlineLocalData& local);
++
++private:
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	GSCodeGeneratorFunctionMap<GSSetupPrimCodeGenerator, u64, SetupPrimPtr> m_sp_map;
++	GSCodeGeneratorFunctionMap<GSDrawScanlineCodeGenerator, u64, DrawScanlinePtr> m_ds_map;
++#endif
++
++	__ri static void CSetupPrim(const GSVertexSW* vertex, const u16* index, const GSVertexSW& dscan, GSScanlineLocalData& local, GSScanlineSelector sel);
+ 	__ri static void CDrawScanline(int pixels, int left, int top, const GSVertexSW& scan, GSScanlineLocalData& local, GSScanlineSelector sel);
+ };
+ 
+diff --git a/pcsx2/GS/Renderers/SW/GSDrawScanlineStaticKeys.inc b/pcsx2/GS/Renderers/SW/GSDrawScanlineStaticKeys.inc
+new file mode 100644
+index 0000000..0d0ce8c
+--- /dev/null
++++ b/pcsx2/GS/Renderers/SW/GSDrawScanlineStaticKeys.inc
+@@ -0,0 +1,149 @@
++// RRV bridge: rasterizer selectors specialised ahead of time.
++// Generated by scripts/pcsx2_sw_static_keys.py from selector keys harvested
++// with RRV_PCSX2_GS_SW_KEYS (GS register-state bit fields only).
++// RRV_SW_DS_KEY(k): GSDrawScanline selector; RRV_SW_SP_KEY(k): SetupPrim key.
++// Keep each list sorted ascending.
++// 103 draw selectors, 40 setup selectors
++RRV_SW_DS_KEY(0x000090013FC0404C)
++RRV_SW_DS_KEY(0x000110013FC0404C)
++RRV_SW_DS_KEY(0x0001101511204064)
++RRV_SW_DS_KEY(0x000110193FC84064)
++RRV_SW_DS_KEY(0x0001181711304064)
++RRV_SW_DS_KEY(0x0001301511204064)
++RRV_SW_DS_KEY(0x000190013FC0404C)
++RRV_SW_DS_KEY(0x000190052120404D)
++RRV_SW_DS_KEY(0x000190053FC0404C)
++RRV_SW_DS_KEY(0x000190153FC04074)
++RRV_SW_DS_KEY(0x000910193FCE8064)
++RRV_SW_DS_KEY(0x000910193FCE8864)
++RRV_SW_DS_KEY(0x0009101F112E8364)
++RRV_SW_DS_KEY(0x0009101F112E8B64)
++RRV_SW_DS_KEY(0x000912993FCE8864)
++RRV_SW_DS_KEY(0x0009179F112E8364)
++RRV_SW_DS_KEY(0x0009179F112E8B64)
++RRV_SW_DS_KEY(0x000D101716378064)
++RRV_SW_DS_KEY(0x000D10193FCE8064)
++RRV_SW_DS_KEY(0x000D10193FCE8864)
++RRV_SW_DS_KEY(0x000D101D16278064)
++RRV_SW_DS_KEY(0x000D101D1A278064)
++RRV_SW_DS_KEY(0x000D101F112E8364)
++RRV_SW_DS_KEY(0x000D101F16378064)
++RRV_SW_DS_KEY(0x000D12993FCE8064)
++RRV_SW_DS_KEY(0x000D12993FCE8864)
++RRV_SW_DS_KEY(0x000D129F112E8364)
++RRV_SW_DS_KEY(0x000D301D1A278064)
++RRV_SW_DS_KEY(0x0011101F112E8364)
++RRV_SW_DS_KEY(0x0011101F12378064)
++RRV_SW_DS_KEY(0x0011101F12378864)
++RRV_SW_DS_KEY(0x001112993FCE8064)
++RRV_SW_DS_KEY(0x001112993FCE8864)
++RRV_SW_DS_KEY(0x0011129F112E8B64)
++RRV_SW_DS_KEY(0x001510193FCE8064)
++RRV_SW_DS_KEY(0x001510193FCE8864)
++RRV_SW_DS_KEY(0x0015101D19278864)
++RRV_SW_DS_KEY(0x0015101D1A2A0864)
++RRV_SW_DS_KEY(0x0015101F11278764)
++RRV_SW_DS_KEY(0x0015101F11278F64)
++RRV_SW_DS_KEY(0x0015101F112E8364)
++RRV_SW_DS_KEY(0x0015121F113E9064)
++RRV_SW_DS_KEY(0x001512993FCE8064)
++RRV_SW_DS_KEY(0x001512993FCE8864)
++RRV_SW_DS_KEY(0x0015129F112E8364)
++RRV_SW_DS_KEY(0x0015129F112E8B64)
++RRV_SW_DS_KEY(0x001514051127904C)
++RRV_SW_DS_KEY(0x001517993FCE8864)
++RRV_SW_DS_KEY(0x0015301F19278F64)
++RRV_SW_DS_KEY(0x0019101712378864)
++RRV_SW_DS_KEY(0x0019101D19278864)
++RRV_SW_DS_KEY(0x0019101F11278F64)
++RRV_SW_DS_KEY(0x0019101F112E8364)
++RRV_SW_DS_KEY(0x001912851125804C)
++RRV_SW_DS_KEY(0x00191295112C8064)
++RRV_SW_DS_KEY(0x00191295122C8064)
++RRV_SW_DS_KEY(0x001912993FCE8064)
++RRV_SW_DS_KEY(0x001912993FCE8864)
++RRV_SW_DS_KEY(0x0019129F112C8364)
++RRV_SW_DS_KEY(0x0019129F112C8B64)
++RRV_SW_DS_KEY(0x0019129F112E8364)
++RRV_SW_DS_KEY(0x0019129F112E8B64)
++RRV_SW_DS_KEY(0x0019301D19278864)
++RRV_SW_DS_KEY(0x0019301F11278B64)
++RRV_SW_DS_KEY(0x001D101F112E8364)
++RRV_SW_DS_KEY(0x001D12993FCE8064)
++RRV_SW_DS_KEY(0x001D12993FCE8864)
++RRV_SW_DS_KEY(0x001D129D112E8864)
++RRV_SW_DS_KEY(0x001D129F112E8364)
++RRV_SW_DS_KEY(0x001D129F112E8B64)
++RRV_SW_DS_KEY(0x001D179F112E8364)
++RRV_SW_DS_KEY(0x001D92851523904C)
++RRV_SW_DS_KEY(0x001D92851A21004C)
++RRV_SW_DS_KEY(0x001D92853FC1004C)
++RRV_SW_DS_KEY(0x001D92853FC3904C)
++RRV_SW_DS_KEY(0x007512993FCE8064)
++RRV_SW_DS_KEY(0x007512993FCE8864)
++RRV_SW_DS_KEY(0x007517993FCE8864)
++RRV_SW_DS_KEY(0x009512993FCE8064)
++RRV_SW_DS_KEY(0x009512993FCE8864)
++RRV_SW_DS_KEY(0x009517993FCE8864)
++RRV_SW_DS_KEY(0x010190013FC0404C)
++RRV_SW_DS_KEY(0x010590013FC3804C)
++RRV_SW_DS_KEY(0x011190051127904C)
++RRV_SW_DS_KEY(0x011192851127904C)
++RRV_SW_DS_KEY(0x011193853FC5104C)
++RRV_SW_DS_KEY(0x011197853FC5104C)
++RRV_SW_DS_KEY(0x011D92851A21004C)
++RRV_SW_DS_KEY(0x011D92853FC1004C)
++RRV_SW_DS_KEY(0x020110193FC04864)
++RRV_SW_DS_KEY(0x0201101D12204864)
++RRV_SW_DS_KEY(0x020190093FC04054)
++RRV_SW_DS_KEY(0x020190153FC04074)
++RRV_SW_DS_KEY(0x020D128D1A258054)
++RRV_SW_DS_KEY(0x020D128D1A258854)
++RRV_SW_DS_KEY(0x020D129511268864)
++RRV_SW_DS_KEY(0x021512993FCE8864)
++RRV_SW_DS_KEY(0x0219129F112E8364)
++RRV_SW_DS_KEY(0x021D129511268064)
++RRV_SW_DS_KEY(0x021D12993FCE8864)
++RRV_SW_DS_KEY(0x021D129F11268364)
++RRV_SW_DS_KEY(0x021D129F11268B64)
++RRV_SW_DS_KEY(0x027512993FCE8864)
++RRV_SW_SP_KEY(0x0000800100004000)
++RRV_SW_SP_KEY(0x0001000100004000)
++RRV_SW_SP_KEY(0x0001000100018000)
++RRV_SW_SP_KEY(0x0001000100019000)
++RRV_SW_SP_KEY(0x0001001100004000)
++RRV_SW_SP_KEY(0x0001001100088000)
++RRV_SW_SP_KEY(0x0001001300004000)
++RRV_SW_SP_KEY(0x0001001300018000)
++RRV_SW_SP_KEY(0x0001001300018800)
++RRV_SW_SP_KEY(0x0001001900018000)
++RRV_SW_SP_KEY(0x0001001900018800)
++RRV_SW_SP_KEY(0x0001001900080800)
++RRV_SW_SP_KEY(0x0001001900084000)
++RRV_SW_SP_KEY(0x0001001900088000)
++RRV_SW_SP_KEY(0x0001001900088800)
++RRV_SW_SP_KEY(0x0001001B00018000)
++RRV_SW_SP_KEY(0x0001001B00018800)
++RRV_SW_SP_KEY(0x0001001B00088000)
++RRV_SW_SP_KEY(0x0001001B00088800)
++RRV_SW_SP_KEY(0x0001001B00089000)
++RRV_SW_SP_KEY(0x0001800100004000)
++RRV_SW_SP_KEY(0x0001800100010000)
++RRV_SW_SP_KEY(0x0001800100019000)
++RRV_SW_SP_KEY(0x0001801100004000)
++RRV_SW_SP_KEY(0x0101800100004000)
++RRV_SW_SP_KEY(0x0101800100010000)
++RRV_SW_SP_KEY(0x0101800100011000)
++RRV_SW_SP_KEY(0x0101800100018000)
++RRV_SW_SP_KEY(0x0101800100019000)
++RRV_SW_SP_KEY(0x0201000900018000)
++RRV_SW_SP_KEY(0x0201000900018800)
++RRV_SW_SP_KEY(0x0201001100008000)
++RRV_SW_SP_KEY(0x0201001100008800)
++RRV_SW_SP_KEY(0x0201001900004800)
++RRV_SW_SP_KEY(0x0201001900088800)
++RRV_SW_SP_KEY(0x0201001B00008000)
++RRV_SW_SP_KEY(0x0201001B00008800)
++RRV_SW_SP_KEY(0x0201001B00088000)
++RRV_SW_SP_KEY(0x0201800900004000)
++RRV_SW_SP_KEY(0x0201801100004000)
+diff --git a/pcsx2/GS/Renderers/SW/GSRasterizer.cpp b/pcsx2/GS/Renderers/SW/GSRasterizer.cpp
+index ab36957..60fda7f 100644
+--- a/pcsx2/GS/Renderers/SW/GSRasterizer.cpp
++++ b/pcsx2/GS/Renderers/SW/GSRasterizer.cpp
+@@ -4,6 +4,12 @@
+ // TODO: JIT Draw* (flags: depth, texture, color (+iip), scissor)
+ 
+ #include "GS/Renderers/SW/GSRasterizer.h"
++
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <map>
++#include <string>
+ #include "GS/Renderers/SW/GSDrawScanline.h"
+ #include "GS/GSExtra.h"
+ #include "PerformanceMetrics.h"
+@@ -33,6 +39,289 @@ static int compute_best_thread_height(int threads)
+ 		return 4;
+ }
+ 
++#if defined(RRV_PCSX2_GS_SW_JIT)
++// ---------------------------------------------------------------------------
++// RRV_PCSX2_GS_SW_DIFF=<summary path>: differential check of the ahead-of-time
++// rasterizer functions against PCSX2's runtime JIT (diagnostic builds only).
++// The JIT draws into GS local memory as usual; the static (or generic C)
++// functions draw the same spans into a shadow copy taken at the start of the
++// draw. Each span's frame/Z pixels are compared (and the shadow resynced on a
++// mismatch, so spans are judged independently); a whole-memory compare at the
++// end of the draw catches writes outside the spans. Per-selector counts go to
++// the summary file; the first mismatches of each selector go to stderr.
++// ---------------------------------------------------------------------------
++namespace
++{
++	struct RrvSwDiffKeyStats
++	{
++		u64 draws = 0;
++		u64 spans = 0;
++		u64 bad_spans = 0;
++		u64 bad_pixels = 0;
++		u64 bad_draws_full = 0;
++		u64 reported = 0;
++		bool dirty = false;
++	};
++
++	struct RrvSwDiffState
++	{
++		const char* path = nullptr;
++		std::map<u64, RrvSwDiffKeyStats> keys;
++		u64 draws = 0;
++		u64 spans = 0;
++		u64 bad_spans = 0;
++		u64 bad_draws_full = 0;
++		u64 full_reported = 0;
++	};
++
++	void RrvDiffWriteSummary(const RrvSwDiffState& st);
++
++	RrvSwDiffState& RrvDiffState()
++	{
++		static RrvSwDiffState s_state = [] {
++			RrvSwDiffState st;
++			const char* p = std::getenv("RRV_PCSX2_GS_SW_DIFF");
++			st.path = (p && p[0]) ? p : nullptr;
++			if (st.path)
++				std::fprintf(stderr, "[pcsx2-sw-diff] enabled: JIT vs static rasterizer, summary %s (static table %zu keys)\n",
++					st.path, GSDrawScanline::StaticTableSize());
++			return st;
++		}();
++		// Registered after s_state is constructed, so it runs before s_state is destroyed.
++		static const bool s_final_summary = [] {
++			if (s_state.path)
++				std::atexit([] { RrvDiffWriteSummary(s_state); });
++			return true;
++		}();
++		(void)s_final_summary;
++		return s_state;
++	}
++
++	void RrvDiffWriteSummary(const RrvSwDiffState& st)
++	{
++		const std::string tmp = std::string(st.path) + ".tmp";
++		FILE* f = std::fopen(tmp.c_str(), "w");
++		if (!f)
++			return;
++		std::fprintf(f, "# rrv pcsx2 sw diff: draws=%llu spans=%llu bad_spans=%llu bad_draws_full=%llu keys=%zu\n",
++			static_cast<unsigned long long>(st.draws), static_cast<unsigned long long>(st.spans),
++			static_cast<unsigned long long>(st.bad_spans), static_cast<unsigned long long>(st.bad_draws_full), st.keys.size());
++		for (const auto& [k, v] : st.keys)
++		{
++			std::fprintf(f, "key %016llX draws %llu spans %llu bad_spans %llu bad_pixels %llu bad_draws_full %llu %s\n",
++				static_cast<unsigned long long>(k), static_cast<unsigned long long>(v.draws),
++				static_cast<unsigned long long>(v.spans), static_cast<unsigned long long>(v.bad_spans),
++				static_cast<unsigned long long>(v.bad_pixels), static_cast<unsigned long long>(v.bad_draws_full),
++				GSScanlineSelector(k).to_string().c_str());
++		}
++		std::fclose(f);
++		std::rename(tmp.c_str(), st.path);
++	}
++
++	static const int s_rrv_offsets[] = {0, 2, 8, 10}; // columnTable16[0], as GSDrawScanline.cpp s_offsets
++
++	void RrvDumpVec(const char* name, const void* p)
++	{
++		u32 v[4];
++		std::memcpy(v, p, sizeof(v));
++		std::fprintf(stderr, " %s=%08x,%08x,%08x,%08x", name, v[0], v[1], v[2], v[3]);
++	}
++
++	void RrvDumpLocal(const char* who, const GSScanlineLocalData& l)
++	{
++#if _M_SSE < 0x501
++		std::fprintf(stderr, "[pcsx2-sw-diff]   %s:", who);
++		RrvDumpVec("d0.z", &l.d[0].z);
++		RrvDumpVec("d0.s", &l.d[0].s);
++		RrvDumpVec("d0.t", &l.d[0].t);
++		RrvDumpVec("d0.q", &l.d[0].q);
++		RrvDumpVec("d0.rb", &l.d[0].rb);
++		RrvDumpVec("d0.ga", &l.d[0].ga);
++		RrvDumpVec("d0.f", &l.d[0].f);
++		RrvDumpVec("d1.s", &l.d[1].s);
++		RrvDumpVec("d3.s", &l.d[3].s);
++		RrvDumpVec("d4.z", &l.d4.z);
++		RrvDumpVec("d4.stq", &l.d4.stq);
++		RrvDumpVec("d4.c", &l.d4.c);
++		RrvDumpVec("d4.f", &l.d4.f);
++		RrvDumpVec("c.rb", &l.c.rb);
++		RrvDumpVec("c.ga", &l.c.ga);
++		RrvDumpVec("p.z", &l.p.z);
++		RrvDumpVec("p.f", &l.p.f);
++		std::fprintf(stderr, "\n");
++#else
++		(void)who;
++		(void)l;
++#endif
++	}
++} // namespace
++
++struct alignas(32) GSRasterizer::RrvTwin
++{
++	GSScanlineLocalData local = {};
++	GSScanlineGlobalData global;
++	GSDrawScanline::SetupPrimPtr sp = nullptr;
++	GSDrawScanline::DrawScanlinePtr ds = nullptr;
++	GSDrawScanline::DrawScanlinePtr de = nullptr;
++	u8* shadow = nullptr;
++	RrvSwDiffKeyStats* stats = nullptr;
++	u64 key = 0;
++	int primclass = 0;
++};
++
++void GSRasterizer::RrvTwinBegin(const GSRasterizerData& data)
++{
++	RrvSwDiffState& st = RrvDiffState();
++	m_rrv_twin = nullptr;
++	if (!st.path || m_threads != 1)
++		return;
++
++	if (!m_rrv_twin_store)
++	{
++		m_rrv_twin_store = new RrvTwin();
++		m_rrv_twin_store->shadow = static_cast<u8*>(_aligned_malloc(VM_SIZE + 4096, 64));
++		std::memset(m_rrv_twin_store->shadow, 0, VM_SIZE + 4096);
++	}
++
++	RrvTwin* t = m_rrv_twin_store;
++	std::memcpy(t->shadow, data.global.vm, VM_SIZE);
++	t->global = data.global;
++	t->global.vm = t->shadow;
++	GSDrawScanline::GetStaticFunctions(data.global.sel, t->sp, t->ds, t->de);
++	t->local = {};
++	t->local.gd = &t->global;
++	t->local.temp.uv_minmax[0] = m_local.temp.uv_minmax[0];
++	t->local.temp.uv_minmax[1] = m_local.temp.uv_minmax[1];
++	t->key = data.global.sel.key;
++	t->primclass = data.primclass;
++	t->stats = &st.keys[t->key];
++	t->stats->draws++;
++	m_rrv_twin = t;
++}
++
++void GSRasterizer::RrvTwinSpan(int pixels, int left, int top, const GSVertexSW& scan, bool edge)
++{
++	RrvTwin* t = m_rrv_twin;
++	RrvSwDiffState& st = RrvDiffState();
++	(edge ? t->de : t->ds)(pixels, left, top, scan, t->local);
++
++	GSScanlineSelector sel(edge ? GSDrawScanline::EdgeKey(t->global.sel) : t->global.sel.key);
++	t->stats->spans++;
++	st.spans++;
++
++	const u8* vm = static_cast<const u8*>(m_local.gd->vm);
++	u8* sh = t->shadow;
++	const GSVector2i* fzbr = t->global.fzbr;
++	const GSVector2i* fzbc = t->global.fzbc;
++
++	int bad = 0;
++	struct BadPixel { int x; u32 jf, cf, jz, cz; };
++	BadPixel list[8];
++	for (int x = left; x < left + pixels; x++)
++	{
++		const int i = x & 3;
++		bool pixel_bad = false;
++		BadPixel b = {x, 0, 0, 0, 0};
++		if (sel.fwrite)
++		{
++			const u32 fa = static_cast<u32>(fzbr[top].x + fzbc[x >> 2].x) & (HALF_VM_SIZE - 1);
++			const size_t off = static_cast<size_t>(fa) * 2 + s_rrv_offsets[i] * 2;
++			const size_t n = sel.fpsm == 2 ? 2 : 4;
++			std::memcpy(&b.jf, vm + off, n);
++			std::memcpy(&b.cf, sh + off, n);
++			if (b.jf != b.cf)
++			{
++				pixel_bad = true;
++				std::memcpy(sh + off, vm + off, n);
++			}
++		}
++		if (sel.zwrite)
++		{
++			const u32 za = static_cast<u32>(fzbr[top].y + fzbc[x >> 2].y) & (HALF_VM_SIZE - 1);
++			const size_t off = static_cast<size_t>(za) * 2 + s_rrv_offsets[i] * 2;
++			const size_t n = sel.zpsm == 2 ? 2 : 4;
++			std::memcpy(&b.jz, vm + off, n);
++			std::memcpy(&b.cz, sh + off, n);
++			if (b.jz != b.cz)
++			{
++				pixel_bad = true;
++				std::memcpy(sh + off, vm + off, n);
++			}
++		}
++		if (pixel_bad)
++		{
++			if (bad < 8)
++				list[bad] = b;
++			bad++;
++		}
++	}
++
++	if (bad == 0)
++		return;
++
++	t->stats->bad_spans++;
++	t->stats->bad_pixels += bad;
++	t->stats->dirty = true;
++	st.bad_spans++;
++	if (t->stats->reported++ < 4)
++	{
++		std::fprintf(stderr, "[pcsx2-sw-diff] MISMATCH key=%016llX%s prim=%d span pixels=%d left=%d top=%d bad=%d sel{%s}\n",
++			static_cast<unsigned long long>(t->key), edge ? " (edge)" : "", t->primclass, pixels, left, top, bad,
++			sel.to_string().c_str());
++		std::fprintf(stderr, "[pcsx2-sw-diff]   scan p=%.9g,%.9g,%.9g,%.9g t=%.9g,%.9g,%.9g,%.9g c=%.9g,%.9g,%.9g,%.9g\n",
++			scan.p.x, scan.p.y, scan.p.z, scan.p.w, scan.t.x, scan.t.y, scan.t.z, scan.t.w,
++			scan.c.x, scan.c.y, scan.c.z, scan.c.w);
++		for (int k = 0; k < std::min(bad, 8); k++)
++		{
++			std::fprintf(stderr, "[pcsx2-sw-diff]   x=%d frame jit=%08x c=%08x z jit=%08x c=%08x\n",
++				list[k].x, list[k].jf, list[k].cf, list[k].jz, list[k].cz);
++		}
++		RrvDumpLocal("jit-local", m_local);
++		RrvDumpLocal("c-local  ", t->local);
++	}
++}
++
++void GSRasterizer::RrvTwinEnd(const GSRasterizerData& data)
++{
++	RrvTwin* t = m_rrv_twin;
++	if (!t)
++		return;
++	m_rrv_twin = nullptr;
++	RrvSwDiffState& st = RrvDiffState();
++	st.draws++;
++
++	const u8* vm = static_cast<const u8*>(data.global.vm);
++	if (std::memcmp(vm, t->shadow, VM_SIZE) != 0)
++	{
++		st.bad_draws_full++;
++		t->stats->bad_draws_full++;
++		if (st.full_reported++ < 16)
++		{
++			size_t first = 0, count = 0;
++			for (size_t o = 0; o < VM_SIZE; o += 4)
++			{
++				if (std::memcmp(vm + o, t->shadow + o, 4) != 0)
++				{
++					if (count++ == 0)
++						first = o;
++				}
++			}
++			u32 jv, cv;
++			std::memcpy(&jv, vm + first, 4);
++			std::memcpy(&cv, t->shadow + first, 4);
++			std::fprintf(stderr, "[pcsx2-sw-diff] OUTSIDE-SPAN key=%016llX prim=%d words=%zu first=0x%zx jit=%08x c=%08x\n",
++				static_cast<unsigned long long>(t->key), t->primclass, count, first, jv, cv);
++		}
++	}
++
++	if ((st.draws & 255) == 0 || t->stats->draws == 1 || t->stats->dirty || t->stats->bad_draws_full == 1)
++	{
++		t->stats->dirty = false;
++		RrvDiffWriteSummary(st);
++	}
++}
++#endif
++
+ GSRasterizer::GSRasterizer(GSDrawScanline* ds, int id, int threads)
+ 	: m_ds(ds)
+ 	, m_id(id)
+@@ -60,6 +349,13 @@ GSRasterizer::GSRasterizer(GSDrawScanline* ds, int id, int threads)
+ 
+ GSRasterizer::~GSRasterizer()
+ {
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	if (m_rrv_twin_store)
++	{
++		_aligned_free(m_rrv_twin_store->shadow);
++		delete m_rrv_twin_store;
++	}
++#endif
+ 	_aligned_free(m_scanline);
+ 	_aligned_free(m_edge.buff);
+ }
+@@ -139,6 +435,9 @@ void GSRasterizer::Draw(GSRasterizerData& data)
+ 	m_draw_scanline = data.draw_scanline;
+ 	m_draw_edge = data.draw_edge;
+ 	GSDrawScanline::BeginDraw(data, m_local);
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	RrvTwinBegin(data);
++#endif
+ 
+ 	const GSVertexSW* vertex = data.vertex;
+ 	const GSVertexSW* vertex_end = data.vertex + data.vertex_count;
+@@ -245,6 +544,10 @@ void GSRasterizer::Draw(GSRasterizerData& data)
+ 
+ 	m_pixels.sum += m_pixels.actual;
+ 
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	RrvTwinEnd(data);
++#endif
++
+ 	if constexpr (ENABLE_DRAW_STATS)
+ 		m_ds->UpdateDrawStats(data.frame, GetCPUTicks() - data.start, m_pixels.actual, m_pixels.total, m_primcount);
+ }
+@@ -266,7 +569,7 @@ void GSRasterizer::DrawPoint(const GSVertexSW* vertex, int vertex_count, const u
+ 			{
+ 				if (IsOneOfMyScanlines(p.y))
+ 				{
+-					m_setup_prim(vertex, index, GSVertexSW::zero(), m_local);
++					SetupPrim(vertex, index, GSVertexSW::zero());
+ 
+ 					DrawScanline(1, p.x, p.y, v);
+ 				}
+@@ -287,7 +590,7 @@ void GSRasterizer::DrawPoint(const GSVertexSW* vertex, int vertex_count, const u
+ 			{
+ 				if (IsOneOfMyScanlines(p.y))
+ 				{
+-					m_setup_prim(vertex, tmp_index, GSVertexSW::zero(), m_local);
++					SetupPrim(vertex, tmp_index, GSVertexSW::zero());
+ 
+ 					DrawScanline(1, p.x, p.y, v);
+ 				}
+@@ -1116,7 +1419,7 @@ void GSRasterizer::DrawSprite(const GSVertexSW* vertex, const u16* index)
+ 	{
+ 		if (m_threads == 1)
+ 		{
+-			GSDrawScanline::DrawRect(r, scan, m_local);
++			DrawRect(r, scan);
+ 
+ 			int pixels = r.width() * r.height();
+ 
+@@ -1133,7 +1436,7 @@ void GSRasterizer::DrawSprite(const GSVertexSW* vertex, const u16* index)
+ 				r.top = top;
+ 				r.bottom = std::min<int>((top + (1 << m_thread_height)) & ~((1 << m_thread_height) - 1), bottom);
+ 
+-				GSDrawScanline::DrawRect(r, scan, m_local);
++				DrawRect(r, scan);
+ 
+ 				int pixels = r.width() * r.height();
+ 
+@@ -1162,7 +1465,7 @@ void GSRasterizer::DrawSprite(const GSVertexSW* vertex, const u16* index)
+ 
+ 	scan.t = (scan.t + dt * prestep).xyzw(scan.t);
+ 
+-	m_setup_prim(vertex, index, dscan, m_local);
++	SetupPrim(vertex, index, dscan);
+ 
+ 	while (1)
+ 	{
+@@ -1391,7 +1694,7 @@ void GSRasterizer::Flush(const GSVertexSW* vertex, const u16* index, const GSVer
+ 
+ 	if (count > 0)
+ 	{
+-		m_setup_prim(vertex, index, dscan, m_local);
++		SetupPrim(vertex, index, dscan);
+ 
+ 		const GSVertexSW* RESTRICT e = m_edge.buff;
+ 		const GSVertexSW* RESTRICT ee = e + count;
+@@ -1439,6 +1742,10 @@ void GSRasterizer::DrawScanline(int pixels, int left, int top, const GSVertexSW&
+ 	pxAssert(m_pixels.actual <= m_pixels.total);
+ 
+ 	m_draw_scanline(pixels, left, top, scan, m_local);
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	if (m_rrv_twin)
++		RrvTwinSpan(pixels, left, top, scan, false);
++#endif
+ }
+ 
+ void GSRasterizer::DrawEdge(int pixels, int left, int top, const GSVertexSW& scan)
+@@ -1450,6 +1757,28 @@ void GSRasterizer::DrawEdge(int pixels, int left, int top, const GSVertexSW& sca
+ 	pxAssert(m_pixels.actual <= m_pixels.total);
+ 
+ 	m_draw_edge(pixels, left, top, scan, m_local);
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	if (m_rrv_twin)
++		RrvTwinSpan(pixels, left, top, scan, true);
++#endif
++}
++
++void GSRasterizer::SetupPrim(const GSVertexSW* vertex, const u16* index, const GSVertexSW& dscan)
++{
++	m_setup_prim(vertex, index, dscan, m_local);
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	if (m_rrv_twin)
++		m_rrv_twin->sp(vertex, index, dscan, m_rrv_twin->local);
++#endif
++}
++
++void GSRasterizer::DrawRect(const GSVector4i& r, const GSVertexSW& scan)
++{
++	GSDrawScanline::DrawRect(r, scan, m_local);
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	if (m_rrv_twin)
++		GSDrawScanline::DrawRect(r, scan, m_rrv_twin->local);
++#endif
+ }
+ 
+ //
+@@ -1466,8 +1795,47 @@ void GSSingleRasterizer::Queue(const GSRingHeap::SharedPtr<GSRasterizerData>& da
+ 	Draw(*data.get());
+ }
+ 
++namespace
++{
++	// RRV_PCSX2_GS_SW_TIMING=1: cumulative time spent in GSSingleRasterizer::Draw
++	// (selector lookup or JIT code generation, plus rasterization), printed
++	// every 4096 draws and at exit.
++	struct RrvSwTiming
++	{
++		u64 draws = 0, ticks = 0, pixels = 0;
++		void Print() const
++		{
++			std::fprintf(stderr, "[pcsx2-sw] timing draws=%llu pixels=%llu ns=%llu (%s)\n",
++				static_cast<unsigned long long>(draws), static_cast<unsigned long long>(pixels),
++				static_cast<unsigned long long>(ticks * 1000000000ull / GetTickFrequency()),
++#if defined(RRV_PCSX2_GS_SW_JIT)
++				"jit"
++#else
++				"static"
++#endif
++			);
++		}
++	};
++	RrvSwTiming s_rrv_sw_timing;
++
++	bool RrvSwTimingEnabled()
++	{
++		static const bool s_enabled = [] {
++			const char* v = std::getenv("RRV_PCSX2_GS_SW_TIMING");
++			const bool on = v && v[0] == '1';
++			if (on)
++				std::atexit([] { s_rrv_sw_timing.Print(); });
++			return on;
++		}();
++		return s_enabled;
++	}
++} // namespace
++
+ void GSSingleRasterizer::Draw(GSRasterizerData& data)
+ {
++	const bool timing = RrvSwTimingEnabled();
++	const u64 t0 = timing ? GetCPUTicks() : 0;
++
+ 	if (!m_ds.SetupDraw(data)) [[unlikely]]
+ 	{
+ 		m_ds.ResetCodeCache();
+@@ -1475,6 +1843,14 @@ void GSSingleRasterizer::Draw(GSRasterizerData& data)
+ 	}
+ 
+ 	m_r.Draw(data);
++
++	if (timing)
++	{
++		s_rrv_sw_timing.ticks += GetCPUTicks() - t0;
++		s_rrv_sw_timing.pixels += static_cast<u64>(data.pixels);
++		if ((++s_rrv_sw_timing.draws & 4095) == 0)
++			s_rrv_sw_timing.Print();
++	}
+ }
+ 
+ void GSSingleRasterizer::Sync()
+diff --git a/pcsx2/GS/Renderers/SW/GSRasterizer.h b/pcsx2/GS/Renderers/SW/GSRasterizer.h
+index 1d0d844..22ea27d 100644
+--- a/pcsx2/GS/Renderers/SW/GSRasterizer.h
++++ b/pcsx2/GS/Renderers/SW/GSRasterizer.h
+@@ -124,6 +124,21 @@ protected:
+ 	__forceinline void DrawScanline(int pixels, int left, int top, const GSVertexSW& scan);
+ 	__forceinline void DrawEdge(int pixels, int left, int top, const GSVertexSW& scan);
+ 
++	__forceinline void SetupPrim(const GSVertexSW* vertex, const u16* index, const GSVertexSW& dscan);
++	__forceinline void DrawRect(const GSVector4i& r, const GSVertexSW& scan);
++
++#if defined(RRV_PCSX2_GS_SW_JIT)
++	// RRV differential check (RRV_PCSX2_GS_SW_DIFF): every span drawn by the JIT
++	// is also drawn by the static/generic C functions into a shadow copy of
++	// local memory, and the span's pixels are compared.
++	struct RrvTwin;
++	RrvTwin* m_rrv_twin = nullptr; // non-null while the current draw is checked
++	RrvTwin* m_rrv_twin_store = nullptr;
++	void RrvTwinBegin(const GSRasterizerData& data);
++	void RrvTwinEnd(const GSRasterizerData& data);
++	void RrvTwinSpan(int pixels, int left, int top, const GSVertexSW& scan, bool edge);
++#endif
++
+ public:
+ 	GSRasterizer(GSDrawScanline* ds, int id, int threads);
+ 	~GSRasterizer();
+diff --git a/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm b/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
+index d8d30f3..626bb68 100644
+--- a/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
++++ b/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
+@@ -17,6 +17,10 @@
+ #include "imgui.h"
+ 
+ #include <thread>
++#include <cstdio>
++#include <cstdlib>
++#include <memory>
++#include <string>
+ #include <cstring>
+ 
+ #ifdef __APPLE__
+@@ -29,6 +33,127 @@
+ 
+ namespace
+ {
++// RRV frame pacing for the bridge's direct present (RR5-specific product
++// change, not PCSX2 behaviour). The GS field service that presents runs on the
++// GS worker after a variable amount of EE and GS host work, so with display
++// sync the drawables reach the compositor at 59.94 Hz plus about +-3 ms of
++// jitter; on a 120 Hz (or 60 Hz) display that jitter crosses refresh edges
++// and some frames stay up one refresh longer and others one shorter: visible
++// judder with steady audio (Namco logo, 2026-09-30). The pacer schedules each
++// drawable with presentDrawable:atTime: on an even 1001/60000 s grid that sits
++// just after the latest submit (ratchets later on a late frame, creeps 2 us per
++// frame earlier otherwise, re-anchors after a pause or a burst). Host-only:
++// the guest never sees it. Measured on a 120 Hz display, v136: frames held for
++// the wrong number of refreshes 3-21% -> 0-4%, at +6-9 ms display latency.
++// RRV_PCSX2_GS_PRESENT_PACING=0 turns it off; RRV_PCSX2_GS_PRESENT_MARGIN_US
++// (default 2000) is the submit-to-target margin; RRV_PCSX2_GS_PRESENT_CREEP_US
++// (default 2; 20 or 60 cut ~2-4 ms of latency but bring back 10-13% judder). RRV_PCSX2_GS_PRESENT_TRACE=<path> writes one line per present
++// "submit target presented" (CACurrentMediaTime seconds; presented is the
++// drawable's on-screen time, 0 if it was never shown) at exit.
++struct RrvPresentPacer
++{
++	static constexpr double kPeriod = 1001.0 / 60000.0;
++	static constexpr size_t kTraceRows = 1u << 20;
++	bool configured = false, pace = true, have = false;
++	double margin = 0.002, creep = 2e-6, target = 0.0;
++	u64 presents = 0, late = 0, reanchors = 0;
++	std::string trace_path;
++	std::unique_ptr<double[]> submit, planned;
++	std::unique_ptr<std::atomic<double>[]> shown;
++	void Configure()
++	{
++		if (configured)
++			return;
++		configured = true;
++		if (const char* v = std::getenv("RRV_PCSX2_GS_PRESENT_PACING"); v && v[0] == '0')
++			pace = false;
++		if (const char* v = std::getenv("RRV_PCSX2_GS_PRESENT_MARGIN_US"); v && v[0])
++			margin = std::strtod(v, nullptr) * 1e-6;
++		if (const char* v = std::getenv("RRV_PCSX2_GS_PRESENT_CREEP_US"); v && v[0])
++			creep = std::strtod(v, nullptr) * 1e-6;
++		if (const char* v = std::getenv("RRV_PCSX2_GS_PRESENT_TRACE"); v && v[0])
++		{
++			trace_path = v;
++			submit = std::make_unique<double[]>(kTraceRows);
++			planned = std::make_unique<double[]>(kTraceRows);
++			shown = std::make_unique<std::atomic<double>[]>(kTraceRows);
++		}
++		std::fprintf(stderr, "[pcsx2-gs-bridge] present pacing=%d margin_us=%.0f trace=%s\n", pace ? 1 : 0,
++			margin * 1e6, trace_path.empty() ? "off" : trace_path.c_str());
++		static const bool at_exit = [] { std::atexit([] { Get().Write(); }); return true; }();
++		(void)at_exit;
++	}
++	static RrvPresentPacer& Get()
++	{
++		static RrvPresentPacer p;
++		return p;
++	}
++	// Returns the atTime target, or 0 to present as soon as possible.
++	double Plan(double now)
++	{
++		const double earliest = now + margin;
++		if (!have)
++		{
++			have = true;
++			target = earliest;
++			return target;
++		}
++		const double next = target + kPeriod;
++		if (earliest > next + 2.0 * kPeriod || next > earliest + 2.0 * kPeriod)
++		{
++			++reanchors;
++			target = earliest;
++		}
++		else if (earliest > next)
++		{
++			++late;
++			target = earliest;
++		}
++		else
++			target = std::max(earliest, next - creep);
++		return target;
++	}
++	void Present(id<MTLCommandBuffer> buf, id<MTLDrawable> drawable, bool fifo)
++	{
++		Configure();
++		const double now = CACurrentMediaTime();
++		const double at = (pace && fifo) ? Plan(now) : 0.0;
++		const u64 row = presents++;
++		if (submit && row < kTraceRows)
++		{
++			submit[row] = now;
++			planned[row] = at;
++			shown[row].store(0.0, std::memory_order_relaxed);
++			if (@available(macOS 10.15.4, *))
++			{
++				std::atomic<double>* slot = &shown[row];
++				[drawable addPresentedHandler:^(id<MTLDrawable> d) {
++					slot->store(d.presentedTime, std::memory_order_relaxed);
++				}];
++			}
++		}
++		if (at > 0.0)
++			[buf presentDrawable:drawable atTime:at];
++		else
++			[buf presentDrawable:drawable];
++	}
++	void Write()
++	{
++		std::fprintf(stderr, "[pcsx2-gs-bridge] present pacing presents=%llu late=%llu reanchors=%llu\n",
++			static_cast<unsigned long long>(presents), static_cast<unsigned long long>(late),
++			static_cast<unsigned long long>(reanchors));
++		if (!submit)
++			return;
++		FILE* f = std::fopen(trace_path.c_str(), "w");
++		if (!f)
++			return;
++		const u64 rows = std::min<u64>(presents, kTraceRows);
++		for (u64 i = 0; i < rows; ++i)
++			std::fprintf(f, "%.6f %.6f %.6f\n", submit[i], planned[i], shown[i].load(std::memory_order_relaxed));
++		std::fclose(f);
++	}
++};
++
+ rrv::metal_lifetime::Ring s_rrv_metal_lifetime;
+ std::atomic<u64> s_rrv_last_present_config{0};
+ std::atomic<u64> s_rrv_last_interlace_config{0};
+@@ -1709,7 +1834,9 @@ static bool ConvertShaderNotNeeded(ShaderConvert shader)
+ 		const bool use_present_drawable = m_use_present_drawable == UsePresentDrawable::Always ||
+ 			(m_use_present_drawable == UsePresentDrawable::IfVsync && m_vsync_mode == GSVSyncMode::FIFO);
+ 
+-		if (use_present_drawable)
++		if (use_present_drawable && m_window_info.surface_handle)
++			RrvPresentPacer::Get().Present(m_current_render_cmdbuf, m_current_drawable, m_vsync_mode == GSVSyncMode::FIFO);
++		else if (use_present_drawable)
+ 			[m_current_render_cmdbuf presentDrawable:m_current_drawable];
+ 		else
+ 			[m_current_render_cmdbuf addScheduledHandler:[drawable = std::move(m_current_drawable)](id<MTLCommandBuffer>){
