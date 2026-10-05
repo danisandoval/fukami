@@ -2936,28 +2936,15 @@ template <size_t... I>
 constexpr std::array<Fn, sizeof...(I)> thunks(std::index_sequence<I...>) { return {&thunk<I>...}; }
 void registerAll(PS2Runtime& runtime) {
     static constexpr auto table = thunks(std::make_index_sequence<kCount>{});
-    size_t n = 0, wrapped = 0;
-    // RRV_RR5_NATIVE_COUNT=N (developer): only the first N functions of the list, to find the one behind
-    // a difference by halving.
-    size_t count = kCount;
-    if (const char* v = std::getenv("RRV_RR5_NATIVE_COUNT"); v && v[0])
-        count = std::min<size_t>(kCount, static_cast<size_t>(std::strtoull(v, nullptr, 10)));
-    for (size_t i = 0; i < count; ++i) {
+    size_t n = 0;
+    for (size_t i = 0; i < kCount; ++i) {
         const Entry& e = rrv_native_entries[i];
-        if (!runtime.hasFunction(e.address)) continue;
         // Only replace the generated original, never another patch.
-        if (runtime.lookupFunction(e.address) != e.original) {
-            // A widescreen reader wrapper (patch_ws_reader) holds the address and calls the function it
-            // replaced through a saved pointer: that call takes the native version.
-            for (uint32_t r = 0; r < kWsReaderCount; ++r)
-                if (kWsReaders[r] == e.address && g_wsReaderOrig[r] == e.original) { g_wsReaderOrig[r] = table[i]; ++wrapped; }
-            continue;
-        }
+        if (!runtime.hasFunction(e.address) || runtime.lookupFunction(e.address) != e.original) continue;
         runtime.registerFunction(e.address, table[i]);
         ++n;
     }
-    std::fprintf(stderr, "[rr5-native] native hot functions: %zu of %zu registered, %zu more behind a widescreen wrapper\n",
-                 n, kCount, wrapped);
+    std::fprintf(stderr, "[rr5-native] native hot functions: %zu of %zu registered\n", n, kCount);
     std::fprintf(stderr, "[rr5-car] native vertex block loop (func_222EB8): %s\n",
                  !rrv_car::kEnabled ? "off (RRV_RR5_NATIVE_BUILDER=0)" : rrv_car::kVerify ? "verify" : "on");
     static const bool atExit = [] { std::atexit([] {

@@ -11,7 +11,6 @@ Versions follow [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`.
   logs, timing files, pad record or memory card copy). Turn it on before reporting a bug.
 - Faster loading on the Steam Deck: the game's data unpacker runs on host pointers, in the background where possible.
 - Steam Deck: the GS thread spends about 4% less time in the busiest part of a race (texture hashing no longer copies every block; the images are identical).
-- Faster VU0 and libvu0 maths on Apple silicon (same results); the native code list keeps its 29 functions.
 - In fullscreen the mouse pointer hides after 2 seconds without moving; it returns when the mouse moves or the menu opens.
 
 ## 1.0.0 (2026-10-04)

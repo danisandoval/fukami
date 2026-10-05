@@ -268,12 +268,6 @@ class CatalogueTests(unittest.TestCase):
         self.assertTrue(manifest['operand_analysis'])
         self.assertIn(f'kVuProgCatalogId[] = "{manifest["catalogue_id"]}"', text.decode())
 
-    def test_every_upload_chain_has_programs(self):
-        # VU0 images (no XGKICK) are generated like the VU1 ones: VCALLMS enters at the same entries.
-        manifest = json.loads(self.manifest.read_text())
-        self.assertGreaterEqual(manifest['vu0_images'], 1)
-        self.assertEqual(len({entry['image'] for entry in manifest['entries']}), manifest['elf_chains'])
-
     def test_every_listed_entry_is_a_program_or_names_one(self):
         manifest = json.loads(self.manifest.read_text())
         programs = {e['program'] for e in manifest['entries'] if 'program' in e}

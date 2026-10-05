@@ -17,7 +17,6 @@
 //     same composition order here.
 
 #include "rrv_hle.h"
-#include "rrv_vu_exact.h"
 #include "ps2_runtime.h"
 #include "runtime/rrv_fp_rounding.h"
 #include <cstdint>
@@ -94,9 +93,53 @@ void traceMulInputs(uint8_t* rdram, R5900Context* ctx, uint32_t dst,
                  y[0],y[1],y[2],y[3],y[4],y[5],y[6],y[7],y[8],y[9],y[10],y[11],y[12],y[13],y[14],y[15]);
 }
 
-// VU0 round-toward-zero arithmetic (flushF32, truncToF32, vuMul, vuAdd, vuSub, vuSqrt, vuDiv) and the
-// exact sceVu0MulMatrix body (mulMatVu0Exact): rrv_vu_exact.h.
-using namespace vu_exact;
+// ── VU0 round-toward-zero, without depending on the FP environment ──────────
+// PCSX2's DEFAULT_VU_FP_CONTROL_REGISTER is DAZ + FTZ + ChopZero, so every VU
+// arithmetic result truncates toward zero. Scoping `fesetround` around host
+// code does NOT reliably deliver that: without `#pragma STDC FENV_ACCESS ON`
+// the compiler may fold, hoist or reorder FP operations across the call, and
+// measurement showed exactly that (one call site matched hardware, another 1-2
+// ULP away, same function, same scope). So do the rounding explicitly.
+//
+// A float32 multiply or add is exact in double, and double is wide enough that
+// a correctly-rounded double sqrt/divide of float32 operands determines the
+// float32 result. Truncating that double toward zero is therefore the VU's
+// result, computed identically on every compiler and optimisation level.
+// The VU has no denormals: DenormalsAreZero on the way in, FlushToZero on the
+// way out. Measured, not assumed — without it the phase-7 source matrix keeps a
+// 0x00000002 where hardware has +0.
+constexpr float kSmallestNormalF32 = 1.17549435082228750797e-38f;
+
+inline float flushF32(float v) {
+    return (v != 0.0f && std::fabs(v) < kSmallestNormalF32) ? std::copysignf(0.0f, v) : v;
+}
+
+float truncToF32(double v) {
+    const float nearest = static_cast<float>(v);
+    if (!std::isfinite(nearest))
+        return nearest;
+    if (static_cast<double>(nearest) == v)
+        return flushF32(nearest);
+    // Round-to-nearest may have gone away from zero; step back one ULP if so.
+    const bool overshot = v >= 0.0 ? (static_cast<double>(nearest) > v)
+                                   : (static_cast<double>(nearest) < v);
+    return flushF32(overshot ? std::nextafterf(nearest, 0.0f) : nearest);
+}
+
+inline float vuMul(float a, float b) { return truncToF32(static_cast<double>(flushF32(a)) * static_cast<double>(flushF32(b))); }
+inline float vuAdd(float a, float b) { return truncToF32(static_cast<double>(flushF32(a)) + static_cast<double>(flushF32(b))); }
+inline float vuSub(float a, float b) { return truncToF32(static_cast<double>(flushF32(a)) - static_cast<double>(flushF32(b))); }
+inline float vuSqrt(float a) { return truncToF32(std::sqrt(std::fabs(static_cast<double>(flushF32(a))))); }
+
+// VDIV: PS2 yields +/-Fmax on a zero divisor (PCSX2 microVU_Lower.inl mVU_DIV
+// ORs in maxvals), it does not trap or produce an infinity.
+inline float vuDiv(float a, float b) {
+    a = flushF32(a);
+    b = flushF32(b);
+    if (b == 0.0f)
+        return std::copysignf(3.4028234663852886e+38f, a * b);
+    return truncToF32(static_cast<double>(a) / static_cast<double>(b));
+}
 
 // out = lhs * rhs  (column-major; identical to VU.cpp's mulVuMatrix)
 void mulMat(const float (&lhs)[16], const float (&rhs)[16], float (&out)[16]) {
@@ -125,6 +168,33 @@ void mulMatVu0(const float (&columns)[16], const float (&vectors)[16], float (&o
         acc = _mm_add_ps(acc, _mm_mul_ps(c2, _mm_set1_ps(v[2])));
         acc = _mm_add_ps(acc, _mm_mul_ps(c3, _mm_set1_ps(v[3])));
         _mm_storeu_ps(out + 4 * i, acc);
+    }
+}
+
+// Exact transcription of the generated sceVu0MulMatrix body (0x2CA250):
+//
+//   lqc2 vf4..vf7, 0x00/0x10/0x20/0x30($a1)   the four columns
+//   loop x4:
+//     lqc2      vf8, 0($a2)                   one row of coefficients
+//     vmulax.xyzw  ACC, vf4, vf8x
+//     vmadday.xyzw ACC, vf5, vf8y
+//     vmaddaz.xyzw ACC, vf6, vf8z
+//     vmaddw.xyzw  vf9, vf7, vf8w
+//     sqc2      vf9, 0($a0)
+//
+// Round-toward-zero after every multiply and every add, in this order. That
+// ordering is guest-visible: it is what produces hardware's negative zero when
+// a column term is signed and the rest are zero.
+void mulMatVu0Exact(const float (&columns)[16], const float (&rows)[16], float (&out)[16]) {
+    for (int i = 0; i < 4; ++i) {
+        const float* v = rows + 4 * i;
+        for (int j = 0; j < 4; ++j) {
+            float acc = vuMul(columns[j], v[0]);
+            acc = vuAdd(acc, vuMul(columns[4 + j], v[1]));
+            acc = vuAdd(acc, vuMul(columns[8 + j], v[2]));
+            acc = vuAdd(acc, vuMul(columns[12 + j], v[3]));
+            out[4 * i + j] = acc;
+        }
     }
 }
 

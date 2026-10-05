@@ -471,14 +471,15 @@ def main() -> int:
     emitted: dict[tuple, int] = {}       # identical programs (stubs, shared code) are emitted once
     for ci, image in enumerate(chains):
         n = len(image) // 8
-        # XGKICK exists on VU1 only: an image without one is a VU0 image (counted; its programs are
-        # generated like any other: VCALLMS enters at the same multiples of 0x10).
+        # XGKICK exists on VU1 only: an image without one is a VU0 image, and VU0
+        # micro mode keeps the compiled blocks (rrv_vu_prog_engine.inc, progEnsure).
         def is_xgkick(pc: int) -> bool:
             lower, upper = struct.unpack_from('<II', image, pc)
             return (has_lower(lower, upper) and lower_op(lower) == 0x40 and (lower & 0x3F) >= 0x3C and
                     ((lower & 0x3) | ((lower >> 4) & 0x7C)) == 0x6C)
         if not any(is_xgkick(pc) for pc in range(0, len(image), 8)):
             stats['vu0_images'] += 1
+            continue
         out.append(f'static const uint64_t vuprog_image_{ci}[] = {{')
         out.append(', '.join(f'0x{w:016x}ull' for w in struct.unpack_from(f'<{n}Q', image)))
         out.append('};\n\n')

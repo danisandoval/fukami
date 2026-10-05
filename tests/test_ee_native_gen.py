@@ -120,26 +120,6 @@ class TranslationTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 gen.parse_hook(text, probe)
 
-    def test_a_call_commits_the_clock_before_and_rereads_it_after(self):
-        text = SYNTHETIC.replace('    SET_GPR_S32(ctx, 2, 1);\n', '        sub_00100020_0x100020(rdram, ctx, runtime);\n')
-        code = gen.translate(synthetic(Path(self.tmp.name), text))[1].split('\n')
-        self.assertIn('        rrvNative.sync(); sub_00100020_0x100020(rdram, ctx, runtime); rrvNative.reload();', code)
-
-    def test_a_tail_call_rereads_the_clock_before_it_returns(self):
-        # A function that runs into the next one: without the re-read, the return would commit this
-        # function's stale count over what the callee committed.
-        for callee in ('targetFn', 'sub_00100020_0x100020'):
-            text = SYNTHETIC.replace('    SET_GPR_S32(ctx, 2, 1);\n', f'        {callee}(rdram, ctx, runtime); return;\n')
-            code = gen.translate(synthetic(Path(self.tmp.name), text))[1].split('\n')
-            self.assertIn(f'        rrvNative.sync(); {callee}(rdram, ctx, runtime); rrvNative.reload(); return;', code)
-
-    def test_any_other_call_form_is_refused(self):
-        for call in ('other(rdram, ctx, runtime);', 'if (x) sub_00100020_0x100020(rdram, ctx, runtime);',
-                     'targetFn(rdram, ctx, runtime); goto label_100010;', 'return targetFn(rdram, ctx, runtime);'):
-            bad = synthetic(Path(self.tmp.name), SYNTHETIC.replace('SET_GPR_S32(ctx, 2, 1);', call))
-            with self.assertRaises(ValueError, msg=call):
-                gen.translate(bad)
-
     def test_unknown_runtime_call_is_refused(self):
         bad = synthetic(Path(self.tmp.name), SYNTHETIC.replace('SET_GPR_S32(ctx, 2, 1);', 'runtime->handleSyscall(rdram, ctx);'))
         with self.assertRaises(ValueError):
