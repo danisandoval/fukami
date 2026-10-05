@@ -3,10 +3,11 @@
 // Asset-free: no game data. `--bench` also prints the cost of one sceVu0MulMatrix body, old and new.
 //
 // One case is the compiler's, not the source's: when two operands of one multiply or add are NaN, the
-// result is the instruction's first operand, and the compiler chooses the order. With clang, which builds
-// the product on every platform, old and new agree on that choice too (ARM64 and x86-64), and the test
-// requires it. With another compiler a result that is a NaN on both sides but not the same NaN is counted
-// and reported, not failed: g++ 13 on x86-64 differs in 57,112 of the checks at -O2 (2026-10-05).
+// result is the instruction's first operand, and the compiler chooses the order. A result that is a NaN on
+// both sides but not the same NaN is counted and reported, not failed, on every compiler: it agreed on the
+// author's Mac with Apple clang (ARM64) and in a Linux container (x86-64), but not with the clang of
+// GitHub's macOS ARM64 runner (24,049 of 371,565,132 checks, the printed ones all NaN against another NaN,
+// 2026-10-05) nor with g++ 13 on x86-64 (57,112 checks at -O2). Every other difference still fails.
 #include "rrv_vu_exact.h"
 
 #include <chrono>
@@ -59,11 +60,7 @@ using rrv_hle::vu_exact::bitsOf;
 using rrv_hle::vu_exact::floatOf;
 
 uint64_t g_checks = 0, g_failures = 0, g_nanChoice = 0;
-#if defined(__clang__)
-constexpr bool kNanChoiceIsChecked = true;
-#else
 constexpr bool kNanChoiceIsChecked = false;
-#endif
 bool isNan(uint32_t u) { return (u & 0x7FFFFFFFu) > 0x7F800000u; }
 uint64_t g_seed = 0x9E3779B97F4A7C15ull;
 uint64_t next64() {
@@ -208,7 +205,7 @@ int main(int argc, char** argv) {
     }
 
     if (!kNanChoiceIsChecked)
-        std::printf("vu_exact: %llu results are a different NaN (this compiler's operand order; not checked)\n",
+        std::printf("vu_exact: %llu results are a different NaN (the compiler's operand order; not checked)\n",
                     (unsigned long long)g_nanChoice);
     std::printf("vu_exact: %llu checks, %llu failures\n", (unsigned long long)g_checks, (unsigned long long)g_failures);
     return g_failures == 0 ? 0 : 1;
