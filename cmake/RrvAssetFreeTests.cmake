@@ -37,6 +37,19 @@ target_include_directories(rrv-ring-copy-tests PRIVATE
     "${CMAKE_SOURCE_DIR}/third_party/ps2recomp/ps2xRuntime/include")
 add_test(NAME rrv-ring-copy COMMAND rrv-ring-copy-tests)
 
+# rrv_hle::vu_exact (src/hle/rrv_vu_exact.h): the libvu0 host arithmetic (round toward zero, no denormals) and the
+# sceVu0MulMatrix body, bit for bit against the comparison-and-nextafterf formulation they replace.
+add_executable(rrv-vu-exact-tests
+    "${CMAKE_SOURCE_DIR}/tests/vu_exact_tests.cpp")
+target_include_directories(rrv-vu-exact-tests PRIVATE "${CMAKE_SOURCE_DIR}/src/hle")
+add_test(NAME rrv-vu-exact COMMAND rrv-vu-exact-tests)
+
+# rrv::host::CursorIdle (src/host/rrv_cursor_idle.h): when the full-screen product window hides the pointer.
+add_executable(rrv-cursor-idle-tests
+    "${CMAKE_SOURCE_DIR}/tests/cursor_idle_tests.cpp")
+target_include_directories(rrv-cursor-idle-tests PRIVATE "${CMAKE_SOURCE_DIR}/src/host")
+add_test(NAME rrv-cursor-idle COMMAND rrv-cursor-idle-tests)
+
 # VU lean entry (VU1Interpreter::aotLean, src/vu-aot/rrv_vu_aot_engine.inc) against execute(), on real
 # instruction sequences from the AOT catalogue, for both units. Compiles the runtime's VU source whole
 # (with three external symbols stubbed), so it needs the committed catalogue and a SIMD backend: native SSE
@@ -343,6 +356,8 @@ set(RRV_ASSET_FREE_REQUIRED_TARGETS
     rrv-fukami-menu-tests
     rrv-fp-rounding-tests
     rrv-ring-copy-tests
+    rrv-cursor-idle-tests
+    rrv-vu-exact-tests
     rrv-launch-env)
 foreach(RRV_ASSET_FREE_TARGET IN LISTS RRV_ASSET_FREE_REQUIRED_TARGETS)
     # a target of the harness file is absent from a public checkout (scripts/asset_free_suite.json is pruned to match)
@@ -367,7 +382,7 @@ rrv_set_existing_tests_properties(
     rrv-gate3-ee-timers rrv-gate3-intc rrv-gate3-guest-rtc
     rrv-gate3-compile-workload rrv-gate3-hle-cost-inventory rrv-pad-rumble
     rrv-wait-idle rrv-vu-eatan rrv-vu-aot rrv-vu-prog rrv-make-replay rrv-check-docs rrv-launch-env-golden rrv-source-ownership rrv-ee-native-gen rrv-pcsx2-patch-series rrv-fukami-settings rrv-fukami-menu
-    rrv-fp-rounding rrv-ring-copy rrv-vu-codegen-writers
+    rrv-fp-rounding rrv-ring-copy rrv-cursor-idle rrv-vu-exact rrv-vu-codegen-writers
     PROPERTIES LABELS portable-asset-free)
 rrv_set_existing_tests_properties(
     rrv-asset-free-runner-self-test rrv-m2-initial-state-controls

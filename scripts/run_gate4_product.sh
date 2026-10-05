@@ -3,7 +3,7 @@
 # kept Gate-4 performance changes (owner decision 2026-09-26; see
 # docs/evidence/PRODUCT_DEFAULT_GATE3_GATE4_2026-09-26.md).
 #
-# Usage: scripts/run_gate4_product.sh [--headless] [--unpaced] [--inline] [--render-mode field|full] [--scale 1..8] [--no-aa1] [--fxaa] [--cas 0..100] [--aniso 0|2|4|8|16] [--no-mipmap] [--no-analog] [--no-rumble] [--car-lod FACTOR] [--draw-distance N] [--no-fast-unpack] [--no-native-code] [--ratio 4:3|16:9|16:10|21:9] [--widescreen] [--hud fixed|race|stretch|no47] [--aspect auto|4:3|16:9|16:10|21:9|stretch] [--window WxH] [--fullscreen] [--integer-scaling] [--no-present-pacing] [--workload DIR] [--replay DIR [--from START]] [--runtime NAME] [/path/to/user-owned.elf]
+# Usage: scripts/run_gate4_product.sh [--headless] [--unpaced] [--inline] [--render-mode field|full] [--scale 1..8] [--no-aa1] [--fxaa] [--cas 0..100] [--aniso 0|2|4|8|16] [--texture-filter ps2|bilinear] [--no-mipmap] [--no-analog] [--no-rumble] [--car-lod FACTOR] [--draw-distance N] [--no-fast-unpack] [--no-native-code] [--ratio 4:3|16:9|16:10|21:9] [--widescreen] [--hud fixed|race|stretch|no47] [--aspect auto|4:3|16:9|16:10|21:9|stretch] [--window WxH] [--fullscreen] [--integer-scaling] [--no-present-pacing] [--workload DIR] [--replay DIR [--from START]] [--runtime NAME] [/path/to/user-owned.elf]
 #
 # --render-mode full|field: full (the default, owner decision 2026-09-26) is
 # Gate-6 full-frame rendering at 448+ real rows; field is the Gate-4 field
@@ -16,6 +16,10 @@
 # N% (0 = off). Both are presentation-only, windowed sessions only, off by
 # default (owner decision 2026-09-29).
 # --aniso N (2, 4, 8, 16) turns on anisotropic texture filtering (default off);
+# --texture-filter bilinear smooths every 3D texture (PCSX2's forced bilinear,
+# sprites excluded; RRV_PCSX2_GS_TEXTURE_FILTER). RR5 asks for point sampling on
+# its car textures only, so this is what smooths the cars. ps2 (default) is what
+# the game asks. Host side only: rendered pixels change, the guest does not.
 # --no-mipmap turns off PCSX2's GS mipmap emulation (default on, full mode).
 # --no-analog makes the controller a digital-only pad (no sticks or trigger
 # pressure); --no-rumble turns off vibration. Both default on (owner decision
@@ -82,7 +86,7 @@
 set -eu
 root="${0:A:h:h}"
 runtime_name="game001-gate9-v155-9cdff06"
-usage='Usage: ./run.sh [--headless] [--unpaced] [--inline] [--render-mode field|full] [--scale 1..8] [--no-aa1] [--fxaa] [--cas 0..100] [--aniso 0|2|4|8|16] [--no-mipmap] [--no-analog] [--no-rumble] [--car-lod FACTOR] [--draw-distance N] [--no-fast-unpack] [--no-native-code]
+usage='Usage: ./run.sh [--headless] [--unpaced] [--inline] [--render-mode field|full] [--scale 1..8] [--no-aa1] [--fxaa] [--cas 0..100] [--aniso 0|2|4|8|16] [--texture-filter ps2|bilinear] [--no-mipmap] [--no-analog] [--no-rumble] [--car-lod FACTOR] [--draw-distance N] [--no-fast-unpack] [--no-native-code]
                 [--ratio 4:3|16:9|16:10|21:9] [--widescreen] [--hud fixed|race|stretch|no47] [--aspect auto|4:3|16:9|16:10|21:9|stretch] [--window WxH] [--fullscreen] [--integer-scaling] [--no-present-pacing]
                 [--workload DIR] [--replay DIR [--from START]] [--runtime NAME] [--config FILE] [/path/to/user-owned.elf]
        Defaults come from rrv.ini (edit it); flags override it for one launch.

@@ -244,12 +244,15 @@ void PS2Runtime::gate3RecordPadV1(uint64_t cycle) {
     // Recording is an input source, not a diagnostic: the admitted sample is
     // the one parsed back from the logged text, exactly as the loader parses
     // it, so a replay of the log admits identical state at the same cycle.
+    // RRV_GATE3_RECORD_PAD=<path> admits and logs; RRV_GATE3_LIVE_PAD=1 admits the same samples and writes no file
+    // (the app with logging off). With neither set nothing is admitted (replays carry their own pad).
+    static const bool live=[]{const char* v=std::getenv("RRV_GATE3_LIVE_PAD");return v&&*v&&*v!='0';}();
     static FILE* out=[]{const char* v=std::getenv("RRV_GATE3_RECORD_PAD");
         if(!v||!*v)return static_cast<FILE*>(nullptr);
         FILE* f=std::fopen(v,"w");
         if(!f)throw std::runtime_error("Gate3 pad recording: cannot open output");
         return f;}();
-    if(!out || !m_gate3GuestWorkloadV1 || gate3AtCutV1())return;
+    if((!out && !live) || !m_gate3GuestWorkloadV1 || gate3AtCutV1())return;
     if(!m_gate3GuestWorkloadV1->pad.empty())
         throw std::logic_error("Gate3 pad recording needs a workload without pad admissions");
     static uint64_t sequence=0;
@@ -281,6 +284,7 @@ void PS2Runtime::gate3RecordPadV1(uint64_t cycle) {
             cur.capabilities.rumble==sample.capabilities.rumble && cur.deadzone==sample.deadzone;
         if(same)continue;
         m_gate3AdmittedPadV1[port]=sample;
+        if(!out)continue;
         std::fprintf(out,"{\"cycle\":%llu,\"sequence\":%llu,\"port\":%u,\"sample\":\"%s\",\"start\":%llu}\n",
             (unsigned long long)cycle,(unsigned long long)++sequence,port,text,
             (unsigned long long)gate3TemporalV1().starts());

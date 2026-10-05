@@ -824,17 +824,20 @@ void VU1Interpreter::progEnsure()
     m_progInit = true;
     // RRV_VU_PROG: 1 / 0 select it; unset, it follows the `native_code` setting
     // (RRV_RR5_NATIVE_HOT), which is how the product enables host-only native
-    // code. VU1 only: VU0 micro mode runs a few dozen slots per call from EE
-    // code and keeps the compiled blocks.
+    // code. VU0 micro mode (VCALLMS from EE code, a few dozen slots per call:
+    // one per car vertex) takes the same switch; RRV_VU0_PROG=0 keeps the
+    // compiled blocks for VU0 alone, RRV_VU0_PROG=1 turns VU0 on alone.
     bool on = vuAotEnvOn("RRV_RR5_NATIVE_HOT", false);
     if (const char *v = std::getenv("RRV_VU_PROG"); v && v[0])
         on = !(v[0] == '0' && v[1] == '\0');
+    if (m_isVu0)
+        if (const char *v = std::getenv("RRV_VU0_PROG"); v && v[0])
+            on = !(v[0] == '0' && v[1] == '\0');
     m_progVerify = vuAotEnvOn("RRV_VU_PROG_VERIFY", false);
-    m_progEnabled = (on || m_progVerify) && !m_isVu0 && kVuProgCount != 0u && vuClipExactEnabled();
-    if (!m_isVu0)
-        std::fprintf(stderr, "[vu-prog] %s for vu1: catalogue %s, %zu programs%s\n",
-                     m_progEnabled ? "enabled" : "disabled", kVuProgCatalogId, kVuProgCount,
-                     m_progVerify ? ", RRV_VU_PROG_VERIFY=1 (differential gate)" : "");
+    m_progEnabled = (on || m_progVerify) && kVuProgCount != 0u && vuClipExactEnabled();
+    std::fprintf(stderr, "[vu-prog] %s for %s: catalogue %s, %zu programs%s\n",
+                 m_progEnabled ? "enabled" : "disabled", m_isVu0 ? "vu0" : "vu1", kVuProgCatalogId, kVuProgCount,
+                 m_progVerify ? ", RRV_VU_PROG_VERIFY=1 (differential gate)" : "");
 }
 
 // RRV_VU_PROG_CAPTURE=<dir> (developer tool; the directory must be under local/:
@@ -876,12 +879,12 @@ static void vuProgCapture(const VU1State &state, const uint8_t *vuCode, uint32_t
 
 void VU1Interpreter::progReport(const char *why)
 {
-    if (m_isVu0 || !m_progInit || (m_progCalls | m_progNoProgram) == 0u)
+    if (!m_progInit || (m_progCalls | m_progNoProgram) == 0u)
         return;
     std::fprintf(stderr,
-                 "[vu-prog] vu1 %s: %llu invocations native (%llu slots), %llu handed over to blocks, "
+                 "[vu-prog] %s %s: %llu invocations native (%llu slots), %llu handed over to blocks, "
                  "%llu without a program\n",
-                 why, (unsigned long long)m_progCalls, (unsigned long long)m_progSlots,
+                 m_isVu0 ? "vu0" : "vu1", why, (unsigned long long)m_progCalls, (unsigned long long)m_progSlots,
                  (unsigned long long)m_progHandOvers, (unsigned long long)m_progNoProgram);
 }
 
@@ -933,9 +936,14 @@ bool VU1Interpreter::progVerified(const ProgEntry *prog, uint8_t *vuCode, uint32
                                   uint8_t *vuData, uint32_t dataSize, uint32_t startPC,
                                   uint32_t maxCycles, uint32_t &ran)
 {
-    static uint64_t s_invocations = 0;
-    static uint64_t s_mismatches = 0;
-    static uint32_t s_reported = 0;
+    // One set of counters per unit: VU0 is verified on the EE thread, VU1 on its owner thread.
+    static uint64_t s_invocationsOf[2] = {0, 0};
+    static uint64_t s_mismatchesOf[2] = {0, 0};
+    static uint32_t s_reportedOf[2] = {0, 0};
+    uint64_t &s_invocations = s_invocationsOf[m_isVu0 ? 0 : 1];
+    uint64_t &s_mismatches = s_mismatchesOf[m_isVu0 ? 0 : 1];
+    uint32_t &s_reported = s_reportedOf[m_isVu0 ? 0 : 1];
+    const char *const unit = m_isVu0 ? "vu0" : "vu1";
 
     const VU1State state0 = m_state;
     FlagSnapshot ring0[4];
@@ -998,8 +1006,8 @@ bool VU1Interpreter::progVerified(const ProgEntry *prog, uint8_t *vuCode, uint32
         {
             ++s_reported;
             std::fprintf(stderr,
-                         "[vu-prog-verify] MISMATCH #%llu program %u entry=%04x (state=%s data=%s kicks=%s %zu/%zu)\n",
-                         (unsigned long long)s_mismatches, prog->id, startPC, sameState ? "ok" : "DIFF",
+                         "[vu-prog-verify] %s MISMATCH #%llu program %u entry=%04x (state=%s data=%s kicks=%s %zu/%zu)\n",
+                         unit, (unsigned long long)s_mismatches, prog->id, startPC, sameState ? "ok" : "DIFF",
                          sameData ? "ok" : "DIFF", sameKicks ? "ok" : "DIFF", kicks1.size(), kicks2.size());
             for (uint32_t r = 0; r < 32u; ++r)
                 if (std::memcmp(m_state.vf[r], state1.vf[r], 16) != 0)
@@ -1048,7 +1056,7 @@ bool VU1Interpreter::progVerified(const ProgEntry *prog, uint8_t *vuCode, uint32
         }
     }
     if ((s_invocations & 0xFFFFFu) == 0u || (s_mismatches != 0u && (s_invocations & 0x3FFFu) == 0u))
-        std::fprintf(stderr, "[vu-prog-verify] %llu invocations, %llu mismatches\n",
+        std::fprintf(stderr, "[vu-prog-verify] %s %llu invocations, %llu mismatches\n", unit,
                      (unsigned long long)s_invocations, (unsigned long long)s_mismatches);
 
     // The game keeps pass 1.

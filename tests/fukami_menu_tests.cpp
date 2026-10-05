@@ -250,6 +250,7 @@ void testDrawsEveryMenuSetting(const fs::path &ini)
         expect(called(section), std::string("section drawn: ") + section);
     expect(called("slider Internal resolution 4 1..8"), "integer slider shows the file's value and range");
     expect(called("combo Widescreen 16:9 of 4"), "combo shows the file's choice");
+    expect(called("combo Texture filtering PS2 (stock) of 2"), "the texture filter shows the stock choice by name");
     expect(called("checkbox Split VU1 / GS 1") && called("slider Pacer spin (ms) 0 0..17"),
            "the VU1/GS split and the pacer spin are menu settings (schema defaults without a default ini)");
     for (const char *hidden : {"Unpaced", "Inline", "Headless", "Developer mode"})

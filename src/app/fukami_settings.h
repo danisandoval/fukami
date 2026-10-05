@@ -102,6 +102,7 @@ struct LaunchConfig
     int scale = 4;
     bool aa1 = true, fxaa = false;
     int cas = 0, aniso = 0;
+    std::string textureFilter = "ps2";
     bool mipmap = true;
     // [input]
     bool analog = true, rumble = true;
@@ -109,6 +110,7 @@ struct LaunchConfig
     std::string carLod = "4";
     int drawDistance = 0;
     bool fastUnpack = true, nativeCode = true;
+    bool logging = false; // [game] logging: the app launchers write a session folder only when true
     // [timing]
     bool unpaced = false, inlineExecution = false, headless = false;
     bool splitGs = false; // VU1 and GS on two threads (RRV_VU1GS_SPLIT=1); owner-async only
@@ -163,7 +165,7 @@ struct LaunchPaths
 {
     std::filesystem::path boundWorkload; // .../bound-workload.txt
     std::filesystem::path memoryCard;    // RRV_GATE3_MC_ROOT
-    std::filesystem::path session;       // this session's folder
+    std::filesystem::path session;       // this session's folder; empty: none (no pad record, no start clocks)
     std::filesystem::path libraries;     // DYLD_LIBRARY_PATH
     std::filesystem::path menuIni;       // RRV_FUKAMI_INI (the in-game menu's file); empty: none
     bool recordPad = true;               // false for a replay: recorded input, no pad log
@@ -220,6 +222,7 @@ template <class Getter> LaunchConfig LaunchConfig::fromEnvironment(Getter get)
     c.fxaa = text("RRV_PCSX2_GS_FXAA") == "1";
     c.cas = set("RRV_PCSX2_GS_CAS") ? std::atoi(text("RRV_PCSX2_GS_CAS").c_str()) : 0;
     c.aniso = set("RRV_PCSX2_GS_ANISO") ? std::atoi(text("RRV_PCSX2_GS_ANISO").c_str()) : 0;
+    c.textureFilter = set("RRV_PCSX2_GS_TEXTURE_FILTER") ? text("RRV_PCSX2_GS_TEXTURE_FILTER") : "ps2";
     c.mipmap = text("RRV_PCSX2_GS_FULL_HWMIPMAP") != "0";
     c.analog = text("RRV_PAD_ANALOG") != "0";
     c.rumble = text("RRV_PAD_RUMBLE") != "0";

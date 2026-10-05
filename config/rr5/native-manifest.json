@@ -1,7 +1,7 @@
 {
  "schema": 1,
  "generator": "tools/ee-native/ee_native_gen.py",
- "generator_version": 2,
+ "generator_version": 3,
  "generation_manifest_sha256": "eb1c6078f6c7ff89d28144beeebda3901225def392c5f29f8ff2780ad87880f5",
  "functions": [
   {

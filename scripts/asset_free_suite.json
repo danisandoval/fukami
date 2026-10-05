@@ -129,6 +129,14 @@
     {
       "name": "rrv-fukami-menu",
       "target": "rrv-fukami-menu-tests"
+    },
+    {
+      "name": "rrv-cursor-idle",
+      "target": "rrv-cursor-idle-tests"
+    },
+    {
+      "name": "rrv-vu-exact",
+      "target": "rrv-vu-exact-tests"
     }
   ],
   "input_dependent": [

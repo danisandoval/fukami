@@ -207,23 +207,26 @@ bool setUpDisc(const fs::path &disc)
     {
         const int choice = alert(
             "Welcome to Fukami",
-            "Fukami needs your own copy of Ridge Racer V (USA, SLUS-20002) as a CHD file.\n\n"
+            "Fukami needs your own copy of Ridge Racer V (USA, SLUS-20002) as a CHD file, or a .cue/.bin pair.\n\n"
             "It unpacks the game files once (about " +
                 std::to_string((fukami::disc::requiredBytes() + 999999) / 1000000) +
-                " MB) into your Application Support folder. You can delete the CHD afterwards.",
-            {"Choose CHD…", "Quit"});
+                " MB) into your Application Support folder. You can delete the disc image afterwards.",
+            {"Choose Disc Image…", "Quit"});
         if (choice != 0)
             return false;
         fs::path chd;
         @autoreleasepool {
             NSOpenPanel *open = [NSOpenPanel openPanel];
-            open.title = @"Choose your Ridge Racer V (USA) CHD";
+            open.title = @"Choose your Ridge Racer V (USA) disc image (CHD, CUE or BIN)";
             open.canChooseFiles = YES;
             open.canChooseDirectories = NO;
             open.allowsMultipleSelection = NO;
-            UTType *chdType = [UTType typeWithFilenameExtension:@"chd"];
-            if (chdType)
-                open.allowedContentTypes = @[ chdType ];
+            NSMutableArray<UTType *> *types = [NSMutableArray array];
+            for (NSString *ext in @[ @"chd", @"cue", @"bin" ])
+                if (UTType *type = [UTType typeWithFilenameExtension:ext])
+                    [types addObject:type];
+            if (types.count)
+                open.allowedContentTypes = types;
             if ([open runModal] != NSModalResponseOK || open.URLs.count == 0)
                 continue;
             chd = open.URLs.firstObject.fileSystemRepresentation;
@@ -231,7 +234,7 @@ bool setUpDisc(const fs::path &disc)
         const auto probe = fukami::disc::probeRr5Usa(chd);
         if (probe.status != fukami::disc::Status::ok)
         {
-            alert("This CHD can't be used", probe.message, {"OK"}, NSAlertStyleWarning);
+            alert("This disc image can't be used", probe.message, {"OK"}, NSAlertStyleWarning);
             continue;
         }
         const auto result = extractWithProgress(chd, disc);
@@ -334,12 +337,19 @@ void launchFromBundle(const fs::path &exe, const fs::path &contents)
     if (!doc)
         quit(1);
 
-    const fs::path session = support / "sessions" / (timestamp() + "-" + std::to_string(getpid()));
-    fs::create_directories(session, ec);
+    // Logging off (the default): no session folder, no file. The game's output goes to /dev/null.
+    const bool logging = fukami::settings::LaunchConfig::fromIni(*doc, false).logging;
+    fs::path session;
+    if (logging)
+    {
+        session = support / "sessions" / (timestamp() + "-" + std::to_string(getpid()));
+        fs::create_directories(session, ec);
+    }
     fs::create_directories(mc, ec);
-    // The card as it was at launch, so this session can become a replay later
-    // (same as the developer launcher).
-    fs::copy(mc, session / "mc-start", fs::copy_options::recursive, ec);
+    if (logging)
+        // The card as it was at launch, so this session can become a replay later
+        // (same as the developer launcher).
+        fs::copy(mc, session / "mc-start", fs::copy_options::recursive, ec);
 
     fukami::settings::LaunchPaths paths;
     paths.boundWorkload = resources / "workload" / "bound-workload.txt";
@@ -378,8 +388,10 @@ void launchFromBundle(const fs::path &exe, const fs::path &contents)
     char *argv[] = {exePath.data(), elf.data(), nullptr};
 
     // The runtime's diagnostic output goes to the session logs, as with ./run.sh.
-    const int out = open((session / "stdout.log").c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    const int err = open((session / "stderr.log").c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    const int out = logging ? open((session / "stdout.log").c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644)
+                            : open("/dev/null", O_WRONLY | O_CLOEXEC);
+    const int err = logging ? open((session / "stderr.log").c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644)
+                            : open("/dev/null", O_WRONLY | O_CLOEXEC);
     if (out >= 0)
         dup2(out, STDOUT_FILENO);
     if (err >= 0)

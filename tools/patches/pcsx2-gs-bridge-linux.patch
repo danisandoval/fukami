@@ -42,3 +42,194 @@ index d3dad7e..229ef8c 100644
  	MoveToNextCommandBuffer();
  
  	InvalidateCachedState();
+diff --git a/pcsx2/GS/GSXXH.cpp b/pcsx2/GS/GSXXH.cpp
+index 0000000..0000000 100644
+--- a/pcsx2/GS/GSXXH.cpp
++++ b/pcsx2/GS/GSXXH.cpp
+@@ -30,6 +30,17 @@
+ 	return XXH3_64bits_update(static_cast<XXH3_state_t*>(state), static_cast<const xxh_u8*>(data), len);
+ }
+ 
++// RRV (Linux/Vulkan bridge): consumes one whole 256-byte block into a streaming state straight from its source,
++// exactly as XXH3_64bits_update() does when it consumes its internal buffer, without first copying the block into
++// that buffer. The caller (BlockHashAccumulate, GSTextureCache.cpp) keeps the state's invariants.
++void CURRENT_ISA::GSXXH3_64_Block256(void* state, const void* block)
++{
++	XXH3_state_t* st = static_cast<XXH3_state_t*>(state);
++	const unsigned char* secret = (st->extSecret == NULL) ? st->customSecret : st->extSecret;
++	XXH3_consumeStripes(st->acc, &st->nbStripesSoFar, st->nbStripesPerBlock, static_cast<const xxh_u8*>(block),
++		256 / XXH_STRIPE_LEN, secret, st->secretLimit, XXH3_accumulate, XXH3_scrambleAcc);
++}
++
+ u64 CURRENT_ISA::GSXXH3_64_Digest(void* state)
+ {
+ 	return XXH3_64bits_digest(static_cast<XXH3_state_t*>(state));
+diff --git a/pcsx2/GS/GSXXH.h b/pcsx2/GS/GSXXH.h
+index 0000000..0000000 100644
+--- a/pcsx2/GS/GSXXH.h
++++ b/pcsx2/GS/GSXXH.h
+@@ -14,6 +14,7 @@
+ MULTI_ISA_DEF(u64 GSXXH3_64_Long(const void* data, size_t len);)
+ MULTI_ISA_DEF(u32 GSXXH3_64_Update(void* state, const void* data, size_t len);)
+ MULTI_ISA_DEF(u64 GSXXH3_64_Digest(void* state);)
++MULTI_ISA_DEF(void GSXXH3_64_Block256(void* state, const void* block);)
+ 
+ static inline u64 __forceinline GSXXH3_64bits(const void* data, size_t len)
+ {
+diff --git a/pcsx2/GS/MultiISA.h b/pcsx2/GS/MultiISA.h
+index 0000000..0000000 100644
+--- a/pcsx2/GS/MultiISA.h
++++ b/pcsx2/GS/MultiISA.h
+@@ -83,4 +83,5 @@
+ 	extern u64 (&GSXXH3_64_Long)(const void* data, size_t len);
+ 	extern u32 (&GSXXH3_64_Update)(void* state, const void* data, size_t len);
+ 	extern u64 (&GSXXH3_64_Digest)(void* state);
++	extern void (&GSXXH3_64_Block256)(void* state, const void* block);
+ }
+diff --git a/pcsx2/GS/MultiISA.cpp b/pcsx2/GS/MultiISA.cpp
+index 0000000..0000000 100644
+--- a/pcsx2/GS/MultiISA.cpp
++++ b/pcsx2/GS/MultiISA.cpp
+@@ -104,3 +104,4 @@
+ u64 (&MultiISAFunctions::GSXXH3_64_Long)(const void* data, size_t len) = MULTI_ISA_SELECT(GSXXH3_64_Long);
+ u32 (&MultiISAFunctions::GSXXH3_64_Update)(void* state, const void* data, size_t len) = MULTI_ISA_SELECT(GSXXH3_64_Update);
+ u64 (&MultiISAFunctions::GSXXH3_64_Digest)(void* state) = MULTI_ISA_SELECT(GSXXH3_64_Digest);
++void (&MultiISAFunctions::GSXXH3_64_Block256)(void* state, const void* block) = MULTI_ISA_SELECT(GSXXH3_64_Block256);
+diff --git a/pcsx2/GS/Renderers/HW/GSTextureCache.cpp b/pcsx2/GS/Renderers/HW/GSTextureCache.cpp
+index 0000000..0000000 100644
+--- a/pcsx2/GS/Renderers/HW/GSTextureCache.cpp
++++ b/pcsx2/GS/Renderers/HW/GSTextureCache.cpp
+@@ -9111,26 +9111,64 @@
+ 	return region;
+ }
+ 
+-using BlockHashState = XXH3_state_t;
++// RRV (Linux/Vulkan bridge): the same stock XXH3 stream hash, without the copy of every 256-byte GS block into the
++// streaming state's buffer (libc memmove was 6% of the GS thread in the 14-car race start on the Steam Deck,
++// 119 of 187 samples from GSXXH3_64_Update; 2026-10-05). XXH3_64bits_update() holds each block in its buffer
++// until the next one arrives and then consumes the buffer. Here the previous block stays where it is (GS local
++// memory; nothing writes it while a texture is hashed), is consumed in place when the next block arrives, and the
++// final block is put in the buffer at the end, which is the state the stock update leaves. Any other update, and a
++// block that arrives when the buffer is not empty, goes through the stock update. The values are bit-identical.
++struct BlockHashState
++{
++	XXH3_state_t st;
++	const u8* pending; // a whole block that counts as "in the buffer" and is not copied there yet
++};
+ 
+ __fi static void BlockHashReset(BlockHashState& st)
+ {
+-	XXH3_64bits_reset(&st);
++	XXH3_64bits_reset(&st.st);
++	st.pending = nullptr;
++}
++
++__fi static void BlockHashFlush(BlockHashState& st)
++{
++	if (!st.pending)
++		return;
++	memcpy(st.st.buffer, st.pending, GS_BLOCK_SIZE);
++	st.st.bufferedSize = GS_BLOCK_SIZE;
++	st.pending = nullptr;
+ }
+ 
+ __fi static void BlockHashAccumulate(BlockHashState& st, const u8* bp)
+ {
+-	GSXXH3_64bits_update(&st, bp, GS_BLOCK_SIZE);
++	static_assert(GS_BLOCK_SIZE == 256 && XXH3_INTERNALBUFFER_SIZE == 256);
++	if (st.pending)
++	{
++		MultiISAFunctions::GSXXH3_64_Block256(&st.st, st.pending);
++		st.pending = bp;
++		st.st.totalLen += GS_BLOCK_SIZE;
++	}
++	else if (st.st.bufferedSize == 0)
++	{
++		st.pending = bp;
++		st.st.totalLen += GS_BLOCK_SIZE;
++	}
++	else
++	{
++		GSXXH3_64bits_update(&st.st, bp, GS_BLOCK_SIZE);
++	}
+ }
+ 
+ __fi static void BlockHashAccumulate(BlockHashState& st, const u8* bp, u32 size)
+ {
+-	GSXXH3_64bits_update(&st, bp, size);
++	BlockHashFlush(st);
++	GSXXH3_64bits_update(&st.st, bp, size);
+ }
+ 
+ __fi static GSTextureCache::HashType FinishBlockHash(BlockHashState& st)
+ {
+-	return GSXXH3_64bits_digest(&st);
++	BlockHashFlush(st);
++	return GSXXH3_64bits_digest(&st.st);
+ }
+ 
+ static bool HashTextureLevel(const GIFRegTEX0& TEX0, const GIFRegTEXA& TEXA, GSTextureCache::SourceRegion region, BlockHashState& hash_st)
+diff --git a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.h b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.h
+index 0000000..0000000 100644
+--- a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.h
++++ b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.h
+@@ -461,6 +461,15 @@
+ 	std::unordered_map<GSHWDrawConfig::PSSelector, VkShaderModule, GSHWDrawConfig::PSSelectorHash>
+ 		m_tfx_fragment_shaders;
+ 	std::unordered_map<PipelineSelector, VkPipeline, PipelineSelectorHash> m_tfx_pipelines;
++	// RRV GS bridge (Linux): a direct-mapped front for m_tfx_pipelines. GetTFXPipeline runs once per draw and the
++	// map's modulo and node chase were 0.25-0.4 ms per start of the GS thread in the 14-car race start (Steam Deck,
++	// 2026-10-05). Pipelines are never destroyed before DestroyResources(), so an entry cannot go stale there.
++	struct RrvPipelineCacheEntry
++	{
++		PipelineSelector sel;
++		VkPipeline pipeline = VK_NULL_HANDLE;
++	};
++	std::array<RrvPipelineCacheEntry, 512> m_rrv_pipeline_cache;
+ 
+ 	VkRenderPass m_utility_color_render_pass_load = VK_NULL_HANDLE;
+ 	VkRenderPass m_utility_color_render_pass_clear = VK_NULL_HANDLE;
+diff --git a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
+index 0000000..0000000 100644
+--- a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
++++ b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
+@@ -4798,6 +4798,8 @@
+ 
+ 	for (auto& it : m_tfx_pipelines)
+ 		vkDestroyPipeline(m_device, it.second, nullptr);
++	for (RrvPipelineCacheEntry& entry : m_rrv_pipeline_cache)
++		entry.pipeline = VK_NULL_HANDLE;
+ 	for (auto& it : m_tfx_fragment_shaders)
+ 		vkDestroyShaderModule(m_device, it.second, nullptr);
+ 	for (auto& it : m_tfx_vertex_shaders)
+@@ -5164,12 +5166,26 @@
+ 
+ VkPipeline GSDeviceVK::GetTFXPipeline(const PipelineSelector& p)
+ {
++	RrvPipelineCacheEntry& front = m_rrv_pipeline_cache[PipelineSelectorHash()(p) % m_rrv_pipeline_cache.size()];
++	if (front.pipeline != VK_NULL_HANDLE && front.sel == p)
++		return front.pipeline;
++
++	VkPipeline pipeline;
+ 	const auto it = m_tfx_pipelines.find(p);
+ 	if (it != m_tfx_pipelines.end())
+-		return it->second;
+-
+-	VkPipeline pipeline = CreateTFXPipeline(p);
+-	m_tfx_pipelines.emplace(p, pipeline);
++	{
++		pipeline = it->second;
++	}
++	else
++	{
++		pipeline = CreateTFXPipeline(p);
++		m_tfx_pipelines.emplace(p, pipeline);
++	}
++	if (pipeline != VK_NULL_HANDLE)
++	{
++		front.sel = p;
++		front.pipeline = pipeline;
++	}
+ 	return pipeline;
+ }
+ 

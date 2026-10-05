@@ -46,7 +46,10 @@ fi
 echo "== bridge $bridge (about 25 minutes)"
 if [[ ! -f "$bridge/rrv-pcsx2-gs-bridge-manifest.json" ]]; then
     rm -rf "$bridge" "$bridge"-source-*
-    in_box "$root" "CMAKE_BUILD_TYPE=Release PCSX2_GS_BRIDGE_BUILD_DIR='$bridge' PCSX2_SOURCE_DIR='$repo/build-deps/pcsx2-2.8.2' scripts/build_pcsx2_gs_bridge.sh"
+    # RRV_BRIDGE_ARCH_FLAGS (optional) reaches the bridge build inside the box: see scripts/build_pcsx2_gs_bridge.sh.
+    arch_env=
+    [[ -n "${RRV_BRIDGE_ARCH_FLAGS+x}" ]] && arch_env="RRV_BRIDGE_ARCH_FLAGS='$RRV_BRIDGE_ARCH_FLAGS' "
+    in_box "$root" "${arch_env}CMAKE_BUILD_TYPE=Release PCSX2_GS_BRIDGE_BUILD_DIR='$bridge' PCSX2_SOURCE_DIR='$repo/build-deps/pcsx2-2.8.2' scripts/build_pcsx2_gs_bridge.sh"
 fi
 
 echo "== links"

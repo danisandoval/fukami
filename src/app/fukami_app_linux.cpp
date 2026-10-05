@@ -175,12 +175,12 @@ fs::path pickChd()
     std::string out;
     int status = -1;
     if (const fs::path zenity = findTool("zenity"); !zenity.empty())
-        status = runTool({zenity.string(), "--file-selection", "--title=Choose your Ridge Racer V (USA) CHD",
-                          "--file-filter=CHD files | *.chd *.CHD"},
+        status = runTool({zenity.string(), "--file-selection", "--title=Choose your Ridge Racer V (USA) disc image",
+                          "--file-filter=Disc images | *.chd *.CHD *.cue *.CUE *.bin *.BIN"},
                          &out);
     else if (const fs::path kdialog = findTool("kdialog"); !kdialog.empty())
-        status = runTool({kdialog.string(), "--title", "Choose your Ridge Racer V (USA) CHD", "--getopenfilename",
-                          envOr("HOME", "/"), "*.chd *.CHD"},
+        status = runTool({kdialog.string(), "--title", "Choose your Ridge Racer V (USA) disc image", "--getopenfilename",
+                          envOr("HOME", "/"), "*.chd *.CHD *.cue *.CUE *.bin *.BIN"},
                          &out);
     if (status != 0)
         return {};
@@ -224,7 +224,7 @@ bool isChd(const fs::path &path)
     for (auto &c : ext)
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     std::error_code ec;
-    return ext == ".chd" && fs::is_regular_file(path, ec);
+    return (ext == ".chd" || ext == ".cue" || ext == ".bin") && fs::is_regular_file(path, ec);
 }
 
 // Unpacks with a text progress line on stderr and, when zenity is present, a
@@ -281,10 +281,10 @@ bool setUpDisc(const fs::path &support, const fs::path &disc, const std::vector<
         if (isChd(entry.path()))
             candidates.push_back(entry.path());
     const std::string intro =
-        "Fukami needs your own copy of Ridge Racer V (USA, SLUS-20002) as a CHD file. It unpacks the game files "
+        "Fukami needs your own copy of Ridge Racer V (USA, SLUS-20002) as a CHD file, or a .cue/.bin pair. It unpacks the game files "
         "once (about " +
         std::to_string((fukami::disc::requiredBytes() + 999999) / 1000000) + " MB) into " + support.string() +
-        ". You can delete the CHD afterwards.";
+        ". You can delete the disc image afterwards.";
     bool picked = false;
     for (size_t index = 0;; ++index)
     {
@@ -300,8 +300,8 @@ bool setUpDisc(const fs::path &support, const fs::path &disc, const std::vector<
             if (chd.empty())
             {
                 message("Fukami",
-                        "No CHD was chosen. Start Fukami with the CHD path as its argument, set FUKAMI_CHD, or put "
-                        "the .chd file into " +
+                        "No disc image was chosen. Start Fukami with the CHD or .cue path as its argument, set FUKAMI_CHD, or "
+                        "put the .chd (or .cue and .bin) file into " +
                             support.string() + ".",
                         true);
                 return false;
@@ -311,7 +311,7 @@ bool setUpDisc(const fs::path &support, const fs::path &disc, const std::vector<
         const auto probe = fukami::disc::probeRr5Usa(chd);
         if (probe.status != fukami::disc::Status::ok)
         {
-            message("This CHD can't be used", chd.string() + ": " + probe.message, true);
+            message("This disc image can't be used", chd.string() + ": " + probe.message, true);
             continue;
         }
         const auto result = extractWithProgress(chd, disc);
@@ -417,12 +417,19 @@ void launchFromApp(const fs::path &exe, const fs::path &root, const std::vector<
     if (!doc)
         quit(1);
 
-    const fs::path session = support / "sessions" / (timestamp() + "-" + std::to_string(getpid()));
-    fs::create_directories(session, ec);
+    // Logging off (the default): no session folder, no file. The game's output goes to /dev/null.
+    const bool logging = fukami::settings::LaunchConfig::fromIni(*doc, false).logging;
+    fs::path session;
+    if (logging)
+    {
+        session = support / "sessions" / (timestamp() + "-" + std::to_string(getpid()));
+        fs::create_directories(session, ec);
+    }
     fs::create_directories(mc, ec);
-    // The card as it was at launch, so this session can become a replay later
-    // (same as the developer launcher).
-    fs::copy(mc, session / "mc-start", fs::copy_options::recursive, ec);
+    if (logging)
+        // The card as it was at launch, so this session can become a replay later
+        // (same as the developer launcher).
+        fs::copy(mc, session / "mc-start", fs::copy_options::recursive, ec);
 
     fukami::settings::LaunchPaths paths;
     paths.boundWorkload = resources / "workload" / "bound-workload.txt";
@@ -481,11 +488,14 @@ void launchFromApp(const fs::path &exe, const fs::path &root, const std::vector<
     std::string elf = (disc / "SLUS_200.02").string();
     char *argv[] = {exePath.data(), elf.data(), nullptr};
 
-    std::fprintf(stderr, "[fukami] starting the game; logs in %s\n", session.c_str());
+    if (logging)
+        std::fprintf(stderr, "[fukami] starting the game; logs in %s\n", session.c_str());
     std::fflush(nullptr);
     // The runtime's diagnostic output goes to the session logs, as with ./run.sh.
-    const int out = open((session / "stdout.log").c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    const int err = open((session / "stderr.log").c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    const int out = logging ? open((session / "stdout.log").c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644)
+                            : open("/dev/null", O_WRONLY | O_CLOEXEC);
+    const int err = logging ? open((session / "stderr.log").c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644)
+                            : open("/dev/null", O_WRONLY | O_CLOEXEC);
     const int savedErr = dup(STDERR_FILENO);
     if (out >= 0)
         dup2(out, STDOUT_FILENO);

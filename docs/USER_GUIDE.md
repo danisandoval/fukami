@@ -7,7 +7,7 @@ Bandai Namco or Sony.
 ## What you need
 
 - A Mac with Apple silicon (M1 or later), or a Steam Deck (SteamOS 3.7+).
-- Your own copy of Ridge Racer V (USA) as a **CHD** file, made from your disc (see the README, "Getting your CHD").
+- Your own copy of Ridge Racer V (USA) as a **CHD** file, made from your disc, or a `.cue`/`.bin` pair (see the README, "Getting your CHD").
 - About 500 MB of free space for the game files, plus your saves.
 - Optional: a game controller (DualShock 4/5, Xbox or any SDL-supported pad).
 
@@ -19,7 +19,7 @@ Only the USA disc is supported. A different release or a damaged dump is refused
 2. The first time, macOS asks before opening an app that is not from the App Store. Right-click Fukami and choose
    **Open**, then **Open** again. (Or open it once, then System Settings → Privacy & Security → **Open Anyway**.)
    Fukami is signed ad-hoc and not yet notarised, so this step is expected.
-3. Fukami asks for your CHD. Click **Choose CHD…** and pick the file. It checks the disc and unpacks the game
+3. Fukami asks for your disc image. Click **Choose Disc Image…** and pick the CHD (or the `.cue` of a `.cue`/`.bin` pair). It checks the disc and unpacks the game
    files once, with a progress bar (about half a minute). You can delete the CHD afterwards.
 4. The game starts fullscreen.
 
@@ -59,7 +59,8 @@ marked *restart* apply after **Restart** in the menu. Everything the menu change
 also edit it while Fukami is closed.
 
 Main options: aspect **ratio** (real widescreen), **scale** (internal resolution), anti-aliasing (AA1, FXAA, CAS), anisotropic
-filtering, mipmaps, **car LOD**, **draw distance**, rumble, analog mode, fullscreen, and a Performance section.
+filtering, **texture filtering** (Bilinear smooths the car textures, which the game draws with visible pixels), mipmaps,
+**car LOD**, **draw distance**, rumble, analog mode, fullscreen, and a Performance section.
 
 **Quit:** Cmd+Q on macOS, the menu's **Quit**, or close the window. Saving is safe even if power is lost mid-save; the
 previous save is kept.
@@ -75,7 +76,7 @@ previous save is kept.
 | `fukami.ini` | Your settings (the menu writes it; you can edit it while Fukami is closed) |
 | `mc/` | Your memory card (saves) |
 | `disc/` | The unpacked game files |
-| `sessions/` | One log folder per play session |
+| `sessions/` | One log folder per play session; only created when **Write logs** (Game section) is on |
 
 A setting missing from `fukami.ini` (for example one added by a newer version) uses the app's default; Fukami does not
 rewrite your file for that. The menu has **Show saves** and **Show logs**. To start over, quit Fukami and delete the
@@ -93,7 +94,7 @@ write files into your folders; leave developer mode off unless you know why you 
 - **"This CHD can't be used":** it is not the USA disc, or the dump is damaged. Re-dump it.
 - **macOS refuses to open the app:** see step 2 above.
 - **Stutter on the Deck:** try Pacer spin (set it to 17 under Performance; it uses more battery), and check that the Deck is not in a low power limit.
-- **A crash or odd behaviour:** open **Show logs** in the menu and attach the newest `sessions/` folder to an issue
+- **A crash or odd behaviour:** turn on **Write logs** in the menu (Game), restart, reproduce it, then open **Show logs** in the menu and attach the newest `sessions/` folder to an issue
   (it contains no game data).
 
 ## Known issues

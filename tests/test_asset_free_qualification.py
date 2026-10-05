@@ -17,7 +17,7 @@ class AssetFreeQualificationTests(unittest.TestCase):
         dependent = [entry["name"] for entry in manifest["input_dependent"]]
         native = [entry["name"] for entry in manifest["platform_native"]]
         # The public export leaves the 22 harness tests (cmake/RrvHarnessTests.cmake) and their manifest entries out.
-        self.assertEqual(len(required), 54 if (ROOT / 'cmake/RrvHarnessTests.cmake').exists() else 32)
+        self.assertEqual(len(required), 56 if (ROOT / 'cmake/RrvHarnessTests.cmake').exists() else 34)
         self.assertEqual(len(required), len(set(required)))
         self.assertTrue(set(required).isdisjoint(dependent))
         self.assertTrue(set(required + dependent).isdisjoint(native))

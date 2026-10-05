@@ -3,6 +3,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -319,6 +320,70 @@ void testPublicApi()
     CHECK(probeRr5Usa(dir).status != Status::ok);  // a directory
     fs::remove_all(dir);
 }
+
+// Writes the 2048-byte sectors of `m` as raw sectors: `lead` bytes before the user data, the rest zero.
+void writeRaw(const fs::path& file, const MemSource& m, uint32_t stride, uint32_t lead, uint32_t extraSectors = 0)
+{
+    std::ofstream f(file, std::ios::binary);
+    std::vector<char> sector(stride);
+    for (uint32_t i = 0; i < m.sectorCount(); ++i) {
+        std::fill(sector.begin(), sector.end(), char(0xA5));
+        std::memcpy(sector.data() + lead, &m.data[size_t(i) * kSectorSize], kSectorSize);
+        f.write(sector.data(), stride);
+    }
+    std::fill(sector.begin(), sector.end(), char(0x11));  // a following (audio) track
+    for (uint32_t i = 0; i < extraSectors; ++i)
+        f.write(sector.data(), stride);
+}
+
+void testBinCue()
+{
+    TestDisc d;
+    MemSource m = buildImage(d.specs);
+    const fs::path dir = scratchDir("bincue");
+    fs::create_directories(dir);
+
+    // A cooked 2048 .iso and .bin without a sheet.
+    writeRaw(dir / "cooked.bin", m, 2048, 0);
+    Result err{Status::ok, {}};
+    auto src = openImage(dir / "cooked.bin", err);
+    CHECK(src && probeSource(*src, d.profile).status == Status::ok);
+
+    // MODE1/2352 with a cue sheet (quoted name, spaces), data track followed by an audio track.
+    writeRaw(dir / "game one.bin", m, 2352, 16, 40);
+    const uint32_t n = m.sectorCount();
+    {
+        char audio[64];
+        std::snprintf(audio, sizeof audio, "%02u:%02u:%02u", n / 75 / 60, n / 75 % 60, n % 75);
+        std::ofstream c(dir / "game.cue");
+        c << "FILE \"game one.bin\" BINARY\r\n  TRACK 01 MODE1/2352\r\n    INDEX 01 00:00:00\r\n"
+             "  TRACK 02 AUDIO\r\n    INDEX 01 " << audio << "\r\n";
+    }
+    src = openImage(dir / "game.cue", err);
+    CHECK(src && probeSource(*src, d.profile).status == Status::ok);
+    CHECK(src && src->sectorCount() == n);  // ends where the next track's INDEX 01 begins
+
+    // MODE2/2352 (user data after sync, header and subheader).
+    writeRaw(dir / "m2.bin", m, 2352, 24);
+    { std::ofstream c(dir / "m2.cue"); c << "FILE m2.bin BINARY\nTRACK 01 MODE2/2352\nINDEX 01 00:00:00\n"; }
+    src = openImage(dir / "m2.cue", err);
+    CHECK(src && probeSource(*src, d.profile).status == Status::ok);
+
+    // The whole path through the public API.
+    CHECK(probeRr5Usa(dir / "m2.cue").status != Status::ok);  // synthetic files are not the real disc
+    CHECK(probeRr5Usa(dir / "m2.cue").status == Status::wrongDisc || probeRr5Usa(dir / "m2.cue").status == Status::notIso9660 ||
+          probeRr5Usa(dir / "m2.cue").status == Status::damaged);
+
+    // Audio first track, no data track, missing .bin, no tracks.
+    { std::ofstream c(dir / "audio.cue"); c << "FILE m2.bin BINARY\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n"; }
+    CHECK(openImage(dir / "audio.cue", err) == nullptr && err.status == Status::notIso9660);
+    { std::ofstream c(dir / "gone.cue"); c << "FILE nothere.bin BINARY\nTRACK 01 MODE1/2352\nINDEX 01 00:00:00\n"; }
+    CHECK(openImage(dir / "gone.cue", err) == nullptr && err.status == Status::cannotOpen);
+    { std::ofstream c(dir / "empty.cue"); c << "REM nothing\n"; }
+    CHECK(openImage(dir / "empty.cue", err) == nullptr);
+    CHECK(openImage(dir / "absent.cue", err) == nullptr && err.status == Status::cannotOpen);
+    fs::remove_all(dir);
+}
 }  // namespace
 
 int main()
@@ -329,6 +394,7 @@ int main()
     testProbe();
     testExtract();
     testPublicApi();
+    testBinCue();
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;

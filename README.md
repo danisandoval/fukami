@@ -27,7 +27,7 @@ It is **not an emulator** and it cannot run any other game.
 |---|---|
 | **macOS** | Apple silicon (M1 or later); the minimum macOS version is in each release's notes. |
 | **Steam Deck / SteamOS** | SteamOS 3.7 or later. Other Linux x86-64 distributions are untested. |
-| **Game** | Ridge Racer V (USA) as a **CHD** file made from your own disc. About 500 MB of free disk space. |
+| **Game** | Ridge Racer V (USA) as a **CHD** file (or a `.cue`/`.bin` pair) made from your own disc. About 500 MB of free disk space. |
 
 Windows is planned; see the [roadmap](docs/ROADMAP.md).
 
@@ -40,12 +40,12 @@ Download the latest build from the [Releases](https://github.com/danisandoval/fu
 - **Steam Deck:** in Desktop Mode, extract `Fukami-<version>-linux-x86_64.tar.gz` and run `./install.sh`; it adds
   Fukami to Steam. [Step-by-step guide](docs/USER_GUIDE.md#steam-deck).
 
-On first launch Fukami asks for your CHD, checks that it is the USA disc, and unpacks the game files once into its
+On first launch Fukami asks for your CHD or `.cue` file, checks that it is the USA disc, and unpacks the game files once into its
 own folder. Full instructions, controls and settings are in the [user guide](docs/USER_GUIDE.md).
 
 ### Getting your CHD
 
-Dump your own Ridge Racer V (USA) disc to an image with any standard tool, then convert it with `chdman`
+A `.cue`/`.bin` dump works directly: pick the `.cue` (keep the `.bin` beside it). Otherwise dump your own Ridge Racer V (USA) disc to an image with any standard tool, then convert it with `chdman`
 (part of MAME): `chdman createcd -i RidgeRacerV.cue -o RidgeRacerV.chd`. The project cannot help with finding
 game files and will not link to them.
 
@@ -54,6 +54,7 @@ game files and will not link to them.
 - Only the USA release is supported (`SLUS_200.02`; the app checks the disc's SHA-256 hashes).
 - A long live session with many cars on screen stalled in one early test (a replay of the same session ran fine);
   the cause is not identified yet.
+- Steam Deck: the first 10-15 seconds of a race (the start area) can dip below 60 fps, mostly with scenery draw distance above 0 (the default). The start sections draw many more course strips than the rest of the lap; this is the game's own data, not a setting you can fix.
 - No in-game controller remapping yet; the default layout is in the user guide.
 - Audio is verified by listening and by measured tests, not by a full hardware comparison.
 

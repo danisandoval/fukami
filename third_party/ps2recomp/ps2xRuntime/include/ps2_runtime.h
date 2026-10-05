@@ -879,14 +879,15 @@ public:
         std::string route;
         uint32_t lbn, sectors;
         bool iop_destination, success;
-        uint64_t payload_bytes, payload_fnv1a64; // Comparison digest, not a security hash.
+        uint64_t payload_bytes, payload_fnv1a64; // Comparison digest, not a security hash; 0 when digests are off.
     };
     struct Gate3GuestWorkloadV1 {
         std::array<Gate3PadSampleV1, 2> initial_pad;
         std::vector<Gate3PadAdmissionV1> pad;
         Gate3CdPolicyV1 cd_policy = Gate3CdPolicyV1::DeclaredSchedule;
         std::vector<Gate3CdReadV1> cd;
-        std::map<std::string, uint64_t> hle_costs;
+        // std::less<>: looked up by C string without building a std::string per HLE call (2026-10-05).
+        std::map<std::string, uint64_t, std::less<>> hle_costs;
         // Blocks until missing user-owned host data becomes available or throws.
         std::function<void()> wait_for_cd_data;
         // Product storage (bound key `storage persistent_user_card`): the user's
@@ -902,6 +903,10 @@ public:
     { return m_gate3GuestWorkloadV1 && m_gate3GuestWorkloadV1->persistent_storage; }
     Gate3PadSampleV1 gate3PadSampleV1(int port);
     void gate3ChargeNamedHleV1(R5900Context* ctx, const char* name);
+    // The same charge for kernel syscall `id` (cost name "syscall:<id>"), with the cost looked up once per
+    // bound workload: a guest loop makes about 100,000 syscalls in one field at the end of the boot logo.
+    void gate3ChargeSyscallHleV1(R5900Context* ctx, uint32_t id);
+    void gate3ChargeResolvedHleV1(R5900Context* ctx, uint64_t cost, bool syscall);
     bool gate3ShouldWaitCdHostV1(const char* route, uint32_t lbn, uint32_t sectors, bool resolvable = true);
     void gate3WaitCdHostV1();
     void gate3RecordCdReadV1(const char* route, uint32_t lbn, uint32_t sectors,
@@ -910,6 +915,10 @@ public:
     // Chain routes decide their single completion callback after all segments.
     void gate3CdRouteCompletedV1(const char* route, bool success);
     const std::vector<Gate3CdTraceV1>& gate3CdTraceV1() const { return m_gate3CdTraceV1; }
+    // The payload digest is a byte-serial FNV-1a: 16 ms of host time for the 3.4 MB boot read on the Steam Deck
+    // (2026-10-05). It only feeds the semantic trace and the in-memory CD trace, so the product turns it off
+    // unless the semantic trace is on. Host-only: the guest never sees the digest.
+    void gate3SetCdDigestV1(bool on) { m_gate3CdDigestV1 = on; }
     void gate3ServiceAdmissionsV1(R5900Context* ctx);
 
     void gate3ConfigureTemporalV1(const rrv::guest_time::TemporalProfile& profile);
@@ -972,6 +981,7 @@ public:
     void gate3DiagSyncVV1(R5900Context* ctx, bool entry);
     // RRV_GATE3_RECORD_PAD=<path>: admit the live host pad at each effective
     // VBlank start and log every change as a replayable full-state admission.
+    // RRV_GATE3_LIVE_PAD=1 admits it the same way without a log file.
     void gate3RecordPadV1(uint64_t cycle);
     struct Gate3CutSnapshotV1 {
         uint64_t cycle, effective_starts, gs_services, csr;
@@ -1282,6 +1292,11 @@ private:
     std::unique_ptr<rrv::guest_time::GuestRtc> m_gate3RtcV1;
     std::unique_ptr<rrv::guest_time::TemporalOwner> m_gate3TemporalV1;
     std::optional<Gate3GuestWorkloadV1> m_gate3GuestWorkloadV1;
+    // gate3ChargeNamedHleV1: the cost entry last found for a name's address (the workload is bound once,
+    // so the map's nodes stay). The text is compared on every use: a syscall name is a temporary.
+    struct Gate3HleCostSlotV1 { const char* name = nullptr; const std::pair<const std::string, uint64_t>* cost = nullptr; };
+    std::array<Gate3HleCostSlotV1, 64> m_gate3HleCostCacheV1{};
+    std::array<const uint64_t*, 512> m_gate3SyscallCostV1{}; // into hle_costs; cleared when a workload is bound
     std::array<Gate3PadSampleV1, 2> m_gate3AdmittedPadV1{};
     size_t m_gate3NextCdReadV1 = 0;
     size_t m_gate3NextCdCallbackV1 = 0;
@@ -1293,6 +1308,7 @@ private:
     };
     std::vector<Gate3CdReadyV1> m_gate3CdReadyV1;
     std::vector<Gate3CdTraceV1> m_gate3CdTraceV1;
+    bool m_gate3CdDigestV1 = true;
     uint32_t m_gate3CdCallbackV1 = 0;
     uint32_t m_gate3CdCallbackGpV1 = 0;
 

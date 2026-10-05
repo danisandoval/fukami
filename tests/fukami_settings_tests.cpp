@@ -76,6 +76,9 @@ void testValidation()
     expect(ok("rendering", "scale", "8") && !ok("rendering", "scale", "9") && !ok("rendering", "scale", "10"), "scale");
     expect(ok("rendering", "cas", "100") && !ok("rendering", "cas", "101") && !ok("rendering", "cas", "-1"), "cas");
     expect(ok("rendering", "aniso", "16") && !ok("rendering", "aniso", "3"), "aniso");
+    expect(ok("rendering", "texture_filter", "ps2") && ok("rendering", "texture_filter", "bilinear") &&
+               !ok("rendering", "texture_filter", "nearest") && !ok("rendering", "texture_filter", ""),
+           "texture_filter");
     expect(ok("game", "car_lod", "6.5") && !ok("game", "car_lod", "best") && !ok("game", "car_lod", "1."), "car_lod");
     expect(ok("game", "draw_distance", "0") && ok("game", "draw_distance", "16") &&
                !ok("game", "draw_distance", "17") && !ok("game", "draw_distance", "2.5"),
@@ -101,7 +104,7 @@ void testValidation()
     expect(check(IniDocument::parse("[paths]\nworkload = x\n"), false).empty(), "[paths] ignored by the app");
 }
 
-std::vector<std::string> defaultEnvironment(const IniDocument &doc, bool replay = false)
+std::vector<std::string> defaultEnvironment(const IniDocument &doc, bool replay = false, bool session = true)
 {
     LaunchPaths paths;
     paths.home = "/home/test";
@@ -110,7 +113,8 @@ std::vector<std::string> defaultEnvironment(const IniDocument &doc, bool replay 
     paths.libraries = "/R/runtime/x/lib";
     paths.boundWorkload = "/W/bound-workload.txt";
     paths.memoryCard = "/R/local/product/mc";
-    paths.session = "/R/local/product/sessions/S";
+    if (session)
+        paths.session = "/R/local/product/sessions/S";
     paths.recordPad = !replay;
     return environment(LaunchConfig::fromIni(doc), paths);
 }
@@ -159,6 +163,29 @@ void testLaunchConfig()
         pad = pad || line.rfind("RRV_GATE3_RECORD_PAD=", 0) == 0;
     expect(!pad, "replay has no pad log");
 
+    // Logging off (no session folder): the pad is still admitted, with no file; no start clock, no log path.
+    {
+        const auto noLog = defaultEnvironment(IniDocument::parse(""), false, false);
+        bool live = false, file = false, clock = false;
+        for (const auto &line : noLog)
+        {
+            live = live || line == "RRV_GATE3_LIVE_PAD=1";
+            file = file || line.rfind("RRV_GATE3_RECORD_PAD=", 0) == 0;
+            clock = clock || line.rfind("RRV_GATE4_START_CLOCK=", 0) == 0;
+        }
+        expect(live && !file && !clock, "no session: live pad admitted, no pad file, no start clock");
+        const auto logged = defaultEnvironment(IniDocument::parse(""));
+        bool both = false;
+        for (const auto &line : logged)
+            both = both || line == "RRV_GATE3_LIVE_PAD=1";
+        expect(!both, "with a session the pad goes through the log, not the live switch");
+        const auto replayNoLog = defaultEnvironment(IniDocument::parse(""), true, false);
+        bool any = false;
+        for (const auto &line : replayNoLog)
+            any = any || line.rfind("RRV_GATE3_LIVE_PAD", 0) == 0 || line.rfind("RRV_GATE3_RECORD_PAD", 0) == 0;
+        expect(!any, "a replay admits no live pad");
+    }
+
     // Gate 5: split_gs adds RRV_VU1GS_SPLIT=1 only with the owner stream (not inline), and is on by default.
     const auto hasLine = [](const std::vector<std::string> &env, const std::string &line) {
         for (const auto &l : env)
@@ -186,12 +213,32 @@ void testLaunchConfig()
                       "RRV_GATE3_REALTIME_SPIN_MS="),
            "unpaced ignores pacer_spin");
 
+    // texture_filter: the stock filter sends nothing (so the default environment above is unchanged); bilinear
+    // names PCSX2's forced bilinear for the bridge, from the ini and from the flag.
+    expect(!hasPrefix(defaultEnvironment(IniDocument::parse("[rendering]\ntexture_filter = ps2\n")),
+                      "RRV_PCSX2_GS_TEXTURE_FILTER="),
+           "texture_filter = ps2 sends nothing");
+    expect(hasLine(defaultEnvironment(IniDocument::parse("[rendering]\ntexture_filter = bilinear\n")),
+                   "RRV_PCSX2_GS_TEXTURE_FILTER=bilinear"),
+           "texture_filter = bilinear reaches the bridge");
+    {
+        std::vector<Override> filter;
+        IniDocument filtered;
+        expect(flagOverride({"--texture-filter", "bilinear"}, 0, filter) == 2 && applyOverrides(filtered, filter).empty() &&
+                   LaunchConfig::fromIni(filtered).textureFilter == "bilinear" &&
+                   flagOverride({"--texture-filter"}, 0, filter) == -1,
+               "--texture-filter sets the same setting");
+        std::vector<Override> wrongFilter = {{"rendering", "texture_filter", "trilinear"}};
+        expect(applyOverrides(filtered, wrongFilter).size() == 1, "an unknown texture filter is refused");
+    }
+
     // The environment is only the transport: reading it back gives the same typed view, and the same environment.
     for (const char *text : {"", "[display]\nratio = 21:9\nhud = fixed\naspect = stretch\nfullscreen = true\n",
                              "[rendering]\nscale = 2\naa1 = no\nfxaa = yes\ncas = 50\naniso = 8\nmipmap = off\n",
                              "[game]\ncar_lod = 1\ndraw_distance = 3\nfast_unpack = no\nnative_code = no\n",
                              "[timing]\nheadless = true\nunpaced = true\ninline = true\n[input]\nanalog = no\nrumble = no\n",
-                             "[timing]\nsplit_gs = true\n", "[timing]\npacer_spin = 17\n"})
+                             "[timing]\nsplit_gs = true\n", "[timing]\npacer_spin = 17\n",
+                             "[rendering]\ntexture_filter = bilinear\n"})
     {
         const auto env = defaultEnvironment(IniDocument::parse(text));
         const auto get = [&](const char *name) -> const char * {
