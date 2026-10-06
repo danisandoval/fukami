@@ -1,8 +1,211 @@
+diff --git a/pcsx2/GS/GS.cpp b/pcsx2/GS/GS.cpp
+index dab64133d..f3a474f9e 100644
+--- a/pcsx2/GS/GS.cpp
++++ b/pcsx2/GS/GS.cpp
+@@ -55,6 +55,7 @@
+ 
+ #include "fmt/format.h"
+ 
++#include <chrono>
+ #include <fstream>
+ 
+ Pcsx2Config::GSOptions GSConfig;
+@@ -103,6 +104,16 @@ u64 GSRrvGetDroppedLargeSTTriangles()
+ 	return GSState::s_rrv_dropped_large_st_triangles.load(std::memory_order_relaxed);
+ }
+ 
++GSRrvWaitStats g_rrv_wait_stats{};
++GSRrvWait g_rrv_wait_reason = GSRrvWait::Other;
++GSRrvRead g_rrv_read_cause = GSRrvRead::Other;
++
++u64 GSRrvNowNs()
++{
++	return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
++		std::chrono::steady_clock::now().time_since_epoch()).count());
++}
++
+ static GSRendererType GSCurrentRenderer;
+ 
+ GSRendererType GSGetCurrentRenderer()
+diff --git a/pcsx2/GS/GS.h b/pcsx2/GS/GS.h
+index 30838bd5c..e6ea39d29 100644
+--- a/pcsx2/GS/GS.h
++++ b/pcsx2/GS/GS.h
+@@ -104,6 +104,56 @@ void GSRrvSetRoundSpriteUOnly(bool u_only);
+ // every triangle whose ST it had to rewrite (degenerate Q), so it draws nothing.
+ void GSRrvSetDropLargeSTTriangles(bool drop);
+ u64 GSRrvGetDroppedLargeSTTriangles();
++// RRV GS bridge (pcsx2-gs-bridge-linux.patch): where the GS thread waits on
++// the GPU, and what the HW renderer's CPU fallbacks cost. Monotonic totals,
++// written and read on the GS thread only (the bridge samples them in GSvsync).
++// Observation only: nothing reads them back into a GS decision.
++enum class GSRrvWait : u8
++{
++	Other,    // a fence wait with no more specific cause
++	Forced,   // ExecuteCommandBuffer(wait) and downloads: a GPU->CPU readback
++	Rotation, // reusing a command buffer the GPU has not finished
++	Stream,   // a vertex/index/uniform/texture stream buffer ran out of space
++	Count
++};
++enum class GSRrvRead : u8
++{
++	Other,     // texture-cache lookups, ReadbackAll
++	SwPrim,    // CanUseSwPrimRender: source target read for the CPU sprite path
++	LocalRead, // InvalidateLocalMem: the guest reads GS memory (TRXDIR=1)
++	Count
++};
++struct GSRrvWaitStats
++{
++	u64 wait_ns[static_cast<size_t>(GSRrvWait::Count)];
++	u64 waits[static_cast<size_t>(GSRrvWait::Count)];
++	u64 acquire_ns, acquires; // vkAcquireNextImageKHR
++	u64 present_ns, presents; // vkQueuePresentKHR
++	u64 submits, midframe_submits; // vkQueueSubmit; those without a present
++	u64 sw_prim_ns, sw_prims; // SwPrimRender (CPU sprite/CLUT draws)
++	u64 read_ns[static_cast<size_t>(GSRrvRead::Count)];
++	u64 reads[static_cast<size_t>(GSRrvRead::Count)];
++	u64 read_pixels; // GSTextureCache::Read area, unscaled pixels
++	u32 swapchain_images;
++};
++extern GSRrvWaitStats g_rrv_wait_stats;
++extern GSRrvWait g_rrv_wait_reason;
++extern GSRrvRead g_rrv_read_cause;
++u64 GSRrvNowNs();
++// Sets the cause of the fence waits in its scope.
++struct GSRrvWaitReasonScope
++{
++	GSRrvWait saved;
++	explicit GSRrvWaitReasonScope(GSRrvWait reason) : saved(g_rrv_wait_reason) { g_rrv_wait_reason = reason; }
++	~GSRrvWaitReasonScope() { g_rrv_wait_reason = saved; }
++};
++// Sets the cause of the texture-cache reads in its scope.
++struct GSRrvReadCauseScope
++{
++	GSRrvRead saved;
++	explicit GSRrvReadCauseScope(GSRrvRead cause) : saved(g_rrv_read_cause) { g_rrv_read_cause = cause; }
++	~GSRrvReadCauseScope() { g_rrv_read_cause = saved; }
++};
+ void GSvsync(u32 field, bool registers_written);
+ int GSfreeze(FreezeAction mode, freezeData* data);
+ std::string GSGetBaseSnapshotFilename();
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+index a22f6ebf8..122ed6c50 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+@@ -9854,7 +9854,10 @@ bool GSRendererHW::CanUseSwPrimRender(bool no_rt, bool no_ds, bool draw_sprite_t
+ 				(!src_target->m_32_bits_fmt || GSLocalMemory::m_psm[m_cached_ctx.TEX0.PSM].bpp != 16))
+ 			{
+ 				if (req_readback)
++				{
++					const GSRrvReadCauseScope rrv_cause(GSRrvRead::SwPrim); // pcsx2-gs-bridge-linux.patch
+ 					g_texture_cache->Read(src_target, src_target->m_drawn_since_read);
++				}
+ 				return true;
+ 			}
+ 
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHWMultiISA.cpp b/pcsx2/GS/Renderers/HW/GSRendererHWMultiISA.cpp
+index 5afd08eea..7d48a3d5f 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHWMultiISA.cpp
++++ b/pcsx2/GS/Renderers/HW/GSRendererHWMultiISA.cpp
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: GPL-3.0+
+ 
+ #include "GSRendererHW.h"
++#include "GS/GS.h"
+ 
+ #include "GS/Renderers/SW/GSTextureCacheSW.h"
+ #include "GS/Renderers/SW/GSRasterizer.h"
+@@ -30,6 +31,18 @@ static GIFRegDIMX s_last_dimx;
+ 
+ bool GSRendererHWFunctions::SwPrimRender(GSRendererHW& hw, bool invalidate_tc, bool add_ee_transfer)
+ {
++	// RRV GS bridge (pcsx2-gs-bridge-linux.patch): this rasterizes on the GS
++	// thread itself (GSSingleRasterizer), so its whole cost is GS-thread time.
++	struct RrvSwPrimScope
++	{
++		const u64 start = GSRrvNowNs();
++		~RrvSwPrimScope()
++		{
++			g_rrv_wait_stats.sw_prim_ns += GSRrvNowNs() - start;
++			g_rrv_wait_stats.sw_prims++;
++		}
++	} rrv_sw_prim;
++
+ 	GSVertexTrace& vt = hw.m_vt;
+ 	const GIFRegPRIM* PRIM = hw.PRIM;
+ 	const GSDrawingContext* context = hw.m_context;
+diff --git a/pcsx2/GS/Renderers/HW/GSTextureCache.cpp b/pcsx2/GS/Renderers/HW/GSTextureCache.cpp
+index bf3707313..fba393f50 100644
+--- a/pcsx2/GS/Renderers/HW/GSTextureCache.cpp
++++ b/pcsx2/GS/Renderers/HW/GSTextureCache.cpp
+@@ -4983,6 +4983,7 @@ void GSTextureCache::InvalidateVideoMem(const GSOffset& off, const GSVector4i& r
+ // full_flush is set when it's a Local->Local stransfer and both src and destination are the same.
+ void GSTextureCache::InvalidateLocalMem(const GSOffset& off, const GSVector4i& r, bool full_flush)
+ {
++	const GSRrvReadCauseScope rrv_cause(GSRrvRead::LocalRead); // pcsx2-gs-bridge-linux.patch
+ 	const u32 bp = off.bp();
+ 	const u32 psm = off.psm();
+ 	[[maybe_unused]] const u32 bw = off.bw();
+@@ -7391,6 +7392,20 @@ void GSTextureCache::Read(Target* t, const GSVector4i& r)
+ 	if ((!t->m_dirty.empty() && !t->m_dirty.GetTotalRect(t->m_TEX0, t->m_unscaled_size).rintersect(r).rempty()) || r.width() == 0 || r.height() == 0)
+ 		return;
+ 
++	// RRV GS bridge (pcsx2-gs-bridge-linux.patch): a GPU->CPU readback; the
++	// download's fence wait is also in the Forced wait bucket.
++	struct RrvReadScope
++	{
++		const u64 start = GSRrvNowNs();
++		~RrvReadScope()
++		{
++			const size_t cause = static_cast<size_t>(g_rrv_read_cause);
++			g_rrv_wait_stats.read_ns[cause] += GSRrvNowNs() - start;
++			g_rrv_wait_stats.reads[cause]++;
++		}
++	} rrv_read;
++	g_rrv_wait_stats.read_pixels += static_cast<u64>(r.width()) * static_cast<u64>(r.height());
++
+ 	const GIFRegTEX0& TEX0 = t->m_TEX0;
+ 	const bool is_depth = (t->m_type == DepthStencil);
+ 
+@@ -7516,6 +7531,19 @@ void GSTextureCache::Read(Source* t, const GSVector4i& r)
+ 	if (r.rempty())
+ 		return;
+ 
++	// RRV GS bridge (pcsx2-gs-bridge-linux.patch): see Read(Target*).
++	struct RrvReadScope
++	{
++		const u64 start = GSRrvNowNs();
++		~RrvReadScope()
++		{
++			const size_t cause = static_cast<size_t>(g_rrv_read_cause);
++			g_rrv_wait_stats.read_ns[cause] += GSRrvNowNs() - start;
++			g_rrv_wait_stats.reads[cause]++;
++		}
++	} rrv_read;
++	g_rrv_wait_stats.read_pixels += static_cast<u64>(r.width()) * static_cast<u64>(r.height());
++
+ 	const GSVector4i drc(0, 0, r.width(), r.height());
+ 
+ 	if (!PrepareDownloadTexture(drc.z, drc.w, GSTexture::Format::Color, &m_color_download_texture))
 diff --git a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
-index d3dad7e..229ef8c 100644
+index d3dad7e9c..90439dcec 100644
 --- a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
 +++ b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
-@@ -1206,8 +1206,14 @@ void GSDeviceVK::WaitForCommandBufferCompletion(u32 index)
+@@ -1179,7 +1179,13 @@ void GSDeviceVK::ScanForCommandBufferCompletion()
+ void GSDeviceVK::WaitForCommandBufferCompletion(u32 index)
+ {
+ 	// Wait for this command buffer to be completed.
++	// RRV GS bridge (pcsx2-gs-bridge-linux.patch): time every fence wait and
++	// charge it to the cause the caller set (GSRrvWaitReasonScope).
++	const u64 rrv_wait_start = GSRrvNowNs();
+ 	const VkResult res = vkWaitForFences(m_device, 1, &m_frame_resources[index].fence, VK_TRUE, UINT64_MAX);
++	const size_t rrv_reason = static_cast<size_t>(g_rrv_wait_reason);
++	g_rrv_wait_stats.wait_ns[rrv_reason] += GSRrvNowNs() - rrv_wait_start;
++	g_rrv_wait_stats.waits[rrv_reason]++;
+ 	if (res != VK_SUCCESS)
+ 	{
+ 		LOG_VULKAN_ERROR(res, "vkWaitForFences failed: ");
+@@ -1206,8 +1212,14 @@ void GSDeviceVK::WaitForCommandBufferCompletion(u32 index)
  	m_completed_fence_counter = now_completed_counter;
  }
  
@@ -17,7 +220,28 @@ index d3dad7e..229ef8c 100644
  	FrameResources& resources = m_frame_resources[m_current_frame];
  
  	// End the current command buffer.
-@@ -1348,6 +1354,8 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
+@@ -1323,6 +1335,9 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
+ 		m_last_submit_failed = true;
+ 		return;
+ 	}
++	g_rrv_wait_stats.submits++;
++	if (!present_swap_chain)
++		g_rrv_wait_stats.midframe_submits++;
+ 
+ 	if (spin_cycles != 0)
+ 		SubmitSpinCommand(m_current_frame, spin_cycles);
+@@ -1335,7 +1350,10 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
+ 
+ 		present_swap_chain->ResetImageAcquireResult();
+ 
++		const u64 rrv_present_start = GSRrvNowNs();
+ 		res = vkQueuePresentKHR(m_present_queue, &present_info);
++		g_rrv_wait_stats.present_ns += GSRrvNowNs() - rrv_present_start;
++		g_rrv_wait_stats.presents++;
+ 		if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)
+ 		{
+ 			// VK_ERROR_OUT_OF_DATE_KHR is not fatal, just means we need to recreate our swap chain.
+@@ -1348,6 +1366,8 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
  			return;
  		}
  
@@ -26,7 +250,26 @@ index d3dad7e..229ef8c 100644
  		// Grab the next image as soon as possible, that way we spend less time blocked on the next
  		// submission. Don't care if it fails, we'll deal with that at the presentation call site.
  		// Credit to dxvk for the idea.
-@@ -2526,6 +2534,15 @@ void GSDeviceVK::EndPresent()
+@@ -1415,7 +1435,10 @@ void GSDeviceVK::ActivateCommandBuffer(u32 index)
+ 
+ 	// Wait for the GPU to finish with all resources for this command buffer.
+ 	if (resources.fence_counter > m_completed_fence_counter)
++	{
++		const GSRrvWaitReasonScope rrv_reason(GSRrvWait::Rotation);
+ 		WaitForCommandBufferCompletion(index);
++	}
+ 
+ 	// Reset fence to unsignaled before starting.
+ 	VkResult res = vkResetFences(m_device, 1, &resources.fence);
+@@ -1491,6 +1514,7 @@ void GSDeviceVK::ExecuteCommandBuffer(WaitType wait_for_completion)
+ 
+ 	if (wait_for_completion != WaitType::None)
+ 	{
++		const GSRrvWaitReasonScope rrv_reason(GSRrvWait::Forced);
+ 		// Calibrate while we wait
+ 		if (m_wants_new_timestamp_calibration)
+ 			CalibrateSpinTimestamp();
+@@ -2526,6 +2550,15 @@ void GSDeviceVK::EndPresent()
  	g_perfmon.Put(GSPerfMon::RenderPasses, 1);
  
  	SubmitCommandBuffer(m_swap_chain.get());
@@ -42,3 +285,81 @@ index d3dad7e..229ef8c 100644
  	MoveToNextCommandBuffer();
  
  	InvalidateCachedState();
+diff --git a/pcsx2/GS/Renderers/Vulkan/GSTextureVK.cpp b/pcsx2/GS/Renderers/Vulkan/GSTextureVK.cpp
+index 0ce82eb09..b033efa6d 100644
+--- a/pcsx2/GS/Renderers/Vulkan/GSTextureVK.cpp
++++ b/pcsx2/GS/Renderers/Vulkan/GSTextureVK.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include "GS/GSGL.h"
+ #include "GS/GSPerfMon.h"
++#include "GS/GS.h"
+ #include "GS/Renderers/Vulkan/GSDeviceVK.h"
+ #include "GS/Renderers/Vulkan/GSTextureVK.h"
+ #include "GS/Renderers/Vulkan/VKBuilders.h"
+@@ -980,6 +981,7 @@ void GSDownloadTextureVK::Flush()
+ 	}
+ 	else
+ 	{
++		const GSRrvWaitReasonScope rrv_reason(GSRrvWait::Forced); // pcsx2-gs-bridge-linux.patch
+ 		GSDeviceVK::GetInstance()->WaitForFenceCounter(m_copy_fence_counter);
+ 	}
+ }
+diff --git a/pcsx2/GS/Renderers/Vulkan/VKStreamBuffer.cpp b/pcsx2/GS/Renderers/Vulkan/VKStreamBuffer.cpp
+index c0a6a4ccc..553896b44 100644
+--- a/pcsx2/GS/Renderers/Vulkan/VKStreamBuffer.cpp
++++ b/pcsx2/GS/Renderers/Vulkan/VKStreamBuffer.cpp
+@@ -4,6 +4,7 @@
+ #include "GS/Renderers/Vulkan/GSDeviceVK.h"
+ #include "GS/Renderers/Vulkan/VKBuilders.h"
+ #include "GS/Renderers/Vulkan/VKStreamBuffer.h"
++#include "GS/GS.h"
+ 
+ #include "common/Assertions.h"
+ #include "common/BitUtils.h"
+@@ -298,7 +299,10 @@ bool VKStreamBuffer::WaitForClearSpace(u32 num_bytes)
+ 		return false;
+ 
+ 	// Wait until this fence is signaled. This will fire the callback, updating the GPU position.
+-	GSDeviceVK::GetInstance()->WaitForFenceCounter(iter->first);
++	{
++		const GSRrvWaitReasonScope rrv_reason(GSRrvWait::Stream); // pcsx2-gs-bridge-linux.patch
++		GSDeviceVK::GetInstance()->WaitForFenceCounter(iter->first);
++	}
+ 	m_tracked_fences.erase(
+ 		m_tracked_fences.begin(), m_current_offset == iter->second ? m_tracked_fences.end() : ++iter);
+ 	m_current_offset = new_offset;
+diff --git a/pcsx2/GS/Renderers/Vulkan/VKSwapChain.cpp b/pcsx2/GS/Renderers/Vulkan/VKSwapChain.cpp
+index 4de995d72..d6262c121 100644
+--- a/pcsx2/GS/Renderers/Vulkan/VKSwapChain.cpp
++++ b/pcsx2/GS/Renderers/Vulkan/VKSwapChain.cpp
+@@ -4,6 +4,7 @@
+ #include "GS/Renderers/Vulkan/GSDeviceVK.h"
+ #include "GS/Renderers/Vulkan/VKBuilders.h"
+ #include "GS/Renderers/Vulkan/VKSwapChain.h"
++#include "GS/GS.h"
+ #include "VMManager.h"
+ 
+ #include "common/Assertions.h"
+@@ -460,6 +461,7 @@ bool VKSwapChain::CreateSwapChain()
+ 
+ 	m_images.reserve(image_count);
+ 	m_current_image = 0;
++	g_rrv_wait_stats.swapchain_images = image_count; // pcsx2-gs-bridge-linux.patch
+ 	for (u32 i = 0; i < image_count; i++)
+ 	{
+ 		std::unique_ptr<GSTextureVK> texture =
+@@ -551,8 +553,13 @@ VkResult VKSwapChain::AcquireNextImage()
+ 	// Use a different semaphore for each image.
+ 	m_current_semaphore = (m_current_semaphore + 1) % static_cast<u32>(m_semaphores.size());
+ 
++	// RRV GS bridge (pcsx2-gs-bridge-linux.patch): with FIFO this can block the
++	// GS thread until the presentation engine releases an image.
++	const u64 rrv_acquire_start = GSRrvNowNs();
+ 	const VkResult res = vkAcquireNextImageKHR(GSDeviceVK::GetInstance()->GetDevice(), m_swap_chain, UINT64_MAX,
+ 		m_semaphores[m_current_semaphore].available_semaphore, VK_NULL_HANDLE, &m_current_image);
++	g_rrv_wait_stats.acquire_ns += GSRrvNowNs() - rrv_acquire_start;
++	g_rrv_wait_stats.acquires++;
+ 	m_image_acquire_result = res;
+ 	return res;
+ }

@@ -41,6 +41,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <memory>
 #include <optional>
 #include <string>
@@ -733,6 +734,122 @@ Gate4GsObserverV1& Gate4GsObserver()
     static Gate4GsObserverV1 observer;
     return observer;
 }
+
+#if defined(__linux__)
+// Gate 5 Deck attribution: where the thread that runs GSvsync (rrv-gs-owner
+// under split_gs) spends its time. pcsx2-gs-bridge-linux.patch times every
+// point where PCSX2's Vulkan device makes that thread wait for the GPU, and the
+// HW renderer's CPU fallbacks; this prints them every ~2 s as one line, per
+// field (ms/f) and per field count (/f), next to the [cpu] log:
+//   [gs-wait] t=12s fields=120 cpu=6.10ms/f max=9.80 wait=3.20ms/f max=8.10
+//     forced=.. rotation=.. stream=.. other=.. acquire=.. present=..
+//     submits=3.0/f midframe=2.0/f swprim=0.40ms/f(6.0/f)
+//     read:swprim=.. read:local=.. read:other=.. read-px=../f images=2
+// cpu is this thread's CPU time (CLOCK_THREAD_CPUTIME_ID); wait is the time it
+// spent blocked on the GPU or the swap chain (fence waits plus acquire); max is
+// the worst field in the interval. A field's budget is 16.7 ms. Default on with
+// direct presentation; RRV_PCSX2_GS_WAIT_LOG=0 turns it off, =1 also headless.
+// Host observation only: nothing here feeds back into the GS.
+struct GsWaitLog
+{
+    bool configured = false, enabled = false, primed = false;
+    uint64_t start_wall = 0, last_wall = 0, last_cpu = 0, field_cpu = 0, field_wait = 0;
+    uint64_t fields = 0, max_cpu = 0, max_wait = 0;
+    GSRrvWaitStats last{};
+
+    static uint64_t ThreadCpuNs()
+    {
+        timespec ts{};
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+        return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<uint64_t>(ts.tv_nsec);
+    }
+    static uint64_t WaitNs(const GSRrvWaitStats& s)
+    {
+        uint64_t total = s.acquire_ns;
+        for (const uint64_t ns : s.wait_ns)
+            total += ns;
+        return total;
+    }
+
+    void Field(bool direct_present)
+    {
+        if (!configured)
+        {
+            configured = true;
+            enabled = EnvFlag("RRV_PCSX2_GS_WAIT_LOG", direct_present);
+        }
+        if (!enabled)
+            return;
+        const uint64_t wall = Gate4GsObserverV1::Now();
+        const uint64_t cpu = ThreadCpuNs();
+        const uint64_t wait = WaitNs(g_rrv_wait_stats);
+        if (!primed)
+        {
+            primed = true;
+            start_wall = last_wall = wall;
+            last_cpu = field_cpu = cpu;
+            field_wait = wait;
+            last = g_rrv_wait_stats;
+            return;
+        }
+        ++fields;
+        max_cpu = std::max(max_cpu, cpu - field_cpu);
+        max_wait = std::max(max_wait, wait - field_wait);
+        field_cpu = cpu;
+        field_wait = wait;
+        if (wall - last_wall < 2000000000ull)
+            return;
+        Print(wall, cpu);
+        last_wall = wall;
+        last_cpu = cpu;
+        last = g_rrv_wait_stats;
+        fields = max_cpu = max_wait = 0;
+    }
+
+    void Print(uint64_t wall, uint64_t cpu) const
+    {
+        const GSRrvWaitStats& now = g_rrv_wait_stats;
+        const double n = static_cast<double>(fields);
+        const auto ms = [n](uint64_t ns) { return static_cast<double>(ns) / 1e6 / n; };
+        const auto per = [n](uint64_t count) { return static_cast<double>(count) / n; };
+        const auto bucket = [&](GSRrvWait w) {
+            const size_t i = static_cast<size_t>(w);
+            return std::make_pair(ms(now.wait_ns[i] - last.wait_ns[i]), per(now.waits[i] - last.waits[i]));
+        };
+        const auto read = [&](GSRrvRead r) {
+            const size_t i = static_cast<size_t>(r);
+            return std::make_pair(ms(now.read_ns[i] - last.read_ns[i]), per(now.reads[i] - last.reads[i]));
+        };
+        const auto forced = bucket(GSRrvWait::Forced), rotation = bucket(GSRrvWait::Rotation),
+                   stream = bucket(GSRrvWait::Stream), other = bucket(GSRrvWait::Other);
+        const auto read_sw = read(GSRrvRead::SwPrim), read_local = read(GSRrvRead::LocalRead),
+                   read_other = read(GSRrvRead::Other);
+        std::fprintf(stderr,
+                     "[gs-wait] t=%llus fields=%llu cpu=%.2fms/f max=%.2f wait=%.2fms/f max=%.2f "
+                     "forced=%.2fms/f(%.1f/f) rotation=%.2fms/f(%.1f/f) stream=%.2fms/f(%.1f/f) other=%.2fms/f(%.1f/f) "
+                     "acquire=%.2fms/f(%.1f/f) present=%.2fms/f submits=%.1f/f midframe=%.1f/f "
+                     "swprim=%.2fms/f(%.1f/f) read:swprim=%.2fms/f(%.1f/f) read:local=%.2fms/f(%.1f/f) "
+                     "read:other=%.2fms/f(%.1f/f) read-px=%.0f/f images=%u\n",
+                     static_cast<unsigned long long>((wall - start_wall) / 1000000000ull),
+                     static_cast<unsigned long long>(fields), ms(cpu - last_cpu),
+                     static_cast<double>(max_cpu) / 1e6, ms(WaitNs(now) - WaitNs(last)),
+                     static_cast<double>(max_wait) / 1e6, forced.first, forced.second, rotation.first,
+                     rotation.second, stream.first, stream.second, other.first, other.second,
+                     ms(now.acquire_ns - last.acquire_ns), per(now.acquires - last.acquires),
+                     ms(now.present_ns - last.present_ns), per(now.submits - last.submits),
+                     per(now.midframe_submits - last.midframe_submits), ms(now.sw_prim_ns - last.sw_prim_ns),
+                     per(now.sw_prims - last.sw_prims), read_sw.first, read_sw.second, read_local.first,
+                     read_local.second, read_other.first, read_other.second,
+                     per(now.read_pixels - last.read_pixels), now.swapchain_images);
+    }
+};
+
+GsWaitLog& GsWaitLogger()
+{
+    static GsWaitLog log;
+    return log;
+}
+#endif
 
 } // namespace
 
@@ -2766,6 +2883,9 @@ extern "C" int rrv_pcsx2_gs_bridge_vsync(
     GSvsync(pcsx2_field, VsyncRegistersWritten());
     HudScaleFieldEnd();
     HudStatsFieldEnd();
+#if defined(__linux__)
+    GsWaitLogger().Field(bridge->direct_present);
+#endif
     if (gate4_obs.enabled)
     {
         Gate4GsFieldV1& row = gate4_obs.open_field;

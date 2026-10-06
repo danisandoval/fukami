@@ -66,7 +66,7 @@ sha256 = "a5d0088d69219ef4703863d38c8abb81d1fdb5b7ae7bbdcea3d9a1b0eb5ff281"
 # Linux/Steam Deck only (Gate 5): applied after the target patch.
 [[pcsx2_bridge_linux_patches]]
 path = "tools/patches/pcsx2-gs-bridge-linux.patch"
-sha256 = "21ed2a4abad51f25d3b7df356edf10a476eff16fe7cbe389e7de0950221d8e7b"
+sha256 = "d38cb9d49640e25cbeb0c5039f88163213c7665fa6f42612a1da03e106277fa0"
 
 [[pcsx2_gt_capture_patches]]
 path = "tools/patches/pcsx2-gt-capture.patch"

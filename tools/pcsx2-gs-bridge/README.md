@@ -90,6 +90,13 @@ docker run --rm --platform linux/amd64 -v "$PWD":"$PWD" -w "$PWD" rrv-linux-buil
   `XInitThreads`). The owner-thread exports exist; `pump_main_thread` is a no-op.
 - Not on Vulkan: the Metal `presentDrawable:atTime:` pacer
   (`RRV_PCSX2_GS_PRESENT_*` are ignored); FIFO vsync alone paces.
+- GS-thread attribution (Linux patch): every ~2 s the bridge prints a
+  `[gs-wait]` line next to the `[cpu]` log: the GSvsync thread's CPU time per
+  field, and the time it was blocked on the GPU, split into forced readbacks,
+  command-buffer rotation, stream-buffer exhaustion and swap-chain acquire,
+  plus the CPU-sprite (`SwPrimRender`) and texture-cache readback costs and the
+  swap-chain image count. On by default with direct presentation;
+  `RRV_PCSX2_GS_WAIT_LOG=0` turns it off (`=1` also headless).
 - SW rasterizer: the same static C functions as macOS (no JIT on x86-64
   either). The unsigned colour-step fix applies on every arch; the JIT-exact
   per-pixel mipmap LOD is ARM64-only, so x86-64 uses PCSX2's generic C LOD.

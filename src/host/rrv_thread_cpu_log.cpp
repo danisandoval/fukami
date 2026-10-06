@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
@@ -92,6 +93,71 @@ std::map<int, Sample> readThreads()
     return out;
 }
 
+// Clocks (Steam Deck: CPU and GPU share one power budget, so heavy GPU work
+// at a high internal scale can lower the CPU clock under the GS owner). Reads
+// sysfs; a missing file reads as 0 and its column is left out.
+long readLong(const char *path)
+{
+    FILE *file = std::fopen(path, "r");
+    if (!file)
+        return 0;
+    long value = 0;
+    if (std::fscanf(file, "%ld", &value) != 1)
+        value = 0;
+    std::fclose(file);
+    return value;
+}
+
+// Highest current clock over all CPUs, in MHz (scaling_cur_freq is in kHz).
+long cpuMhz()
+{
+    long best = 0;
+    for (int cpu = 0; cpu < 256; ++cpu)
+    {
+        char path[96];
+        std::snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", cpu);
+        const long khz = readLong(path);
+        if (khz <= 0 && cpu > 0)
+            break;
+        best = std::max(best, khz / 1000);
+    }
+    return best;
+}
+
+// The first amdgpu card's current shader clock ("1: 1600Mhz *" in pp_dpm_sclk)
+// and busy percentage.
+void gpuState(long &mhz, long &busy)
+{
+    mhz = busy = -1;
+    for (int card = 0; card < 4; ++card)
+    {
+        char path[96];
+        std::snprintf(path, sizeof path, "/sys/class/drm/card%d/device/pp_dpm_sclk", card);
+        FILE *file = std::fopen(path, "r");
+        if (!file)
+            continue;
+        char line[128];
+        while (std::fgets(line, sizeof line, file))
+        {
+            if (!std::strchr(line, '*'))
+                continue;
+            const char *colon = std::strchr(line, ':');
+            mhz = colon ? std::strtol(colon + 1, nullptr, 10) : -1;
+            break;
+        }
+        std::fclose(file);
+        std::snprintf(path, sizeof path, "/sys/class/drm/card%d/device/gpu_busy_percent", card);
+        FILE *busyFile = std::fopen(path, "r");
+        if (busyFile)
+        {
+            if (std::fscanf(busyFile, "%ld", &busy) != 1)
+                busy = -1;
+            std::fclose(busyFile);
+        }
+        return;
+    }
+}
+
 void samplerLoop()
 {
     nameCurrentThread("rrv-cpu-log");
@@ -124,6 +190,15 @@ void samplerLoop()
         for (const auto &[percent, name] : busy)
             line += " " + name + "=" + std::to_string(static_cast<int>(percent + 0.5)) + "%";
         line += " total=" + std::to_string(static_cast<int>(total + 0.5)) + "%";
+        // Instantaneous clocks at the sample, not averages over the interval.
+        if (const long mhz = cpuMhz(); mhz > 0)
+            line += " cpu-mhz=" + std::to_string(mhz);
+        long gpuMhz = -1, gpuBusy = -1;
+        gpuState(gpuMhz, gpuBusy);
+        if (gpuMhz >= 0)
+            line += " gpu-mhz=" + std::to_string(gpuMhz);
+        if (gpuBusy >= 0)
+            line += " gpu-busy=" + std::to_string(gpuBusy) + "%";
         // Owner split: wall time inside owner commands, the GS part of it
         // (Backend::submit/vsync on any thread), and how many owner commands
         // raised the x86 denormal-operand flag (0 on other ISAs).
