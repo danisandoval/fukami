@@ -330,7 +330,7 @@ index c0a6a4ccc..553896b44 100644
  		m_tracked_fences.begin(), m_current_offset == iter->second ? m_tracked_fences.end() : ++iter);
  	m_current_offset = new_offset;
 diff --git a/pcsx2/GS/Renderers/Vulkan/VKSwapChain.cpp b/pcsx2/GS/Renderers/Vulkan/VKSwapChain.cpp
-index 4de995d72..d6262c121 100644
+index 4de995d72..c7d6e1ee5 100644
 --- a/pcsx2/GS/Renderers/Vulkan/VKSwapChain.cpp
 +++ b/pcsx2/GS/Renderers/Vulkan/VKSwapChain.cpp
 @@ -4,6 +4,7 @@
@@ -341,7 +341,35 @@ index 4de995d72..d6262c121 100644
  #include "VMManager.h"
  
  #include "common/Assertions.h"
-@@ -460,6 +461,7 @@ bool VKSwapChain::CreateSwapChain()
+@@ -13,6 +14,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <cmath>
++#include <cstdlib>
+ 
+ #if defined(VK_USE_PLATFORM_XLIB_KHR)
+ #include <X11/Xlib.h>
+@@ -325,8 +327,18 @@ bool VKSwapChain::CreateSwapChain()
+ 
+ 	// Select number of images in swap chain, we prefer one buffer in the background to work on in triple-buffered mode.
+ 	// maxImageCount can be zero, in which case there isn't an upper limit on the number of buffers.
++	// RRV GS bridge (pcsx2-gs-bridge-linux.patch): FIFO gets a third image too.
++	// With two, the acquire right after each present (SubmitCommandBuffer)
++	// blocks the GS thread until the next vblank, so a field that finishes late
++	// also starts the next one late, while its packets are already queued. The
++	// third image lets the GS thread go on; it costs up to one frame of display
++	// delay only when frames are produced faster than the display shows them.
++	// It follows the even-pacing setting: RRV_PCSX2_GS_PRESENT_PACING=0 (menu
++	// "Even frame pacing" off) keeps PCSX2's two images, for less delay.
++	const char* rrv_pacing = std::getenv("RRV_PCSX2_GS_PRESENT_PACING");
++	const bool rrv_fifo_third_image = !(rrv_pacing && rrv_pacing[0] == '0');
+ 	u32 image_count = std::clamp<u32>(
+-		(m_present_mode == VK_PRESENT_MODE_MAILBOX_KHR) ? 3 : 2, surface_capabilities.minImageCount,
++		(m_present_mode == VK_PRESENT_MODE_MAILBOX_KHR || rrv_fifo_third_image) ? 3 : 2, surface_capabilities.minImageCount,
+ 		(surface_capabilities.maxImageCount == 0) ? std::numeric_limits<u32>::max() : surface_capabilities.maxImageCount);
+ 	DEV_LOG("Creating a swap chain with {} images in present mode {}", image_count, PresentModeToString(m_present_mode));
+ 
+@@ -460,6 +472,7 @@ bool VKSwapChain::CreateSwapChain()
  
  	m_images.reserve(image_count);
  	m_current_image = 0;
@@ -349,7 +377,7 @@ index 4de995d72..d6262c121 100644
  	for (u32 i = 0; i < image_count; i++)
  	{
  		std::unique_ptr<GSTextureVK> texture =
-@@ -551,8 +553,13 @@ VkResult VKSwapChain::AcquireNextImage()
+@@ -551,8 +564,13 @@ VkResult VKSwapChain::AcquireNextImage()
  	// Use a different semaphore for each image.
  	m_current_semaphore = (m_current_semaphore + 1) % static_cast<u32>(m_semaphores.size());
  

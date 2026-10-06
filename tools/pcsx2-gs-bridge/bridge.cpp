@@ -1435,8 +1435,10 @@ extern "C" RrvPcsx2GsBridge* rrv_pcsx2_gs_bridge_create(
     // time is unaffected. Off by default and never with a detached (headless)
     // surface. The Metal-only atTime present pacer (pcsx2-gs-bridge-target
     // .patch, RrvPresentPacer) has no Vulkan equivalent: core Vulkan has no
-    // present-at-time, so on Linux RRV_PCSX2_GS_PRESENT_* are ignored and
-    // FIFO alone paces presentation.
+    // present-at-time, so on Linux FIFO alone paces presentation. There
+    // RRV_PCSX2_GS_PRESENT_PACING only picks the FIFO swap chain's image count
+    // (pcsx2-gs-bridge-linux.patch, VKSwapChain): 3 by default, so a late field
+    // does not block the GS thread until the next vblank; 0 keeps PCSX2's 2.
     const bool vsync = direct_requested && EnvFlag("RRV_PCSX2_GS_VSYNC", false);
     // RRV_GATE3_FAST_FORWARD=N (replay debugging): the runtime runs the first N
     // starts unpaced, so vsync would throttle them to the display rate; present

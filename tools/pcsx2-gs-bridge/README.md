@@ -88,8 +88,12 @@ docker run --rm --platform linux/amd64 -v "$PWD":"$PWD" -w "$PWD" rrv-linux-buil
   `LINUX_WAYLAND` (wl_display*, wl_surface*), mapped to PCSX2 `WindowInfo`.
   `CALLER_OWNS_HANDLES` is required; there is no main-thread rule (SDL2 calls
   `XInitThreads`). The owner-thread exports exist; `pump_main_thread` is a no-op.
-- Not on Vulkan: the Metal `presentDrawable:atTime:` pacer
-  (`RRV_PCSX2_GS_PRESENT_*` are ignored); FIFO vsync alone paces.
+- Not on Vulkan: the Metal `presentDrawable:atTime:` pacer; FIFO vsync alone
+  paces. `RRV_PCSX2_GS_PRESENT_PACING` (the even-pacing setting) instead picks
+  the FIFO swap chain's image count: 3 by default, so the acquire after each
+  present does not block the GS thread until the next vblank when a field runs
+  late; `=0` keeps PCSX2's 2 (less display delay). The other
+  `RRV_PCSX2_GS_PRESENT_*` variables are ignored.
 - GS-thread attribution (Linux patch): every ~2 s the bridge prints a
   `[gs-wait]` line next to the `[cpu]` log: the GSvsync thread's CPU time per
   field, and the time it was blocked on the GPU, split into forced readbacks,

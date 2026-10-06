@@ -263,7 +263,8 @@ const std::vector<Spec> &schema()
         {"display", "integer_scaling", "Integer scaling", "Snap the picture to whole-number sizes.",
          Kind::boolean, "false", {}, 0, 0, Apply::live},
         {"display", "present_pacing", "Even frame pacing",
-         "Shows every frame for the same time (smooth motion). Off: about 6-9 ms less delay, some judder.",
+         "Shows every frame for the same time (smooth motion; on Linux, a late frame does not hold up the next). "
+         "Off: a little less delay, some judder.",
          Kind::boolean, "true"},
         // [rendering]
         {"rendering", "render_mode", "Render mode", "full: progressive full frames. field: the older half-height output.",
