@@ -172,7 +172,16 @@ git -C "$clean_source_dir" diff --cached --check
 
 # Release binaries must not carry the builder's directory names (assert messages and debug info embed the paths of the
 # sources): the patched PCSX2 tree, the bridge sources and the build directory are mapped to fixed names.
-prefix_map="-ffile-prefix-map=$clean_source_dir=/pcsx2 -ffile-prefix-map=$root_dir=/fukami -ffile-prefix-map=$build_dir=/bridge-build"
+# Each flag is quoted inside the flags string: the checkout path may hold a space, and the generated build
+# commands pass the string through a shell.
+prefix_map="\"-ffile-prefix-map=$clean_source_dir=/pcsx2\" \"-ffile-prefix-map=$root_dir=/fukami\" \"-ffile-prefix-map=$build_dir=/bridge-build\""
+if [[ $(uname -s) == Linux && -n "${RRV_BRIDGE_ARCH_FLAGS:-}" ]]; then
+    # Experiments only: extra compiler flags for the bridge, e.g. "-mavx2 -mbmi -mbmi2 -mfma -ffp-contract=off".
+    # Building the bridge for AVX2 (and FMA) was measured on the Steam Deck (2026-10-05, 14-car race start, replay
+    # of a recorded session): the GS thread's time did not change beyond the run-to-run noise, so the product keeps
+    # PCSX2's SSE4.1 baseline with run-time dispatched AVX2 files and runs on any x86-64 CPU with SSE4.1.
+    prefix_map+=" ${RRV_BRIDGE_ARCH_FLAGS}"
+fi
 cmake_arch_args+=("-DCMAKE_C_FLAGS=$prefix_map" "-DCMAKE_CXX_FLAGS=$prefix_map")
 if [[ $(uname -s) == Darwin ]]; then
     cmake_arch_args+=("-DCMAKE_OBJC_FLAGS=$prefix_map" "-DCMAKE_OBJCXX_FLAGS=$prefix_map")

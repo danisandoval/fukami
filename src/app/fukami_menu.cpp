@@ -50,6 +50,8 @@ std::string choiceName(const settings::Spec &spec, std::string_view choice)
         return "Automatic";
     if (spec.key == "aniso")
         return choice == "0" ? std::string("Off") : std::string(choice) + "x";
+    if (spec.key == "texture_filter")
+        return choice == "ps2" ? "PS2 (stock)" : "Bilinear";
     if (spec.key == "render_mode")
         return choice == "full" ? "Full frames" : "Fields";
     std::string name(choice);

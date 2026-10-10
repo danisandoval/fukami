@@ -68,7 +68,8 @@ void printStartup()
     const auto launch = fukami::settings::LaunchConfig::fromEnvironment([](const char *name) { return std::getenv(name); });
     std::cerr << "[rrv-product] launch ratio=" << launch.ratio << " hud=" << launch.hud << " render=" << launch.renderMode
               << " scale=" << launch.scale << " aa1=" << launch.aa1 << " fxaa=" << launch.fxaa << " cas=" << launch.cas
-              << " aniso=" << launch.aniso << " mipmap=" << launch.mipmap << " analog=" << launch.analog
+              << " aniso=" << launch.aniso << " texture-filter=" << launch.textureFilter << " mipmap=" << launch.mipmap
+              << " analog=" << launch.analog
               << " rumble=" << launch.rumble << " car-lod=" << launch.carLod << " draw-distance=" << launch.drawDistance
               << " fast-unpack=" << launch.fastUnpack << " native-code=" << launch.nativeCode
               << " paced=" << !launch.unpaced << " inline=" << launch.inlineExecution << " headless=" << launch.headless

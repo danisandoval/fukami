@@ -88,3 +88,6 @@ Paths are relative to `third_party/ps2recomp/`. "Overlays" are those whose trans
   `src/lib/ps2_vu1.cpp`: SPDX / PCSX2 provenance header lines added (they adapt PCSX2 logic); no code change.
 - `CMakeLists.txt`: `ps2xStudio` (upstream's GUI) and `ps2xTest` (its tests) are added only if their directories exist. The product never builds
   it, and the public Fukami export leaves it out (its bundled fonts carry no licence file).
+- `ps2xRuntime/include/ps2_runtime.h`, `src/lib/gate3_guest_admission_runtime.inc`: `gate3ChargeNamedHleV1` keeps the
+  cost entry it found for a name's address (64 slots, the text compared on every use) instead of building a
+  `std::string` and walking the map on every call. Same cost, same order of service; host time only.

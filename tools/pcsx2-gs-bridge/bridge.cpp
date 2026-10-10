@@ -1398,6 +1398,36 @@ extern "C" RrvPcsx2GsBridge* rrv_pcsx2_gs_bridge_create(
         std::fprintf(stderr, "[pcsx2-gs-bridge] anisotropic filtering=%ux\n",
                      static_cast<unsigned>(options.MaxAnisotropy));
     }
+    // RRV_PCSX2_GS_TEXTURE_FILTER=ps2|bilinear: ps2 (default) filters each draw as
+    // its TEX1 asks. bilinear is PCSX2's "Bilinear (Forced excluding sprite)"
+    // (GSVertexTrace: every non-sprite draw samples linearly, sprites keep
+    // TEX1). RR5 draws its cars with MMAG=NEAREST and MXL=0, so stock cars
+    // show their texels as blocks, and the course already asks for LINEAR
+    // (measured with RRV_PCSX2_GS_DRAWDUMP on attract field 2200 and field
+    // 47500 of the owner's race replay: the PSMT8 512x512 car page at TBP0
+    // 0x1a80 is the only texture a non-sprite draw samples NEAREST; docs/
+    // TESTING.md T-TEXTURE-FILTER). So in RR5 this setting changes the cars.
+    // There is no trilinear choice: PCSX2's "Trilinear (Forced)" was tried
+    // (f0de78a) and is not trilinear here. With this profile (GPU palette
+    // conversion on, HWMipmap on) it leaves a race pixel-identical to bilinear,
+    // and with both off its generated mip levels come out magenta on Metal
+    // (T-TEXTURE-FILTER).
+    // A host enhancement like RRV_PCSX2_GS_ANISO: it changes
+    // rendered pixels, including headless captures, so it is never set for
+    // oracle work. The guest and the GS command stream are unchanged.
+    options.TextureFiltering = BiFiltering::PS2;
+    if (const char* filter = std::getenv("RRV_PCSX2_GS_TEXTURE_FILTER"); filter && filter[0] != '\0')
+    {
+        const std::string_view value(filter);
+        if (value != "ps2" && value != "bilinear")
+        {
+            SetError(error, error_capacity, "RRV_PCSX2_GS_TEXTURE_FILTER must be ps2 or bilinear, got %s", filter);
+            return nullptr;
+        }
+        if (value == "bilinear")
+            options.TextureFiltering = BiFiltering::Forced_But_Sprite;
+        std::fprintf(stderr, "[pcsx2-gs-bridge] texture filter=%s\n", filter);
+    }
     if (direct_requested)
     {
         options.FXAA = EnvFlag("RRV_PCSX2_GS_FXAA", false);

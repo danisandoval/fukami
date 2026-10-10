@@ -129,6 +129,10 @@
     {
       "name": "rrv-fukami-menu",
       "target": "rrv-fukami-menu-tests"
+    },
+    {
+      "name": "rrv-cursor-idle",
+      "target": "rrv-cursor-idle-tests"
     }
   ],
   "input_dependent": [

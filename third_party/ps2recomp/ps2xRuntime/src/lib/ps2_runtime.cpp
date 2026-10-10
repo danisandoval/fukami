@@ -1810,7 +1810,7 @@ void PS2Runtime::handleSyscall(uint8_t *rdram, R5900Context *ctx, uint32_t encod
                                    ? encodedSyscallId
                                    : getRegU32(ctx, 3); // $v1 / $3 is the EE kernel syscall number
 
-    gate3ChargeNamedHleV1(ctx, (std::string("syscall:") + std::to_string(syscallId)).c_str());
+    gate3ChargeSyscallHleV1(ctx, syscallId);
     if (ps2_syscalls::dispatchNumericSyscall(syscallId, rdram, ctx, this))
     {
         return;

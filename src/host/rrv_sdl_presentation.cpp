@@ -1,4 +1,5 @@
 #include "rrv_sdl_presentation.h"
+#include "rrv_cursor_idle.h"
 
 #if defined(RRV_M2P_PAD_OBSERVER)
 #include "rrv_m2p_pad_observer.h"
@@ -720,6 +721,9 @@ public:
     bool stickLeft = false, stickRight = false, stickUp = false, stickDown = false;
     bool lastFullscreen = false;
     bool restartAfterClose = false;
+    // The pointer is hidden in full screen while the mouse is still (rrv_cursor_idle.h).
+    rrv::host::CursorIdle cursorIdle;
+    bool cursorHidden = false;
 
     // Main thread (pumpEvents).
     void routeMenuEvent(const SDL_Event &event);
@@ -1387,6 +1391,9 @@ void SdlPresentation::pumpEvents()
         {
             m_impl->routeMenuEvent(event);
         }
+        if (event.type == SDL_MOUSEMOTION || event.type == SDL_MOUSEBUTTONDOWN ||
+            event.type == SDL_MOUSEBUTTONUP || event.type == SDL_MOUSEWHEEL)
+            m_impl->cursorIdle.activity(std::chrono::steady_clock::now());
         m_impl->pad->handleEvent(event);
     }
     if (m_impl->menu)
@@ -1399,6 +1406,15 @@ void SdlPresentation::pumpEvents()
         std::fprintf(stderr, "[sdl] fullscreen=%d\n", fullscreen ? 1 : 0);
         if (m_impl->menu)
             m_impl->menu->fullscreenChanged(fullscreen, !m_impl->testLifecycle);
+    }
+    const bool hideCursor = m_impl->cursorIdle.hidden(fullscreen, m_impl->menu && m_impl->menu->isOpen(),
+                                                      std::chrono::steady_clock::now());
+    if (hideCursor != m_impl->cursorHidden)
+    {
+        m_impl->cursorHidden = hideCursor;
+        std::fprintf(stderr, "[sdl] pointer %s\n", hideCursor ? "hidden (full screen, mouse still)" : "shown");
+        if (SDL_ShowCursor(hideCursor ? SDL_DISABLE : SDL_ENABLE) < 0)
+            std::fprintf(stderr, "[sdl] cursor %s failed: %s\n", hideCursor ? "hide" : "show", SDL_GetError());
     }
     if (m_impl->testLifecycle)
     {

@@ -16,7 +16,9 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <cctype>
 #include <fstream>
+#include <sstream>
 #include <libchdr/cdrom.h>
 #include <libchdr/chd.h>
 #include <numeric>
@@ -580,6 +582,174 @@ std::unique_ptr<SectorSource> openChd(const std::filesystem::path& path, Result&
     return err.status == Status::ok ? std::move(chd) : nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// .bin/.cue (and bare .bin) source
+// ---------------------------------------------------------------------------
+// The first (data) track of a raw image. A cue sheet names the file, the track mode (MODE1/2048,
+// MODE1/2352, MODE2/2352, MODE2/2336 ...) and INDEX 01; a bare .bin has no sheet, so its sector size
+// is guessed from the file size. The 2048 user bytes sit at a fixed offset in each stored sector:
+// 0 (cooked), 16 (MODE1/2352: sync + header), 24 (MODE2/2352: sync + header + subheader), 8 (MODE2/2336).
+class BinSource final : public SectorSource {
+public:
+    ~BinSource() override
+    {
+        if (f_)
+            std::fclose(f_);
+    }
+
+    Result open(const std::filesystem::path& file, uint32_t stride, uint32_t dataOffset, uint64_t startSector,
+                uint64_t endSector)
+    {
+        f_ = std::fopen(file.string().c_str(), "rb");
+        if (!f_)
+            return {Status::cannotOpen, "The disc image cannot be opened."};
+        std::error_code ec;
+        const uint64_t bytes = std::filesystem::file_size(file, ec);
+        if (ec || stride == 0)
+            return {Status::damaged, "The disc image cannot be read."};
+        uint64_t total = bytes / stride;
+        if (endSector && endSector < total)
+            total = endSector;
+        if (startSector >= total)
+            return {Status::damaged, "The disc image is empty or the cue sheet does not match it."};
+        stride_ = stride;
+        dataOffset_ = dataOffset;
+        start_ = startSector;
+        sectors_ = uint32_t(std::min<uint64_t>(total - startSector, UINT32_MAX));
+        return ok();
+    }
+
+    uint32_t sectorCount() const override { return sectors_; }
+
+    bool readSector(uint32_t lba, uint8_t* out) override
+    {
+        if (lba >= sectors_)
+            return false;
+        const uint64_t at = (start_ + lba) * stride_ + dataOffset_;
+        return fseeko(f_, off_t(at), SEEK_SET) == 0 && std::fread(out, 1, kSectorSize, f_) == kSectorSize;
+    }
+
+private:
+    std::FILE* f_ = nullptr;
+    uint32_t stride_ = kSectorSize, dataOffset_ = 0, sectors_ = 0;
+    uint64_t start_ = 0;
+};
+
+std::string upper(std::string s)
+{
+    for (char& c : s)
+        c = char(std::toupper(static_cast<unsigned char>(c)));
+    return s;
+}
+
+// "MODE1/2352" -> stride 2352, user data at 16. False for audio and unknown modes.
+bool trackLayout(const std::string& mode, uint32_t& stride, uint32_t& offset)
+{
+    const std::string m = upper(mode);
+    if (m == "MODE1/2048" || m == "MODE2/2048") { stride = 2048; offset = 0; return true; }
+    if (m == "MODE1/2352") { stride = 2352; offset = 16; return true; }
+    if (m == "MODE2/2352") { stride = 2352; offset = 24; return true; }
+    if (m == "MODE2/2336") { stride = 2336; offset = 8; return true; }
+    return false;
+}
+
+bool parseMsf(const std::string& t, uint64_t& frames)
+{
+    unsigned m = 0, s = 0, f = 0;
+    if (std::sscanf(t.c_str(), "%u:%u:%u", &m, &s, &f) != 3)
+        return false;
+    frames = (uint64_t(m) * 60 + s) * 75 + f;
+    return true;
+}
+
+std::unique_ptr<SectorSource> openCue(const std::filesystem::path& cue, Result& err)
+{
+    std::ifstream in(cue);
+    if (!in) {
+        err = {Status::cannotOpen, "The disc image cannot be opened."};
+        return nullptr;
+    }
+    struct Track {
+        int number = 0;
+        std::string file, mode;
+        uint64_t index01 = 0;
+        bool hasIndex = false;
+    };
+    std::vector<Track> tracks;
+    std::string file, line;
+    while (std::getline(in, line)) {
+        std::istringstream ls(line);
+        std::string word;
+        ls >> word;
+        word = upper(word);
+        if (word == "FILE") {
+            const auto a = line.find('"'), b = line.rfind('"');
+            if (a != std::string::npos && b > a) {
+                file = line.substr(a + 1, b - a - 1);
+            } else {
+                ls >> file;
+            }
+        } else if (word == "TRACK") {
+            Track t;
+            ls >> t.number >> t.mode;
+            t.file = file;
+            tracks.push_back(t);
+        } else if (word == "INDEX" && !tracks.empty()) {
+            int idx = -1;
+            std::string msf;
+            ls >> idx >> msf;
+            if (idx == 1 && parseMsf(msf, tracks.back().index01))
+                tracks.back().hasIndex = true;
+        }
+    }
+    if (tracks.empty() || tracks[0].file.empty() || !tracks[0].hasIndex) {
+        err = {Status::notIso9660, "This cue sheet has no data track."};
+        return nullptr;
+    }
+    const Track& t = tracks[0];
+    uint32_t stride = 0, offset = 0;
+    if (!trackLayout(t.mode, stride, offset)) {
+        err = {Status::notIso9660, "The first track of this cue sheet is not a data track."};
+        return nullptr;
+    }
+    // The data track ends where the next track begins in the same file.
+    uint64_t end = 0;
+    if (tracks.size() > 1 && tracks[1].file == t.file && tracks[1].hasIndex)
+        end = tracks[1].index01;
+    std::filesystem::path bin = std::filesystem::path(t.file);
+    if (bin.is_relative())
+        bin = cue.parent_path() / bin;
+    auto src = std::make_unique<BinSource>();
+    err = src->open(bin, stride, offset, t.index01, end);
+    return err.status == Status::ok ? std::move(src) : nullptr;
+}
+
+std::unique_ptr<SectorSource> openBin(const std::filesystem::path& bin, Result& err)
+{
+    std::error_code ec;
+    const uint64_t bytes = std::filesystem::file_size(bin, ec);
+    if (ec) {
+        err = {Status::cannotOpen, "The disc image cannot be opened."};
+        return nullptr;
+    }
+    // No cue sheet: a data-only image. 2352-byte MODE1 sectors if the size fits, otherwise cooked 2048.
+    const bool raw = bytes % 2352 == 0 && bytes % 2048 != 0;
+    auto src = std::make_unique<BinSource>();
+    err = src->open(bin, raw ? 2352 : 2048, raw ? 16 : 0, 0, 0);
+    return err.status == Status::ok ? std::move(src) : nullptr;
+}
+
+// Picks the reader by extension: .cue and .bin/.iso here, anything else is read as a CHD.
+std::unique_ptr<SectorSource> openImage(const std::filesystem::path& path, Result& err)
+{
+    const std::string ext = upper(path.extension().string());
+    if (ext == ".CUE")
+        return openCue(path, err);
+    if (ext == ".BIN" || ext == ".ISO")
+        return openBin(path, err);
+    return openChd(path, err);
+}
+
 }  // namespace detail
 
 // ---------------------------------------------------------------------------
@@ -603,7 +773,7 @@ Result probeRr5Usa(const std::filesystem::path& chd)
 {
     return guarded([&]() -> Result {
         Result err{Status::ok, {}};
-        auto src = detail::openChd(chd, err);
+        auto src = detail::openImage(chd, err);
         if (!src)
             return err;
         return detail::probeSource(*src, detail::rr5UsaProfile());
@@ -615,7 +785,7 @@ Result extractRr5Usa(const std::filesystem::path& chd, const std::filesystem::pa
 {
     return guarded([&]() -> Result {
         Result err{Status::ok, {}};
-        auto src = detail::openChd(chd, err);
+        auto src = detail::openImage(chd, err);
         if (!src)
             return err;
         return detail::extractSource(*src, detail::rr5UsaProfile(), destDir, progress);

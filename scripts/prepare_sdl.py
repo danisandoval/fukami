@@ -120,6 +120,9 @@ def prepare(prefix: pathlib.Path, source: pathlib.Path, target: str, jobs: int) 
         workspace = pathlib.Path(temporary) / "build"
         destdir = pathlib.Path(temporary) / "install"
         staged = destdir / prefix.relative_to(prefix.anchor)
+        # Each flag is quoted inside the flags string: the checkout path may hold a space, and the generated build
+        # commands pass the string through a shell.
+        prefix_map = f'"-ffile-prefix-map={source}=/SDL" "-ffile-prefix-map={workspace}=/SDL-build"'
         commands = [
             ["cmake", "-S", str(source), "-B", str(workspace), "-G", "Ninja",
              "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_INSTALL_PREFIX={prefix}",
@@ -127,8 +130,7 @@ def prepare(prefix: pathlib.Path, source: pathlib.Path, target: str, jobs: int) 
              "-DCMAKE_INSTALL_NAME_DIR=@rpath", "-DSDL_SHARED=ON", "-DSDL_STATIC=OFF",
              "-DSDL_CCACHE=OFF", "-DSDL_TEST_LIBRARY=OFF", "-DSDL_TESTS=OFF", "-DSDL_INSTALL=ON",
              # no builder paths in the shipped library (assert messages and debug info embed source paths)
-             f"-DCMAKE_C_FLAGS=-ffile-prefix-map={source}=/SDL -ffile-prefix-map={workspace}=/SDL-build",
-             f"-DCMAKE_OBJC_FLAGS=-ffile-prefix-map={source}=/SDL -ffile-prefix-map={workspace}=/SDL-build"],
+             f"-DCMAKE_C_FLAGS={prefix_map}", f"-DCMAKE_OBJC_FLAGS={prefix_map}"],
             ["cmake", "--build", str(workspace), "--parallel", str(jobs)],
             ["cmake", "--install", str(workspace)],
         ]

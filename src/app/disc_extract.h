@@ -46,7 +46,7 @@ struct Result {
     std::string message;  // short, user-facing
 };
 
-// Checks the CHD, extracts the expected files from the ISO9660 root directory into
+// Checks the disc image (a CHD, or a .cue/.bin pair), extracts the expected files from the ISO9660 root directory into
 // destDir (created if missing) via temp files + atomic rename, verifies every file's
 // SHA-256 against the expected list, and returns ok only if all nine match.
 // progress may be null; returning false from it cancels (partial temp files removed).
@@ -108,6 +108,13 @@ Result extractSource(SectorSource& src, const Profile& profile, const std::files
 // Opens a CHD (CD track metadata or DVD) as a 2048-byte sector source.
 // On failure returns null and fills err.
 std::unique_ptr<SectorSource> openChd(const std::filesystem::path& path, Result& err);
+
+// Opens a raw image: a .cue sheet (its first data track, in the .bin it names), or a bare .bin/.iso
+// (sector size guessed from the file size). Same contract as openChd.
+std::unique_ptr<SectorSource> openCue(const std::filesystem::path& path, Result& err);
+std::unique_ptr<SectorSource> openBin(const std::filesystem::path& path, Result& err);
+// By extension: .cue, .bin/.iso, otherwise a CHD.
+std::unique_ptr<SectorSource> openImage(const std::filesystem::path& path, Result& err);
 
 class Sha256 {
 public:

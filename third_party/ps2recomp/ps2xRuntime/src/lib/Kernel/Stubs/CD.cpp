@@ -137,7 +137,10 @@ namespace ps2_stubs
             const char *tag = "";
         };
 
-        std::vector<uint8_t> completedPayload;
+        // One reused buffer: a fresh zero-filled vector per read cost page faults and a fill for every
+        // megabyte (the 3.4 MB boot read was a late frame on the Steam Deck, 2026-10-05).
+        static thread_local std::vector<uint8_t> completedPayload;
+        completedPayload.clear();
         auto tryRead = [&](const CdReadArgs &args) -> bool
         {
             const uint64_t requested = static_cast<uint64_t>(args.sectors) * kCdSectorSize;
@@ -155,16 +158,19 @@ namespace ps2_stubs
             {
                 return true;
             }
-            std::vector<uint8_t> staged(bytes);
+            std::vector<uint8_t> &staged = completedPayload; // empty again on every failure below
+            staged.resize(bytes);
             if (!gate3ReadCdHost(args.lbn, args.sectors, staged.data(), bytes, runtime,
                                  iopDestination ? "sceCdReadIOPm" : "sceCdRead"))
             {
+                staged.clear();
                 return false;
             }
             if (iopDestination)
             {
                 if (!writeIopHeapBytes(addr, staged.data(), bytes))
                 {
+                    staged.clear();
                     g_lastCdError = -1;
                     return false;
                 }
@@ -173,7 +179,6 @@ namespace ps2_stubs
             {
                 std::memcpy(rdram + addr, staged.data(), bytes);
             }
-            completedPayload = std::move(staged);
             return true;
         };
 

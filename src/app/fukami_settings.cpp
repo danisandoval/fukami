@@ -278,6 +278,11 @@ const std::vector<Spec> &schema()
          Kind::integer, "0", {}, 0, 100, Apply::live},
         {"rendering", "aniso", "Anisotropic filtering", "Keeps textures at steep angles sharp.",
          Kind::choice, "0", {"0", "2", "4", "8", "16"}},
+        // Host enhancement (PCSX2 "Bilinear (Forced excluding sprite)"). RR5 asks for point sampling on its car
+        // textures only (TEX1 MMAG=NEAREST), so this is what smooths the cars; 2D sprites keep the game's filter.
+        {"rendering", "texture_filter", "Texture filtering",
+         "PS2: as the game asks (car textures show their pixels). Bilinear: smooths every 3D texture, cars included.",
+         Kind::choice, "ps2", {"ps2", "bilinear"}},
         {"rendering", "mipmap", "Mipmaps", "Emulate the PS2's mipmaps (on is what the hardware does).",
          Kind::boolean, "true"},
         // [input]
@@ -297,6 +302,11 @@ const std::vector<Spec> &schema()
         {"game", "native_code", "Native hot code",
          "Runs the game's busiest code as native code: same result, less CPU. Off runs all of it as recompiled code.",
          Kind::boolean, "true"},
+        // Logs: off by default. Off, the launcher creates no session folder and writes no file (logs, pad record,
+        // start clocks, the card copy); the game's stdout/stderr go nowhere. Takes effect on restart.
+        {"game", "logging", "Write logs",
+         "Writes diagnostic logs and timing files to a session folder on disk. Off writes nothing. Takes effect on restart.",
+         Kind::boolean, "false"},
         // [timing]: split_gs and pacer_spin are in the menu ("Performance"); the rest is advanced, ini only
         {"timing", "unpaced", "Unpaced", "Run as fast as the host can (speed tests).",
          Kind::boolean, "false", {}, 0, 0, Apply::restart, false},
@@ -395,12 +405,12 @@ const std::vector<std::string_view> &userEnvAllowlist()
     static const std::vector<std::string_view> names = {
         "RRV_GS_RENDER_MODE",           "RRV_PCSX2_GS_FULL_SCALE",       "RRV_PCSX2_GS_FULL_HWAA1",
         "RRV_PCSX2_GS_FXAA",            "RRV_PCSX2_GS_CAS",              "RRV_PCSX2_GS_ANISO",
-        "RRV_PCSX2_GS_FULL_HWMIPMAP",   "RRV_PCSX2_GS_VSYNC",            "RRV_PCSX2_GS_PRESENT_PACING",
-        "RRV_PCSX2_GS_ASPECT",          "RRV_PCSX2_GS_HUD_SCALE",        "RRV_PCSX2_GS_HUD_MODE",
-        "RRV_PCSX2_GS_INTEGER_SCALING", "RRV_WINDOW_SIZE",               "RRV_WINDOW_FULLSCREEN",
-        "RRV_PAD_ANALOG",               "RRV_PAD_RUMBLE",                "RRV_RR5_CAR_LOD",
-        "RRV_RR5_DRAW_DISTANCE",        "RRV_RR5_FAST_UNPACK",           "RRV_RR5_NATIVE_HOT",
-        "RRV_RR5_WIDESCREEN",
+        "RRV_PCSX2_GS_TEXTURE_FILTER",  "RRV_PCSX2_GS_FULL_HWMIPMAP",    "RRV_PCSX2_GS_VSYNC",
+        "RRV_PCSX2_GS_PRESENT_PACING",  "RRV_PCSX2_GS_ASPECT",           "RRV_PCSX2_GS_HUD_SCALE",
+        "RRV_PCSX2_GS_HUD_MODE",        "RRV_PCSX2_GS_INTEGER_SCALING",  "RRV_WINDOW_SIZE",
+        "RRV_WINDOW_FULLSCREEN",        "RRV_PAD_ANALOG",                "RRV_PAD_RUMBLE",
+        "RRV_RR5_CAR_LOD",              "RRV_RR5_DRAW_DISTANCE",         "RRV_RR5_FAST_UNPACK",
+        "RRV_RR5_NATIVE_HOT",           "RRV_RR5_WIDESCREEN",
     };
     return names;
 }
@@ -425,6 +435,7 @@ const std::map<std::string, std::string> &messages()
         {"scale", "scale must be 1 to 8"},
         {"cas", "cas must be 0 to 100 (0 = off)"},
         {"aniso", "aniso must be 0, 2, 4, 8 or 16"},
+        {"texture_filter", "texture_filter must be ps2 or bilinear"},
         {"car_lod", "car_lod must be a number (1 = stock game)"},
         {"draw_distance", "draw_distance must be 0 to 16 (0 = stock game)"},
         {"pacer_spin", "pacer_spin must be 0 to 17 (ms; 0 = sleep)"},
@@ -499,6 +510,7 @@ LaunchConfig LaunchConfig::fromIni(const IniDocument &doc, const bool developerO
     c.fxaa = boolValue(get("rendering", "fxaa"));
     c.cas = std::stoi(get("rendering", "cas"));
     c.aniso = std::stoi(get("rendering", "aniso"));
+    c.textureFilter = get("rendering", "texture_filter");
     c.mipmap = boolValue(get("rendering", "mipmap"));
     c.analog = boolValue(get("input", "analog"));
     c.rumble = boolValue(get("input", "rumble"));
@@ -506,6 +518,7 @@ LaunchConfig LaunchConfig::fromIni(const IniDocument &doc, const bool developerO
     c.drawDistance = std::stoi(get("game", "draw_distance"));
     c.fastUnpack = boolValue(get("game", "fast_unpack"));
     c.nativeCode = boolValue(get("game", "native_code"));
+    c.logging = boolValue(get("game", "logging"));
     c.unpaced = boolValue(get("timing", "unpaced"));
     c.inlineExecution = boolValue(get("timing", "inline"));
     c.splitGs = boolValue(get("timing", "split_gs"));
@@ -542,8 +555,16 @@ std::vector<std::string> environment(const LaunchConfig &c, const LaunchPaths &p
         "RRV_GATE3_MC_ROOT=" + paths.memoryCard.string(),
         "RRV_GATE3_MC_PERSISTENT=1",
     };
+    // The live pad is admitted through the pad recorder. With a session folder it also logs pad.jsonl; without
+    // one (logging off) it admits the pad and writes no file, and there are no start clocks. A replay carries
+    // its own pad: neither.
     if (paths.recordPad)
-        env.push_back("RRV_GATE3_RECORD_PAD=" + (paths.session / "pad.jsonl").string());
+    {
+        if (!paths.session.empty())
+            env.push_back("RRV_GATE3_RECORD_PAD=" + (paths.session / "pad.jsonl").string());
+        else
+            env.push_back("RRV_GATE3_LIVE_PAD=1");
+    }
     if (c.headless)
         env.push_back("RRV_GATE3_HEADLESS=1");
     if (!c.unpaced)
@@ -571,6 +592,8 @@ std::vector<std::string> environment(const LaunchConfig &c, const LaunchPaths &p
         env.push_back("RRV_PCSX2_GS_CAS=" + std::to_string(c.cas));
     if (c.aniso != 0)
         env.push_back("RRV_PCSX2_GS_ANISO=" + std::to_string(c.aniso));
+    if (c.textureFilter != "ps2")
+        env.push_back("RRV_PCSX2_GS_TEXTURE_FILTER=" + c.textureFilter);
     if (!c.mipmap)
         env.push_back("RRV_PCSX2_GS_FULL_HWMIPMAP=0");
     if (!c.analog)
@@ -611,7 +634,8 @@ std::vector<std::string> environment(const LaunchConfig &c, const LaunchPaths &p
         env.push_back("RRV_PCSX2_GS_INTEGER_SCALING=1");
     if (!c.presentPacing)
         env.push_back("RRV_PCSX2_GS_PRESENT_PACING=0");
-    env.push_back("RRV_GATE4_START_CLOCK=" + (paths.session / "start-clock.txt").string());
+    if (!paths.session.empty())
+        env.push_back("RRV_GATE4_START_CLOCK=" + (paths.session / "start-clock.txt").string());
     if (!paths.menuIni.empty())
         env.push_back("RRV_FUKAMI_INI=" + paths.menuIni.string());
     for (const auto &[name, val] : c.extraEnv)
@@ -650,6 +674,7 @@ int flagOverride(const std::vector<std::string> &argv, const size_t index, std::
     struct Valued { const char *flag, *section, *key; };
     static const Valued valued[] = {
         {"--cas", "rendering", "cas"},           {"--aniso", "rendering", "aniso"},
+        {"--texture-filter", "rendering", "texture_filter"},
         {"--car-lod", "game", "car_lod"},        {"--draw-distance", "game", "draw_distance"},
         {"--ratio", "display", "ratio"},         {"--hud", "display", "hud"},
         {"--aspect", "display", "aspect"},       {"--window", "display", "window"},

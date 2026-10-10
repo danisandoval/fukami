@@ -60,6 +60,7 @@ void PS2Runtime::gate3ConfigureGuestWorkloadV1(Gate3GuestWorkloadV1 profile)
     }
     m_gate3AdmittedPadV1 = profile.initial_pad;
     m_gate3GuestWorkloadV1.emplace(std::move(profile));
+    m_gate3SyscallCostV1.fill(nullptr);
     for (const auto& item : m_gate3GuestWorkloadV1->pad) {
         gate3TemporalV1().Admit({item.cycle, item.sequence, [this, item] {
             if (gate3AtCutV1()) throw std::logic_error("Gate3 pad after cut");
@@ -98,15 +99,43 @@ void PS2Runtime::gate3ChargeNamedHleV1(R5900Context* ctx, const char* name)
 {
     if (!m_gate3GuestWorkloadV1 || !ctx || !name)
         throw std::logic_error("Gate3 HLE workload unbound");
-    const auto found = m_gate3GuestWorkloadV1->hle_costs.find(name);
-    if (found == m_gate3GuestWorkloadV1->hle_costs.end())
-        throw std::logic_error(std::string("Gate3 HLE cost unbound: ") + name);
-    uint64_t remaining = found->second;
+    // The callers pass string literals, thousands of times a field (the libvu0 leaves): looking the name
+    // up builds a std::string and walks the map, so the entry found for this address is kept.
+    Gate3HleCostSlotV1& slot = m_gate3HleCostCacheV1[(reinterpret_cast<uintptr_t>(name) >> 2) % m_gate3HleCostCacheV1.size()];
+    if (slot.name != name || std::strcmp(name, slot.cost->first.c_str()) != 0) {
+        const auto found = m_gate3GuestWorkloadV1->hle_costs.find(name);
+        if (found == m_gate3GuestWorkloadV1->hle_costs.end())
+            throw std::logic_error(std::string("Gate3 HLE cost unbound: ") + name);
+        slot.name = name;
+        slot.cost = &*found;
+    }
+    gate3ChargeResolvedHleV1(ctx, slot.cost->second, std::strncmp(name, "syscall:", 8) == 0);
+}
+
+void PS2Runtime::gate3ChargeSyscallHleV1(R5900Context* ctx, uint32_t id)
+{
+    if (id >= m_gate3SyscallCostV1.size() || !m_gate3GuestWorkloadV1 || !ctx) {
+        gate3ChargeNamedHleV1(ctx, ("syscall:" + std::to_string(id)).c_str());
+        return;
+    }
+    const uint64_t*& cost = m_gate3SyscallCostV1[id];
+    if (!cost) {
+        const std::string name = "syscall:" + std::to_string(id);
+        const auto found = m_gate3GuestWorkloadV1->hle_costs.find(name);
+        if (found == m_gate3GuestWorkloadV1->hle_costs.end())
+            throw std::logic_error("Gate3 HLE cost unbound: " + name);
+        cost = &found->second;
+    }
+    gate3ChargeResolvedHleV1(ctx, *cost, true);
+}
+
+void PS2Runtime::gate3ChargeResolvedHleV1(R5900Context* ctx, uint64_t remaining, bool syscall)
+{
     // Inside the armed lazy window, and ending inside it: only the clock moves (gate3LazyChargeV1).
     if (gate3LazyChargeV1(ctx, remaining))
         return;
     gate3TemporalCheckpointV1(ctx);
-    if (std::strncmp(name, "syscall:", 8) == 0) {
+    if (syscall) {
         // A kernel syscall runs with EXL set: no guest callback can enter its
         // service. HardwareTo still visits every deadline in the charge; the
         // first instruction checkpoint after the service delivers what is due.
@@ -162,8 +191,11 @@ void PS2Runtime::gate3RecordCdReadV1(const char* route, uint32_t lbn, uint32_t s
     if (m_gate3GuestWorkloadV1 &&
         m_gate3GuestWorkloadV1->cd_policy == Gate3CdPolicyV1::DeterministicNextStart) {
         if (gate3AtCutV1()) throw std::logic_error("Gate3 CD request after cut");
-        uint64_t digest = 1469598103934665603ull;
-        for (uint8_t byte : payload) { digest ^= byte; digest *= 1099511628211ull; }
+        uint64_t digest = 0;
+        if (m_gate3CdDigestV1) {
+            digest = 1469598103934665603ull;
+            for (uint8_t byte : payload) { digest ^= byte; digest *= 1099511628211ull; }
+        }
         m_gate3CdTraceV1.push_back({m_gate3NextCdReadV1++, gate3TemporalV1().now(),
             gate3TemporalV1().starts(), route, lbn, sectors, iop_destination, success,
             payload.size(), digest});

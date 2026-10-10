@@ -21,6 +21,9 @@
 #include "rrv_window_title.h"    // window title: GS backend + scene phase + rate
 
 #include <chrono>
+#include <deque>
+#include <future>
+#include <memory>
 
 void rrvDumpFnHits(const char* why); // RRV_FN_HITS counter, defined below
 #include <cfenv>
@@ -2409,11 +2412,117 @@ namespace {
 PS2Runtime::RecompiledFunction g_unpack221D68Orig = nullptr;
 int g_unpackMode = 0; // 1 fast, 2 verify
 uint64_t g_unpackCalls = 0, g_unpackBad = 0, g_unpackFallback = 0;
+uint64_t g_unpackHostNs = 0, g_unpackHostMaxNs = 0, g_unpackBytes = 0; // host cost of the native port
+uint64_t g_unpackCommitNs = 0; // of which: copying the result into guest memory
+
+// Unpack ahead (2026-10-05). The Steam Deck needs about 15 ms of host time for the largest boot packs even with
+// the host-pointer loop: one late frame each. The game reads a whole pack with one sceCdRead and calls the
+// unpacker at the earliest one field later, so a worker thread starts unpacking a copy of the pack when the read
+// returns and the unpacker call takes the finished output. The copy is compared byte for byte with the guest
+// input at the call and the worker records what the answer depends on (see RrvUnpackJob); anything else falls
+// back to unpacking on the game thread. Host-only: guest data and guest time are the same either way.
+struct RrvUnpackJob {
+    // header (10 bytes) + packed data + 16 following guest bytes. The WORKER copies them from guest memory
+    // (the copy cost the game thread about 2 ms per 3.4 MB on the Deck), so the copy can be torn if the guest
+    // writes there meanwhile: the call compares it with the guest input after the worker is done, and a torn
+    // copy then simply does not match.
+    std::vector<uint8_t> in;
+    const uint8_t* src = nullptr;     // host address of the guest input
+    uint32_t guestAddr = 0, span = 0; // filter for the call, before it waits for the worker
+    uint8_t head[10] = {};
+    std::vector<uint8_t> out;
+    uint32_t inUsed = 0, outSize = 0; // where the loop stopped
+    uint32_t lastBoundary = 0;        // input offset at the last 64-item block boundary the loop continued from
+    bool hasBoundary = false;
+    int64_t maxLead = INT64_MIN;      // largest (bytes written - input offset) at any read
+    bool valid = false;               // false: the pack reads output from before its own start
+    std::future<void> done;
+};
+std::deque<std::shared_ptr<RrvUnpackJob>> g_unpackJobs;
+std::shared_ptr<RrvUnpackJob> g_unpackJobHeld; // keeps the output of the job the last call used alive
+PS2Runtime::RecompiledFunction g_unpackCdReadOrig = nullptr;
+uint64_t g_unpackJobsStarted = 0, g_unpackJobsUsed = 0;
+
+// The statements of the host-pointer loop in rrvUnpack, on offsets into the job's own buffers.
+void rrvUnpackJobRun(RrvUnpackJob& j) {
+    j.in.assign(j.src, j.src + j.span);
+    std::memcpy(j.in.data(), j.head, sizeof j.head); // the header the read saw decides the layout
+    const uint8_t* const in = j.in.data();
+    const uint32_t s6 = in[0], flagBytes = in[1];
+    uint32_t usize, csize; std::memcpy(&usize, in + 2, 4); std::memcpy(&csize, in + 6, 4);
+    const uint32_t mask = (1u << (s6 & 31u)) - 1u, t4 = 1u << ((16u - s6) & 31u), a3 = mask + 1u, shift = s6 & 31u;
+    j.out.resize(size_t(usize) + t4 + 64u);
+    uint8_t* const out = j.out.data();
+    uint32_t p = 10u, q = 0u;
+    const uint32_t srcEnd = 10u + csize, dstEnd = usize;
+    for (;;) {
+        j.maxLead = std::max(j.maxLead, int64_t(q) - int64_t(p));
+        uint64_t s2 = 0;
+        for (uint32_t t1 = 0; t1 < flagBytes; ++t1) {
+            s2 += uint64_t(in[p]) << ((t1 * 8u) & 63u); ++p;
+            if (!(p < srcEnd)) break;
+        }
+        bool stop = false;
+        for (int32_t t1 = int32_t(flagBytes * 8u); t1 > 0; --t1) {
+            j.maxLead = std::max(j.maxLead, int64_t(q) - int64_t(p));
+            if ((s2 & 1u) != 0) {
+                const uint32_t run = std::min<uint32_t>(~s2 ? uint32_t(__builtin_ctzll(~s2)) : 64u, uint32_t(t1));
+                const uint32_t lim = std::min(srcEnd - p, dstEnd - q), k = std::min(run, lim);
+                for (uint32_t i = 0; i < k; i += 8u) std::memcpy(out + q + i, in + p + i, 8);
+                p += k; q += k;
+                s2 = k >= 64u ? 0 : s2 >> k;
+                t1 -= int32_t(k) - 1;
+                if (k == lim) { stop = true; break; }
+                continue;
+            }
+            s2 >>= 1;
+            const uint32_t v1 = uint32_t(in[p + 1u]) | (uint32_t(in[p]) << 8);
+            p += 2u;
+            uint32_t off = v1 & mask, len = uint32_t(int32_t(v1) >> shift);
+            if (off == 0) off = a3;
+            if (len == 0) len = t4;
+            if (off > q) return; // copies bytes from before this pack's output: not self-contained (valid stays false)
+            uint8_t* d = out + q; const uint8_t* c = d - off;
+            if (off >= 16u) for (uint32_t i = 0; i < len; i += 16u) std::memcpy(d + i, c + i, 16);
+            else for (uint32_t i = 0; i < len; ++i) d[i] = c[i];
+            q += len;
+            if (!(p < srcEnd) || !(q < dstEnd)) { stop = true; break; }
+        }
+        if (stop) break;
+        j.lastBoundary = p; j.hasBoundary = true;
+    }
+    j.inUsed = p; j.outSize = q; j.valid = true;
+}
+
+// sceCdRead (func_2C7780: lbn, sectors, buffer): after a successful read into EE memory that starts with a
+// plausible pack header and holds the whole pack, start unpacking a copy.
+void patch_0x2c7780_unpack_ahead(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    const uint32_t sectors = GPR_U32(ctx, 5), buf = GPR_U32(ctx, 6);
+    g_unpackCdReadOrig(rdram, ctx, runtime);
+    if (GPR_U32(ctx, 2) != 1u || sectors == 0 || sectors > 0x8000u) return;
+    const uint8_t* head = getMemPtr(rdram, buf);
+    if (!head || !getMemPtr(rdram, buf + 9u) || getMemPtr(rdram, buf + 9u) - head != 9) return;
+    uint32_t usize, csize; std::memcpy(&usize, head + 2, 4); std::memcpy(&csize, head + 6, 4);
+    if (!(uint32_t(head[0]) - 1u < 14u) || head[1] != 8u || usize == 0 || usize > 0x2000000u || csize == 0 ||
+        uint64_t(csize) + 10u > uint64_t(sectors) * 2048u || csize < 0x8000u) return; // small packs are cheap inline
+    const uint32_t span = 10u + csize + 16u;
+    const uint8_t* last = getMemPtr(rdram, buf + span - 1u);
+    if (!last || last - head != std::ptrdiff_t(span - 1u)) return;
+    auto job = std::make_shared<RrvUnpackJob>();
+    job->src = head; job->guestAddr = buf; job->span = span;
+    std::memcpy(job->head, head, sizeof job->head);
+    job->done = std::async(std::launch::async, [job] { rrvUnpackJobRun(*job); });
+    g_unpackJobs.push_back(std::move(job));
+    ++g_unpackJobsStarted;
+    while (g_unpackJobs.size() > 4u) g_unpackJobs.pop_front(); // a dropped job is waited for by its future
+}
 
 struct RrvUnpackResult {
     bool ok = false;
     uint32_t v0 = 0, base = 0, inBytes = 0;
-    std::vector<uint8_t> out;
+    std::vector<uint8_t> out;           // output of the byte-at-a-time loop
+    const uint8_t* data = nullptr;      // the output of either loop (out, or the reused scratch buffer)
+    size_t size = 0;
     std::map<uint32_t, uint32_t> words; // gp offset -> value written
 };
 
@@ -2439,7 +2548,11 @@ bool rrvUnpack(uint8_t* rdram, R5900Context* ctx, RrvUnpackResult& r) {
     const uint32_t s5 = GPR_U32(ctx, 6), a3in = GPR_U32(ctx, 7), t0 = GPR_U32(ctx, 8);
     const uint32_t src0 = s0;
     r.base = s1;
-    auto done = [&](uint32_t v0) { r.v0 = v0; r.inBytes = s0 - src0; r.ok = !bad; return r.ok; };
+    auto done = [&](uint32_t v0) {
+        r.v0 = v0; r.inBytes = s0 - src0; r.ok = !bad;
+        if (!r.data) { r.data = r.out.data(); r.size = r.out.size(); }
+        return r.ok;
+    };
     if (s0 == s5 && s5 != 0) return done(s1);
     if (get(0x5B70) == s5 && s5 != 0) return done(s1);
     const uint32_t t5 = get(0x6B04);
@@ -2467,6 +2580,116 @@ bool rrvUnpack(uint8_t* rdram, R5900Context* ctx, RrvUnpackResult& r) {
     const auto shortInput = [&] { return s5 != 0 && s5 - (s3 * 16u + 1u) < s0; };
     if (shortInput()) { put(0x5B78, s0); put(0x5B70, s5); put(0x5B74, s1); return done(s1); }
     const uint32_t a3 = s7 + 1u;
+    // Host-speed path (2026-10-05: the byte-at-a-time loop below took 115 ms for
+    // the 3.4 MB boot pack on the Steam Deck, a visible hitch in real time).
+    // When everything the loop can touch (input, output plus the longest copy,
+    // the furthest back-reference) is one contiguous host range, it runs on
+    // host pointers. Same statements as the loop below; output still goes to
+    // r.out first, so verify mode and the fallback are unchanged.
+    if (!bad && s0 < s4 && s1 < fp && s1 > a3 && fp - s1 <= 0x4000000u && s4 - s0 <= 0x4000000u) {
+        const uint32_t lo = std::min(s0, s1 - a3), hi = std::max(s4 + 16u, fp + t4 + 1u);
+        const uint8_t* first = hi > lo ? getMemPtr(rdram, lo) : nullptr;
+        const uint8_t* last = first ? getMemPtr(rdram, hi - 1u) : nullptr;
+        if (first && last && last - first == std::ptrdiff_t(hi - 1u - lo)) {
+            const uint8_t* const mem = first - lo; // mem + guest address, valid in [lo, hi)
+            // A fresh call whose input is byte for byte a pack the worker has unpacked (or is unpacking).
+            if (t5 == 0 && s0 == src0 + 10u) for (auto it = g_unpackJobs.rbegin(); it != g_unpackJobs.rend(); ++it) {
+                const std::shared_ptr<RrvUnpackJob> job = *it;
+                const uint32_t span = job->span;
+                if (job->guestAddr != src0 || span != 10u + (s4 - s0) + 16u ||
+                    std::memcmp(mem + src0, job->head, sizeof job->head) != 0) continue;
+                job->done.wait();
+                g_unpackJobs.erase(std::next(it).base());
+                if (std::memcmp(mem + src0, job->in.data(), span) != 0) break;
+                // The loop on the game thread reads this call's own output where output has overtaken input in
+                // guest memory, and stops early at a block boundary on short input: the worker's result stands
+                // only if neither can have happened.
+                const int64_t gap = int64_t(src0) - int64_t(s1);
+                const bool noOverlapRead = gap >= job->maxLead || gap + int64_t(span) <= 0;
+                const bool noShortInput = !job->hasBoundary || !(s5 != 0 && s5 - (s3 * 16u + 1u) < src0 + job->lastBoundary);
+                if (!job->valid || !noOverlapRead || !noShortInput) break;
+                g_unpackJobHeld = job; ++g_unpackJobsUsed;
+                r.data = job->out.data(); r.size = job->outSize;
+                s0 = src0 + job->inUsed; s1 += job->outSize;
+                reset();
+                return done(s1);
+            }
+            const uint32_t base = s1;
+            // One scratch buffer for every call (a fresh 5 MB vector per call cost page faults and a zero fill),
+            // with slack for the 16-byte copies below.
+            static std::vector<uint8_t> scratch;
+            const size_t want = size_t(fp - s1) + t4 + 64u;
+            if (scratch.size() < want) scratch.resize(want);
+            uint8_t* const out = scratch.data() - base; // out + guest address
+            // Where input and output ranges overlap, a read sees this call's own output.
+            const bool overlap = s0 < fp + t4 + 1u && base < s4 + 16u;
+            // The loop state lives in locals no lambda captures, so it stays in registers.
+            uint32_t p = s0, q = s1;
+            const uint32_t srcEnd = s4, dstEnd = fp, mask = s7, shift = s6 & 31u, flagBytes = s3;
+            const uint32_t need = s3 * 16u + 1u;
+            bool resetState = false, saveState = false;
+#define RRV_UNPACK_RD(a) (overlap && (a) >= base && (a) < q ? out[(a)] : mem[(a)])
+            for (;;) {
+                uint64_t s2 = 0;
+                for (uint32_t t1 = 0; t1 < flagBytes; ++t1) {
+                    s2 += uint64_t(RRV_UNPACK_RD(p)) << ((t1 * 8u) & 63u); ++p;
+                    if (!(p < srcEnd)) { resetState = true; break; }
+                }
+                bool stop = false;
+                for (int32_t t1 = int32_t(flagBytes * 8u); t1 > 0; --t1) {
+                    if ((s2 & 1u) != 0 && !overlap) {
+                        // A run of literal flags at once. The byte loop stops after the item that reaches the
+                        // end of the input or of the output: that is item `lim` of the run.
+                        const uint32_t run = std::min<uint32_t>(~s2 ? uint32_t(__builtin_ctzll(~s2)) : 64u, uint32_t(t1));
+                        const uint32_t lim = std::min(srcEnd - p, dstEnd - q), k = std::min(run, lim);
+                        for (uint32_t i = 0; i < k; i += 8u) std::memcpy(out + q + i, mem + p + i, 8);
+                        p += k; q += k;
+                        s2 = k >= 64u ? 0 : s2 >> k;
+                        t1 -= int32_t(k) - 1;
+                        if (k == lim) { resetState = true; stop = true; break; }
+                        continue;
+                    }
+                    const bool literal = (s2 & 1u) != 0; s2 >>= 1;
+                    if (literal) {
+                        out[q] = uint8_t(RRV_UNPACK_RD(p)); ++q; ++p;
+                    } else {
+                        const uint32_t hi8 = RRV_UNPACK_RD(p), lo8 = RRV_UNPACK_RD(p + 1u);
+                        p += 2u;
+                        const uint32_t v1 = lo8 | (hi8 << 8);
+                        uint32_t off = v1 & mask, len = uint32_t(int32_t(v1) >> shift);
+                        if (off == 0) off = a3;
+                        if (len == 0) len = t4;
+                        uint32_t a1 = q - off;
+                        if (a1 >= base && off >= 16u) {
+                            // The usual case. Source and destination are 16 or more bytes apart, so 16-byte
+                            // chunks in order give the bytes of the forward byte copy; the bytes written past
+                            // len are scratch the following output overwrites.
+                            uint8_t* d = out + q; const uint8_t* c = out + a1;
+                            for (uint32_t i = 0; i < len; i += 16u) std::memcpy(d + i, c + i, 16);
+                            q += len;
+                        } else if (a1 >= base) {
+                            uint8_t* d = out + q; const uint8_t* c = out + a1;
+                            for (uint32_t i = 0; i < len; ++i) d[i] = c[i];
+                            q += len;
+                        } else {
+                            for (uint32_t i = 0; i < len; ++i, ++a1) out[q++] = uint8_t(a1 >= base ? out[a1] : mem[a1]);
+                        }
+                    }
+                    if (!(p < srcEnd) || !(q < dstEnd)) { resetState = true; stop = true; break; }
+                }
+                if (stop) break;
+                if (s5 != 0 && s5 - need < p) { saveState = true; break; }
+            }
+#undef RRV_UNPACK_RD
+            s0 = p; s1 = q;
+            // The slow loop's order: a flag-byte reset is overwritten by nothing later, so one reset at the end is
+            // the same state (reset only clears two words; saveState writes three others).
+            if (resetState) reset();
+            if (saveState) { put(0x5B78, s0); put(0x5B70, s5); put(0x5B74, s1); }
+            r.data = scratch.data(); r.size = s1 - base;
+            return done(s1);
+        }
+    }
     for (;;) {
         if (bad) return done(s1);
         uint64_t s2 = 0;
@@ -2501,7 +2724,12 @@ void rrvUnpackCommit(uint8_t* rdram, R5900Context* ctx, const RrvUnpackResult& r
         {0xD0, 22}, {0xB0, 20}, {0xA0, 19}, {0x90, 18}};
     for (const auto& s : saves)
         if (uint8_t* p = getMemPtr(rdram, sp + s.off)) { const uint64_t v = GPR_U64(ctx, s.reg); std::memcpy(p, &v, 8); }
-    for (size_t i = 0; i < r.out.size(); ++i) *getMemPtr(rdram, r.base + uint32_t(i)) = r.out[i];
+    if (r.size) {
+        uint8_t* first = getMemPtr(rdram, r.base);
+        uint8_t* last = getMemPtr(rdram, r.base + uint32_t(r.size - 1u));
+        if (first && last && last - first == std::ptrdiff_t(r.size - 1u)) std::memcpy(first, r.data, r.size);
+        else for (size_t i = 0; i < r.size; ++i) *getMemPtr(rdram, r.base + uint32_t(i)) = r.data[i];
+    }
     for (const auto& [off, v] : r.words) std::memcpy(getMemPtr(rdram, gp - off), &v, 4);
     SET_GPR_S32(ctx, 2, int32_t(r.v0));
     ctx->pc = GPR_U32(ctx, 31);
@@ -2510,30 +2738,37 @@ void rrvUnpackCommit(uint8_t* rdram, R5900Context* ctx, const RrvUnpackResult& r
 void patch_0x221d68_fast_unpack(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
     ++g_unpackCalls;
     RrvUnpackResult r;
+    const auto hostT0 = std::chrono::steady_clock::now();
     const bool ok = rrvUnpack(rdram, ctx, r);
     bool inRam = ok;
-    for (size_t i = 0; inRam && i < r.out.size(); i += 4096)
-        inRam = getMemPtr(rdram, r.base + uint32_t(i)) && getMemPtr(rdram, r.base + uint32_t(r.out.size() - 1));
+    for (size_t i = 0; inRam && i < r.size; i += 4096)
+        inRam = getMemPtr(rdram, r.base + uint32_t(i)) && getMemPtr(rdram, r.base + uint32_t(r.size - 1));
     if (!inRam) { ++g_unpackFallback; g_unpack221D68Orig(rdram, ctx, runtime); return; }
     if (g_unpackMode == 2) {
         const uint32_t gp = GPR_U32(ctx, 28);
         g_unpack221D68Orig(rdram, ctx, runtime);
         bool same = GPR_U32(ctx, 2) == r.v0;
-        for (size_t i = 0; same && i < r.out.size(); ++i) same = *getMemPtr(rdram, r.base + uint32_t(i)) == r.out[i];
+        for (size_t i = 0; same && i < r.size; ++i) same = *getMemPtr(rdram, r.base + uint32_t(i)) == r.data[i];
         for (const auto& [off, v] : r.words) {
             uint32_t g; std::memcpy(&g, getMemPtr(rdram, gp - off), 4);
             same = same && g == v;
         }
         if (!same && g_unpackBad++ < 20)
             std::fprintf(stderr, "[rr5-enhance] fast unpack MISMATCH call %llu base=0x%x out=%zu v0 native=0x%x guest=0x%x\n",
-                         (unsigned long long)g_unpackCalls, r.base, r.out.size(), r.v0, GPR_U32(ctx, 2));
+                         (unsigned long long)g_unpackCalls, r.base, r.size, r.v0, GPR_U32(ctx, 2));
         if (g_unpackCalls % 64u == 0u)
             std::fprintf(stderr, "[rr5-enhance] fast unpack verify: %llu calls, %llu mismatches\n",
                          (unsigned long long)g_unpackCalls, (unsigned long long)g_unpackBad);
         return;
     }
+    const auto commitT0 = std::chrono::steady_clock::now();
     rrvUnpackCommit(rdram, ctx, r);
-    runtime->gate3ChargeHleV1(64u + (uint64_t(r.inBytes) + r.out.size()) / 16u);
+    g_unpackCommitNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - commitT0).count());
+    const uint64_t hostNs = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - hostT0).count());
+    g_unpackHostNs += hostNs; g_unpackHostMaxNs = std::max(g_unpackHostMaxNs, hostNs); g_unpackBytes += r.size;
+    runtime->gate3ChargeHleV1(64u + (uint64_t(r.inBytes) + r.size) / 16u);
 }
 } // namespace
 // RR5 native hot functions (owner direction 2026-09-30), RRV_RR5_NATIVE_HOT=1.
@@ -2747,6 +2982,8 @@ static void patch_0x298f28(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtim
 
 void registerPatches(PS2Runtime& runtime)
 {
+    // CD payload digests cost host time at every disc read and only feed the semantic trace (ps2_runtime.h).
+    { const char* trace = std::getenv("RRV_GATE3_SEMANTIC_TRACE"); runtime.gate3SetCdDigestV1(trace && trace[0]); }
     struct Patch { uint32_t addr; PS2Runtime::RecompiledFunction fn; };
     static const Patch kPatches[] = {
         { 0x2000c0u, patch_0x2000c0 },
@@ -2959,12 +3196,20 @@ void registerPatches(PS2Runtime& runtime)
         if (g_unpack221D68Orig) {
             g_unpackMode = std::strcmp(e, "verify") == 0 ? 2 : 1;
             runtime.registerFunction(0x221D68u, patch_0x221d68_fast_unpack);
+            const char* ahead = std::getenv("RRV_RR5_FAST_UNPACK_AHEAD"); // diagnostic: 0 = no worker thread
+            if (!(ahead && ahead[0] == '0') && runtime.hasFunction(0x2C7780u)) {
+                g_unpackCdReadOrig = runtime.lookupFunction(0x2C7780u);
+                runtime.registerFunction(0x2C7780u, patch_0x2c7780_unpack_ahead);
+            }
             std::fprintf(stderr, "[rr5-enhance] fast unpack: native func_221D68 (%s)\n",
                          g_unpackMode == 2 ? "verify against the original" : "64 + bytes/16 cycles");
             static const bool atExit = [] { std::atexit([] {
-                std::fprintf(stderr, "[rr5-enhance] fast unpack: calls=%llu mismatches=%llu fallbacks=%llu\n",
+                std::fprintf(stderr, "[rr5-enhance] fast unpack: calls=%llu mismatches=%llu fallbacks=%llu "
+                                     "host_ms=%.1f host_max_ms=%.1f commit_ms=%.1f out_mb=%.1f ahead=%llu/%llu\n",
                              (unsigned long long)g_unpackCalls, (unsigned long long)g_unpackBad,
-                             (unsigned long long)g_unpackFallback); }); return true; }();
+                             (unsigned long long)g_unpackFallback, g_unpackHostNs / 1e6, g_unpackHostMaxNs / 1e6, g_unpackCommitNs / 1e6,
+                             g_unpackBytes / 1048576.0, (unsigned long long)g_unpackJobsUsed,
+                             (unsigned long long)g_unpackJobsStarted); }); return true; }();
             (void)atExit;
         }
     }
