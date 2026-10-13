@@ -9,6 +9,17 @@
 
 namespace fukami::app {
 
+// The app's startup hook. macOS (constructor in fukami_app.mm) and Linux (constructor in fukami_app_linux.cpp) run
+// it before main() through a constructor attribute, so there entry() does nothing. Windows has no such hook:
+// fukami_app_win.cpp defines entry(), and the product's main() calls it first. When the process is the app launcher
+// (double-clicked, or given a CHD) it prepares the user's data, starts the game as a child process and exits with the
+// child's status instead of returning.
+#if defined(_WIN32)
+void entry(int argc, char **argv);
+#else
+inline void entry(int, char **) {}
+#endif
+
 // True in the re-executed game process started by the app.
 bool inApp();
 // The settings file the in-game menu reads and writes: RRV_FUKAMI_INI when
@@ -28,7 +39,7 @@ void restart();
 // (the folder of RRV_GATE3_RECORD_PAD); empty when unknown.
 std::filesystem::path savesFolder();
 std::filesystem::path logsFolder();
-// Shows the path in Finder (`open -R`); safe from any thread.
+// Shows the path in the file manager (Finder via `open -R`, Explorer with the item selected); safe from any thread.
 void reveal(const std::filesystem::path &path);
 
 } // namespace fukami::app

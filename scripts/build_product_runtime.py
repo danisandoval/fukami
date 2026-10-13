@@ -71,6 +71,10 @@ def main() -> int:
         "-DRRV_BUILD_PRODUCT=ON", "-DRRV_PRODUCT_OWNED_SOURCE=ON", "-DRRV_GS_PRODUCER_CONTROL=OFF",
         f"-DRRV_PCSX2_GS_BRIDGE_MANIFEST={args.bridge_manifest.resolve()}",
     ]
+    if sys.platform == "win32":
+        # clang-cl: the MSVC command line, ABI and CRT with clang's code generator (cmake/RrvToolchainFlags.cmake)
+        command += ["-DCMAKE_C_COMPILER=clang-cl", "-DCMAKE_CXX_COMPILER=clang-cl", "-DCMAKE_LINKER=lld-link",
+                    "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL"]
     if os.environ.get("FUKAMI_MACOS_TARGET") and sys.platform == "darwin":  # release builds pick the oldest macOS to support
         command.append(f"-DCMAKE_OSX_DEPLOYMENT_TARGET={os.environ['FUKAMI_MACOS_TARGET']}")
     if args.sse2neon_source:
@@ -80,7 +84,7 @@ def main() -> int:
     subprocess.run(command, check=True)
     subprocess.run(["cmake", "--build", str(build), "--target", "Fukami",
                     "--parallel", str(args.parallel)], check=True)
-    binary = build / "candidate-bin/Fukami"
+    binary = build / ("candidate-bin/Fukami.exe" if sys.platform == "win32" else "candidate-bin/Fukami")
     if not binary.is_file() or binary.stat().st_size == 0:
         raise ValueError("product executable was not linked")
     verify(source)
@@ -94,8 +98,8 @@ def main() -> int:
         "accounted_generation_manifest_sha256": summary["accounted_manifest_sha256"],
         "accounted_generation_file_count": summary["file_count"],
     }
-    (build / "gate3-candidate-build-receipt.json").write_text(
-        json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    (build / "gate3-candidate-build-receipt.json").write_bytes(  # bytes: LF on Windows too, and Python 3.9 has no newline=
+        (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8"))
     print(f"LINK PASS: {binary} ({receipt['candidate_sha256']})")
     return 0
 

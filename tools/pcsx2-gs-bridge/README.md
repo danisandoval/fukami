@@ -17,7 +17,8 @@ Changing the source directory does not change the revision.
 ```sh
 python3 scripts/prepare_dependencies.py --prepare --component pcsx2
 python3 scripts/prepare_dependencies.py --verify-patches
-# On macOS, generate reviewed resources from this exact clean source checkout.
+# On macOS, generate reviewed resources from this exact clean source checkout. The shaders are
+# compiled with the locked bridge patch applied (to an export in the output directory).
 python3 scripts/build_pcsx2_metal_resources.py \
   --source build-deps/pcsx2-2.8.2 \
   --output build-pcsx2-metal-resources
@@ -88,8 +89,21 @@ docker run --rm --platform linux/amd64 -v "$PWD":"$PWD" -w "$PWD" rrv-linux-buil
   `LINUX_WAYLAND` (wl_display*, wl_surface*), mapped to PCSX2 `WindowInfo`.
   `CALLER_OWNS_HANDLES` is required; there is no main-thread rule (SDL2 calls
   `XInitThreads`). The owner-thread exports exist; `pump_main_thread` is a no-op.
-- Not on Vulkan: the Metal `presentDrawable:atTime:` pacer
-  (`RRV_PCSX2_GS_PRESENT_*` are ignored); FIFO vsync alone paces.
+- Not on Vulkan: the Metal `presentDrawable:atTime:` pacer; FIFO vsync alone
+  paces. `RRV_PCSX2_GS_PRESENT_PACING` (the even-pacing setting) instead decides
+  where the `vkAcquireNextImageKHR` that PCSX2 issues right after each present
+  runs: on a helper thread (`rrv-vk-acquire`) by default, so the GS thread goes
+  on with the next field and waits for the image only at the next
+  `BeginPresent` (and before anything else that touches the swap chain); `=0`
+  keeps it on the GS thread. Measurements: `docs/TESTING.md` T-DECK-GS-WAIT.
+  The other `RRV_PCSX2_GS_PRESENT_*` variables are ignored.
+- GS-thread attribution (Linux patch): every ~2 s the bridge prints a
+  `[gs-wait]` line next to the `[cpu]` log: the GSvsync thread's CPU time per
+  field, and the time it was blocked on the GPU, split into forced readbacks,
+  command-buffer rotation, stream-buffer exhaustion and swap-chain acquire,
+  plus the CPU-sprite (`SwPrimRender`) and texture-cache readback costs, the
+  swap-chain image count and the helper thread's time in the acquire. On by default with direct presentation;
+  `RRV_PCSX2_GS_WAIT_LOG=0` turns it off (`=1` also headless).
 - SW rasterizer: the same static C functions as macOS (no JIT on x86-64
   either). The unsigned colour-step fix applies on every arch; the JIT-exact
   per-pixel mipmap LOD is ARM64-only, so x86-64 uses PCSX2's generic C LOD.
@@ -101,3 +115,21 @@ this milestone. The macOS bridge adapter validates the SDL-provided AppKit
 objects but creates no application, window or view.
 The [original guide](../../docs/evidence/pre-m0/PCSX2_GS_BRIDGE_README.md) is
 retained as dated evidence, including prior commands and local-path observations.
+
+## Windows (Direct3D 11, optional Vulkan)
+
+`scripts/build_pcsx2_gs_bridge.py` builds `rrv-pcsx2-gs-bridge.dll` with clang-cl. It stacks the lock's
+`[[pcsx2_bridge_windows_patches]]` after the target patch: the Linux patch (Vulkan direct-present count) and
+`tools/patches/pcsx2-gs-bridge-windows-d3d11.patch` (the same count in `GSDevice11::EndPresent`, and the Windows
+present pacer). PCSX2's Windows build always compiles its Direct3D renderers, so the one DLL holds both devices.
+`RRV_PCSX2_GS_RENDERER_AUTO` and `RRV_PCSX2_GS_RENDERER_VULKAN` open Vulkan; `RRV_PCSX2_GS_RENDERER_D3D11` opens
+Direct3D 11 on the same Win32 surface with the same RR5 hardware profile. The product asks for Direct3D 11 unless
+rrv.ini says `[rendering] backend = vulkan` (`RRV_PCSX2_GS_BACKEND=vulkan`; `src/product/main_product.cpp`). Direct
+presentation fails closed when PCSX2 instantiates a different renderer than the one requested.
+
+Frame pacing on Windows is `RRVPresentPacer.h` in that patch (Direct3D 11 only; its header comment describes it):
+the DXGI sync interval on a fixed 120/180/240 Hz display, a presenter thread and an even grid elsewhere, a present
+without display sync on a variable-refresh display (`RRV_PCSX2_GS_VRR=1|0`, default: once the display is seen
+following the frames). `RRV_PCSX2_GS_PRESENT_PACING=0` (the even-pacing setting off) turns it off.
+`RRV_PCSX2_GS_PRESENT_TRACE=<file>` writes one line per present; `tools/win-profile/present_stats.py` reads it.
+Vulkan frames are not paced on Windows. Measurements: docs/TESTING.md T-WIN-PACING.

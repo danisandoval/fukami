@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """ADR-0006 configuration and atomic producer for one fixed package."""
 from __future__ import annotations
-import argparse, ctypes, hashlib, json, os, pathlib, platform, stat, subprocess, sys
+import argparse, hashlib, json, os, pathlib, platform, stat, subprocess, sys
 from typing import Any
-from resource_package_fs import (PackageFilesystemError, checked_relative, collision_key, is_directory,
-    is_regular, lease, mkdirs_beneath, open_absolute_file, open_beneath, open_dir, remove_tree_beneath,
-    sha256_fd, source_identity, write_all)
+from resource_package_fs import (SWAP_LEFTOVER, PackageFilesystemError, checked_relative, close_dir, collision_key,
+    create_file_at, dup_dir, is_directory, is_regular, lease, listdir_dir, mkdir_at, mkdirs_beneath, open_absolute_file,
+    open_beneath, open_dir, open_dir_at, remove_tree_beneath, rename_at, sha256_fd, source_identity, stat_at,
+    swap_dirs_at, unlink_at, write_all)
 
 sys.dont_write_bytecode = True
 INPUT_SCHEMA = "rrv-resource-package-input-v1"; SPEC_SCHEMA = "rrv-resource-package-spec-v1"; VERSION = "rrv-resource-package-v1"
@@ -19,7 +20,8 @@ def fixed(build: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path
 
 def native() -> None:
     if sys.platform.startswith("linux") and platform.machine() == "x86_64": return  # Gate 5 (Linux/Steam Deck)
-    if sys.platform != "darwin" or platform.machine() != "arm64": raise PackageError("ADR-0006 requires native macOS arm64 or Linux x86-64")
+    if sys.platform == "win32" and platform.machine().lower() in ("amd64", "x86_64"): return  # Windows x86-64
+    if sys.platform != "darwin" or platform.machine() != "arm64": raise PackageError("ADR-0006 requires native macOS arm64, Linux x86-64 or Windows x86-64")
 
 def read_json(path: pathlib.Path) -> dict[str, Any]:
     try:
@@ -108,19 +110,19 @@ def write_spec(spec: dict[str, Any], build: pathlib.Path, output: pathlib.Path) 
     try:
         control_fd = mkdirs_beneath(build_fd, "CMakeFiles/rrv-resource-package")
         try:
-            try: lock_fd = os.open(".rrv-resource-package.lock", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=build_fd)
+            try: lock_fd = create_file_at(build_fd, ".rrv-resource-package.lock", read_write=True)
             except FileExistsError: lock_fd = open_beneath(build_fd, ".rrv-resource-package.lock")
             try:
                 if not is_regular(os.fstat(lock_fd)): raise PackageError("stable lock is unsafe")
             finally: os.close(lock_fd)
-            try: os.unlink(".spec.tmp", dir_fd=control_fd)
+            try: unlink_at(control_fd, ".spec.tmp")
             except FileNotFoundError: pass
-            spec_fd = os.open(".spec.tmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=control_fd)
+            spec_fd = create_file_at(control_fd, ".spec.tmp")
             try: write_all(spec_fd, canonical(spec)); os.fsync(spec_fd)
             finally: os.close(spec_fd)
-            os.rename(".spec.tmp", "spec.json", src_dir_fd=control_fd, dst_dir_fd=control_fd)
-        finally: os.close(control_fd)
-    finally: os.close(build_fd)
+            rename_at(control_fd, ".spec.tmp", "spec.json")
+        finally: close_dir(control_fd)
+    finally: close_dir(build_fd)
 
 def load_spec(build: pathlib.Path, spec_path: pathlib.Path, expected: str) -> dict[str, Any]:
     _, _, fixed_spec, _ = fixed(build)
@@ -130,7 +132,7 @@ def load_spec(build: pathlib.Path, spec_path: pathlib.Path, expected: str) -> di
         fd = open_beneath(build_fd, "CMakeFiles/rrv-resource-package/spec.json")
         try: data = b"".join(iter(lambda: os.read(fd, 1024 * 1024), b""))
         finally: os.close(fd)
-    finally: os.close(build_fd)
+    finally: close_dir(build_fd)
     if digest(data) != expected: raise PackageError("fixed spec integrity mismatch")
     spec = json.loads(data.decode("ascii"))
     if not isinstance(spec, dict) or set(spec) != {"schema", "version", "composition", "bridge", "inventory", "sources", "provenance", "provenance_sources", "bridge_provenance"} or spec.get("schema") != SPEC_SCHEMA or spec.get("version") != VERSION:
@@ -151,19 +153,19 @@ def verify_pins(spec: dict[str, Any]) -> None:
 
 def identity(spec: dict[str, Any]) -> bytes: return f"{VERSION}\n{spec['composition']}\n".encode("ascii")
 
-def verify_tree(artifact_fd: int, name: str, spec: dict[str, Any]) -> bool:
-    try: root = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=artifact_fd)
+def verify_tree(artifact_fd: Any, name: str, spec: dict[str, Any]) -> bool:
+    try: root = open_dir_at(artifact_fd, name)
     except FileNotFoundError: return False
     try:
         expected = {row["path"]: row for row in spec["inventory"]}; actual: dict[str, str] = {}
-        def visit(fd: int, prefix: str) -> bool:
-            for entry in os.listdir(fd):
-                node = os.stat(entry, dir_fd=fd, follow_symlinks=False); path = entry if not prefix else prefix + "/" + entry
+        def visit(fd: Any, prefix: str) -> bool:
+            for entry in listdir_dir(fd):
+                node = stat_at(fd, entry); path = entry if not prefix else prefix + "/" + entry
                 if is_directory(node):
-                    actual[path] = "directory"; child = os.open(entry, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                    actual[path] = "directory"; child = open_dir_at(fd, entry)
                     try:
                         if not visit(child, path): return False
-                    finally: os.close(child)
+                    finally: close_dir(child)
                 elif is_regular(node): actual[path] = "file"
                 else: return False
             return True
@@ -181,9 +183,9 @@ def verify_tree(artifact_fd: int, name: str, spec: dict[str, Any]) -> bool:
                     if not is_regular(node) or node.st_size != row["size"] or sha256_fd(fd) != row["sha256"]: return False
                 finally: os.close(fd)
         return True
-    finally: os.close(root)
+    finally: close_dir(root)
 
-def preflight_removable_tree(artifact_fd: int, name: str) -> bool:
+def preflight_removable_tree(artifact_fd: Any, name: str) -> bool:
     """Return false for an absent package; reject any existing unsafe tree.
 
     A corrupt but ordinary directory tree is deliberately removable, so a later
@@ -191,54 +193,48 @@ def preflight_removable_tree(artifact_fd: int, name: str) -> bool:
     no symlinks, special files, or multi-link regular files may ever cross the
     publication boundary into the producer's cleanup path.
     """
-    try: root = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=artifact_fd)
+    try: root = open_dir_at(artifact_fd, name)
     except FileNotFoundError: return False
     except OSError as exc: raise PackageError("existing current package root is unsafe") from exc
     try:
-        def visit(fd: int) -> None:
-            for entry in os.listdir(fd):
-                node = os.stat(entry, dir_fd=fd, follow_symlinks=False)
+        def visit(fd: Any) -> None:
+            for entry in listdir_dir(fd):
+                node = stat_at(fd, entry)
                 if is_directory(node):
-                    child = os.open(entry, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                    child = open_dir_at(fd, entry)
                     try: visit(child)
-                    finally: os.close(child)
+                    finally: close_dir(child)
                 elif not is_regular(node):
                     raise PackageError("existing current package tree is unsafe")
         visit(root)
         return True
-    finally: os.close(root)
+    finally: close_dir(root)
 
-def build_temporary(artifact_fd: int, spec: dict[str, Any]) -> None:
-    os.mkdir("temporary", 0o700, dir_fd=artifact_fd); root = os.open("temporary", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=artifact_fd)
+def build_temporary(artifact_fd: Any, spec: dict[str, Any]) -> None:
+    mkdir_at(artifact_fd, "temporary"); root = open_dir_at(artifact_fd, "temporary")
     try:
         for row in spec["inventory"]:
-            if row["type"] == "directory": fd = mkdirs_beneath(root, row["path"]); os.close(fd)
+            if row["type"] == "directory": fd = mkdirs_beneath(root, row["path"]); close_dir(fd)
         for source in spec["sources"]:
-            parent, _, leaf = source["path"].rpartition("/"); output = mkdirs_beneath(root, parent) if parent else os.dup(root)
+            parent, _, leaf = source["path"].rpartition("/"); output = mkdirs_beneath(root, parent) if parent else dup_dir(root)
             try:
                 inp = open_absolute_file(pathlib.Path(source["source"]))
                 try:
-                    out = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600, dir_fd=output)
+                    out = create_file_at(output, leaf)
                     try:
                         while chunk := os.read(inp, 1024 * 1024): write_all(out, chunk)
                     finally: os.close(out)
                 finally: os.close(inp)
-            finally: os.close(output)
-        fd = os.open("identity", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600, dir_fd=root)
+            finally: close_dir(output)
+        fd = create_file_at(root, "identity")
         try: write_all(fd, identity(spec))
         finally: os.close(fd)
-    finally: os.close(root)
+    finally: close_dir(root)
 
-def atomic_swap(fd: int) -> None:
-    if sys.platform.startswith("linux"):
-        # Linux: renameat2(RENAME_EXCHANGE), the equivalent atomic swap.
-        libc = ctypes.CDLL(None, use_errno=True); call = libc.renameat2
-        call.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]; call.restype = ctypes.c_int
-        if call(fd, b"temporary", fd, b"current", 0x2) != 0: raise PackageError("renameat2(RENAME_EXCHANGE) failed: " + os.strerror(ctypes.get_errno()))
-        return
-    libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True); call = libc.renameatx_np
-    call.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]; call.restype = ctypes.c_int
-    if call(fd, b"temporary", fd, b"current", 0x00000002) != 0: raise PackageError("renameatx_np(RENAME_SWAP) failed: " + os.strerror(ctypes.get_errno()))
+def atomic_swap(fd: Any) -> None:
+    """Exchange `temporary` and `current` (one atomic call on macOS/Linux, a three-rename rotation on Windows)."""
+    try: swap_dirs_at(fd, "temporary", "current")
+    except PackageFilesystemError as exc: raise PackageError(str(exc)) from exc
 
 def ensure_configured(build: pathlib.Path, expected: str) -> None:
     _, lock, spec_path, artifacts = fixed(build)
@@ -247,35 +243,38 @@ def ensure_configured(build: pathlib.Path, expected: str) -> None:
         build_fd = open_dir(build.resolve())
         try:
             try: fd = open_beneath(build_fd, ".rrv-resource-packages", directory=True)
-            except FileNotFoundError: fd = -1
-        finally: os.close(build_fd)
-        if fd >= 0:
+            except FileNotFoundError: fd = None
+        finally: close_dir(build_fd)
+        if fd is not None:
             try:
-                try: os.stat("temporary", dir_fd=fd, follow_symlinks=False); temporary = True
+                try: stat_at(fd, "temporary"); temporary = True
                 except FileNotFoundError: temporary = False
                 if verify_tree(fd, "current", spec) and not temporary: return
-            finally: os.close(fd)
+            finally: close_dir(fd)
     with lease(lock, True):
         spec = load_spec(build, spec_path, expected); verify_pins(spec)
         build_fd = open_dir(build.resolve())
         try: fd = mkdirs_beneath(build_fd, ".rrv-resource-packages")
-        finally: os.close(build_fd)
+        finally: close_dir(build_fd)
         try:
             # Never clean temporary or construct a replacement until the old
             # public tree has been classified as safe to move into temporary.
             current_exists = preflight_removable_tree(fd, "current")
-            try: os.stat("temporary", dir_fd=fd, follow_symlinks=False)
+            try: stat_at(fd, "temporary")
             except FileNotFoundError: temporary_exists = False
             else: temporary_exists = True
             if temporary_exists: remove_tree_beneath(fd, "temporary")
+            try: stat_at(fd, SWAP_LEFTOVER)
+            except FileNotFoundError: pass
+            else: remove_tree_beneath(fd, SWAP_LEFTOVER)  # Windows only: a rotation a crash interrupted (see swap_dirs_at)
             if verify_tree(fd, "current", spec): return
             build_temporary(fd, spec)
             if not verify_tree(fd, "temporary", spec): raise PackageError("temporary package validation failed")
-            if not current_exists: os.rename("temporary", "current", src_dir_fd=fd, dst_dir_fd=fd)
+            if not current_exists: rename_at(fd, "temporary", "current")
             else:
                 preflight_removable_tree(fd, "current")
                 atomic_swap(fd); remove_tree_beneath(fd, "temporary")
-        finally: os.close(fd)
+        finally: close_dir(fd)
 
 def main() -> int:
     parser = argparse.ArgumentParser(); commands = parser.add_subparsers(dest="command", required=True)

@@ -2,7 +2,11 @@
 #include "MemoryCard.h"
 #include <fstream>
 #include <set>
+#if defined(_WIN32)
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace ps2_stubs
 {
@@ -452,11 +456,20 @@ namespace ps2_stubs
 
         void gate8McSyncFile(const std::filesystem::path &path)
         {
+#if defined(_WIN32)
+            // FlushFileBuffers needs write access, so the file is opened r+b (it exists; nothing is written).
+            if (FILE *f = std::fopen(path.string().c_str(), "r+b"))
+            {
+                _commit(_fileno(f));
+                std::fclose(f);
+            }
+#else
             if (FILE *f = std::fopen(path.string().c_str(), "rb"))
             {
                 ::fsync(fileno(f));
                 std::fclose(f);
             }
+#endif
         }
 
         void gate8McJournalRollback(const std::filesystem::path &journal)

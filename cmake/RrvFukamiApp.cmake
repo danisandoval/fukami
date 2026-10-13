@@ -19,6 +19,8 @@ if(TARGET rrv-product)
         target_sources(rrv_sdl_product_host PRIVATE "${CMAKE_SOURCE_DIR}/src/app/fukami_menu.cpp")
     endif()
     target_link_libraries(rrv_sdl_product_host PUBLIC rrv_fukami_settings)
+    # What the three app layers share (disc marker, launch settings, environment de-duplication).
+    target_sources(rrv-product PRIVATE "${CMAKE_SOURCE_DIR}/src/app/fukami_app_common.cpp")
     # The startup hook must be an object of the executable itself: an
     # otherwise unreferenced constructor in a static library is not linked.
     if(APPLE)
@@ -27,6 +29,33 @@ if(TARGET rrv-product)
             COMPILE_OPTIONS "-fobjc-arc")
         target_link_libraries(rrv-product PRIVATE rrv_fukami_settings rrv-disc-extract
             "-framework AppKit" "-framework UniformTypeIdentifiers")
+    elseif(WIN32)
+        # Windows: Fukami.exe next to resources\, %LOCALAPPDATA%\Fukami data folder, Win32 dialogs. A GUI-subsystem
+        # executable that still enters through main() (/ENTRY:mainCRTStartup) so the product's main() is unchanged.
+        file(STRINGS "${CMAKE_SOURCE_DIR}/VERSION" RRV_FUKAMI_VERSION LIMIT_COUNT 1)
+        if(NOT RRV_FUKAMI_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
+            message(FATAL_ERROR "VERSION must read MAJOR.MINOR.PATCH, found '${RRV_FUKAMI_VERSION}'")
+        endif()
+        set(RRV_FUKAMI_VERSION_MAJOR "${CMAKE_MATCH_1}")
+        set(RRV_FUKAMI_VERSION_MINOR "${CMAKE_MATCH_2}")
+        set(RRV_FUKAMI_VERSION_PATCH "${CMAKE_MATCH_3}")
+        set(RRV_FUKAMI_ICON "${CMAKE_SOURCE_DIR}/src/app/windows/fukami.ico")
+        set(RRV_FUKAMI_MANIFEST "${CMAKE_SOURCE_DIR}/src/app/windows/fukami.manifest")
+        configure_file("${CMAKE_SOURCE_DIR}/src/app/windows/fukami.rc.in" "${CMAKE_BINARY_DIR}/fukami.rc" @ONLY)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/VERSION")
+        enable_language(RC)
+        # The launcher is its own library in its own directory scope (src/app/windows/CMakeLists.txt): the runtime's
+        # include directories are a directory property of this scope, added to every target here, and they hold a
+        # Kernel/Syscalls/rpc.h that shadows the Windows SDK's <rpc.h>, which <objbase.h> includes. main() calls
+        # fukami::app::entry() by name, so a static library is linked (there is no constructor hook to lose).
+        add_subdirectory("${CMAKE_SOURCE_DIR}/src/app/windows" "${CMAKE_BINARY_DIR}/fukami-app-win")
+        target_sources(rrv-product PRIVATE "${CMAKE_BINARY_DIR}/fukami.rc")
+        set_source_files_properties("${CMAKE_BINARY_DIR}/fukami.rc" PROPERTIES
+            OBJECT_DEPENDS "${RRV_FUKAMI_ICON};${RRV_FUKAMI_MANIFEST}")
+        set_target_properties(rrv-product PROPERTIES WIN32_EXECUTABLE TRUE)
+        # The manifest is a resource of fukami.rc (UTF-8 code page, long paths, DPI); the linker must not add its own.
+        target_link_options(rrv-product PRIVATE "/ENTRY:mainCRTStartup" "/MANIFEST:NO")
+        target_link_libraries(rrv-product PRIVATE rrv_fukami_app_win rrv_fukami_settings rrv-disc-extract)
     else()
         # Linux / Steam Deck (Gate 5): the same hook without AppKit
         # (Fukami/bin/Fukami layout, XDG data folder, zenity/kdialog dialogs).

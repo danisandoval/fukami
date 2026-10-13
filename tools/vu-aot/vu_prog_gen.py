@@ -471,15 +471,14 @@ def main() -> int:
     emitted: dict[tuple, int] = {}       # identical programs (stubs, shared code) are emitted once
     for ci, image in enumerate(chains):
         n = len(image) // 8
-        # XGKICK exists on VU1 only: an image without one is a VU0 image, and VU0
-        # micro mode keeps the compiled blocks (rrv_vu_prog_engine.inc, progEnsure).
+        # XGKICK exists on VU1 only: an image without one is a VU0 image (counted; its programs are
+        # generated like any other: VCALLMS enters at the same multiples of 0x10).
         def is_xgkick(pc: int) -> bool:
             lower, upper = struct.unpack_from('<II', image, pc)
             return (has_lower(lower, upper) and lower_op(lower) == 0x40 and (lower & 0x3F) >= 0x3C and
                     ((lower & 0x3) | ((lower >> 4) & 0x7C)) == 0x6C)
         if not any(is_xgkick(pc) for pc in range(0, len(image), 8)):
             stats['vu0_images'] += 1
-            continue
         out.append(f'static const uint64_t vuprog_image_{ci}[] = {{')
         out.append(', '.join(f'0x{w:016x}ull' for w in struct.unpack_from(f'<{n}Q', image)))
         out.append('};\n\n')
@@ -534,7 +533,7 @@ def main() -> int:
 
     args.output.mkdir(parents=True, exist_ok=True)
     text = ''.join(out)
-    (args.output / 'rrv_vu_aot_programs.inc').write_text(text)
+    (args.output / 'rrv_vu_aot_programs.inc').write_bytes(text.encode('utf-8'))
     manifest = {
         'schema': 'rrv-vu-prog-catalogue-v1',
         'catalogue_id': digest[:16],
@@ -546,7 +545,7 @@ def main() -> int:
         'programs_inc_sha256': hashlib.sha256(text.encode()).hexdigest(),
         'entries': listing,
     }
-    (args.output / 'programs.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    (args.output / 'programs.json').write_bytes((json.dumps(manifest, indent=2) + '\n').encode('utf-8'))
     print(json.dumps({k: v for k, v in manifest.items() if k != 'entries'}))
     return 0
 

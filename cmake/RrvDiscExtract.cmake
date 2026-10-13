@@ -10,8 +10,20 @@
 set(RRV_PCSX2_282_DIR "${CMAKE_SOURCE_DIR}/build-deps/pcsx2-2.8.2" CACHE PATH "Pinned PCSX2 2.8.2 source tree")
 set(_chdr "${RRV_PCSX2_282_DIR}/3rdparty/libchdr")
 set(_lzma "${RRV_PCSX2_282_DIR}/3rdparty/lzma")
+if(WIN32)
+    # Windows: zlib and zstd come from the dependency prefix that the pinned PCSX2 tree's own
+    # .github/workflows/scripts/windows/build-dependencies.bat installs (zlib 1.3.2, zstd 1.5.7; PCSX2's 3rdparty/ has
+    # neither). scripts/build_pcsx2_gs_bridge.py builds it once for the bridge; the same prefix serves this target.
+    set(RRV_PCSX2_DEPS_PREFIX "${RRV_PCSX2_282_DIR}/deps" CACHE PATH
+        "PCSX2 Windows dependency prefix (include/ lib/ bin/) holding zlib and zstd")
+    list(PREPEND CMAKE_PREFIX_PATH "${RRV_PCSX2_DEPS_PREFIX}")
+endif()
 find_path(RRV_DISC_ZSTD_INCLUDE_DIR zstd.h)
-find_library(RRV_DISC_ZSTD_STATIC NAMES libzstd.a PATHS /opt/homebrew/lib /usr/local/lib)
+if(WIN32)
+    find_library(RRV_DISC_ZSTD_STATIC NAMES zstd_static libzstd_static zstd libzstd)
+else()
+    find_library(RRV_DISC_ZSTD_STATIC NAMES libzstd.a PATHS /opt/homebrew/lib /usr/local/lib)
+endif()
 if(NOT RRV_DISC_ZSTD_STATIC AND UNIX AND NOT APPLE)
     # Linux (Gate 5): a shared libzstd is acceptable (it ships in lib/ with the app).
     find_library(RRV_DISC_ZSTD_STATIC NAMES zstd)
@@ -19,7 +31,13 @@ endif()
 find_package(ZLIB)
 
 if(NOT EXISTS "${_chdr}/src/libchdr_chd.c" OR NOT RRV_DISC_ZSTD_INCLUDE_DIR OR NOT RRV_DISC_ZSTD_STATIC OR NOT ZLIB_FOUND)
-    message(STATUS "rrv-disc-extract: skipped (need build-deps/pcsx2-2.8.2 libchdr, static zstd, zlib)")
+    if(WIN32)
+        # Not a silent skip: the app needs this target to open a CHD, and a product configure stops without it.
+        message(WARNING "rrv-disc-extract: skipped (need build-deps/pcsx2-2.8.2 libchdr, and zlib + zstd from "
+            "RRV_PCSX2_DEPS_PREFIX=${RRV_PCSX2_DEPS_PREFIX})")
+    else()
+        message(STATUS "rrv-disc-extract: skipped (need build-deps/pcsx2-2.8.2 libchdr, static zstd, zlib)")
+    endif()
     return()
 endif()
 
@@ -35,7 +53,8 @@ add_library(rrv-disc-chdr STATIC
     "${_lzma}/src/Alloc.c"
     "${_lzma}/src/CpuArch.c")
 target_compile_definitions(rrv-disc-chdr PRIVATE _7ZIP_ST)
-target_compile_options(rrv-disc-chdr PRIVATE -w)
+rrv_flag_no_warnings(_rrv_no_warnings)
+target_compile_options(rrv-disc-chdr PRIVATE ${_rrv_no_warnings})
 target_include_directories(rrv-disc-chdr PUBLIC "${_chdr}/include")
 target_include_directories(rrv-disc-chdr PRIVATE "${_lzma}/include" "${RRV_DISC_ZSTD_INCLUDE_DIR}")
 target_link_libraries(rrv-disc-chdr PUBLIC ZLIB::ZLIB "${RRV_DISC_ZSTD_STATIC}")
@@ -43,13 +62,29 @@ target_link_libraries(rrv-disc-chdr PUBLIC ZLIB::ZLIB "${RRV_DISC_ZSTD_STATIC}")
 add_library(rrv-disc-extract STATIC "${CMAKE_SOURCE_DIR}/src/app/disc_extract.cpp")
 target_include_directories(rrv-disc-extract PUBLIC "${CMAKE_SOURCE_DIR}/src/app")
 target_link_libraries(rrv-disc-extract PUBLIC rrv-disc-chdr)
-target_compile_options(rrv-disc-extract PRIVATE -Wall -Wextra)
+rrv_flag_warnings_all(_rrv_warnings_all)
+target_compile_options(rrv-disc-extract PRIVATE ${_rrv_warnings_all})
 
 add_executable(disc-extract "${CMAKE_SOURCE_DIR}/tools/disc-extract/main.cpp")
 target_link_libraries(disc-extract PRIVATE rrv-disc-extract)
 
 add_executable(rrv-disc-extract-tests "${CMAKE_SOURCE_DIR}/tests/disc_extract_tests.cpp")
 target_link_libraries(rrv-disc-extract-tests PRIVATE rrv-disc-extract)
+if(WIN32)
+    # The dependency prefix's zlib and zstd are DLLs; Windows loads them only from the executable's directory (or
+    # PATH), so every executable that links rrv-disc-extract gets them beside it (the product: cmake/RrvProductOwned.cmake).
+    set(RRV_DISC_RUNTIME_DLLS "${RRV_PCSX2_DEPS_PREFIX}/bin/z.dll" "${RRV_PCSX2_DEPS_PREFIX}/bin/zstd.dll")
+    foreach(_rrv_disc_dll IN LISTS RRV_DISC_RUNTIME_DLLS)
+        if(NOT EXISTS "${_rrv_disc_dll}")
+            message(FATAL_ERROR "Missing ${_rrv_disc_dll} (scripts/build_pcsx2_windows_deps.py)")
+        endif()
+    endforeach()
+    foreach(_rrv_disc_target IN ITEMS disc-extract rrv-disc-extract-tests)
+        add_custom_command(TARGET ${_rrv_disc_target} POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${RRV_DISC_RUNTIME_DLLS} "$<TARGET_FILE_DIR:${_rrv_disc_target}>"
+            VERBATIM)
+    endforeach()
+endif()
 add_test(NAME rrv-disc-extract-tests COMMAND rrv-disc-extract-tests)
 # Registered only where build-deps/pcsx2-2.8.2 and zstd exist (not in CI).
 set_tests_properties(rrv-disc-extract-tests PROPERTIES LABELS needs-build-deps)

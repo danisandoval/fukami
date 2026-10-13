@@ -506,7 +506,7 @@ def main() -> int:
     out.append(f'constexpr const char kVuAotCatalogId[] = "{cat_id}";\n')
 
     args.output.mkdir(parents=True, exist_ok=True)
-    (args.output / 'rrv_vu_aot_blocks.inc').write_text(''.join(out))
+    (args.output / 'rrv_vu_aot_blocks.inc').write_bytes(''.join(out).encode('utf-8'))
     manifest = {
         'schema': 'rrv-vu-aot-catalogue-v2',
         'catalogue_id': cat_id,
@@ -522,7 +522,7 @@ def main() -> int:
         'record_dirs': [str(d) for d in args.record_dirs],
         'blocks_inc_sha256': hashlib.sha256(''.join(out).encode()).hexdigest(),
     }
-    (args.output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+    (args.output / 'manifest.json').write_bytes((json.dumps(manifest, indent=2) + '\n').encode('utf-8'))
     print(json.dumps(manifest))
     return 0
 

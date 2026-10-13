@@ -12,3 +12,5 @@
 0009-full-frame-round-sprite-minified-v.patch
 0010-software-renderer-static-keys-and-arm64-c-path.patch
 0011-metal-present-pacing.patch
+0012-native-size-depth-of-field-blur.patch
+0013-sprite-coverage.patch

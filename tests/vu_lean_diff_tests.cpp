@@ -64,7 +64,12 @@
 #include <sstream>
 #include <fstream>
 #include <filesystem>
-#include <utility>
+
+#if defined(_WIN32)
+// The CRT has _putenv_s (an empty value deletes the variable) instead of setenv/unsetenv.
+inline int setenv(const char *name, const char *value, int) { return _putenv_s(name, value); }
+inline int unsetenv(const char *name) { return _putenv_s(name, ""); }
+#endif#include <utility>
 #include <tuple>
 #include <string_view>
 #include <cstdint>

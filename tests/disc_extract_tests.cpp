@@ -1,7 +1,15 @@
 // Unit tests for src/app/disc_extract.* on synthetic images; no game data needed.
 #include "disc_extract.h"
 
+#if defined(_WIN32)
+#include <process.h>
+#include <stdlib.h>
+#define getpid _getpid
+// _putenv_s(name, "") removes the variable, as unsetenv does.
+#define unsetenv(name) _putenv_s(name, "")
+#else
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -382,6 +390,7 @@ void testBinCue()
     { std::ofstream c(dir / "empty.cue"); c << "REM nothing\n"; }
     CHECK(openImage(dir / "empty.cue", err) == nullptr);
     CHECK(openImage(dir / "absent.cue", err) == nullptr && err.status == Status::cannotOpen);
+    src.reset();  // Windows cannot remove a file that is still open
     fs::remove_all(dir);
 }
 }  // namespace

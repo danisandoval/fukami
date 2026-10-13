@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import pcsx2_patch_series as series  # noqa: E402
 
-LOCKED_SHA256 = "a5d0088d69219ef4703863d38c8abb81d1fdb5b7ae7bbdcea3d9a1b0eb5ff281"
+LOCKED_SHA256 = "86333f08df077a5865866be6fe473dbd0e58c902bc8b021a4292a37837a4722b"
 PCSX2 = Path(os.environ.get("PCSX2_SOURCE_DIR", ROOT / "build-deps/pcsx2-2.8.2"))
 
 
@@ -39,7 +39,7 @@ class SeriesTests(unittest.TestCase):
 
     def test_series_is_complete_and_each_patch_starts_at_a_diff(self):
         files = series.series_files()
-        self.assertEqual(len(files), 11)
+        self.assertEqual(len(files), 13)
         for file in files:
             self.assertTrue(file.read_bytes().startswith(b"diff --git "), file.name)
 

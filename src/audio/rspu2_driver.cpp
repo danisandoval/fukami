@@ -9,6 +9,7 @@
 #include "rrv_pcsx2_spu2.h"
 #if defined(RRV_GATE8_SPU2)
 #include "rrv_sdl_audio.h"
+#include "../gs-backend/rrv_thread_name.h"
 #endif
 
 #include <algorithm>
@@ -2048,9 +2049,7 @@ struct Driver::Impl
 
     void workerMain()
     {
-#if defined(__linux__)
-        pthread_setname_np(pthread_self(), "rrv-spu2"); // [cpu] log (Gate 5)
-#endif
+        rrv::setCurrentThreadName("rrv-spu2"); // [cpu] log (Gate 5); Windows thread description
         std::deque<Op> batch;
         std::unique_lock<std::mutex> lk(m);
         for (;;)

@@ -10,6 +10,8 @@ project(rrv_pcsx2_spu2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# Flag spellings per compiler front end (GNU-style or clang-cl), shared with the main project.
+include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/RrvToolchainFlags.cmake")
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -49,14 +51,17 @@ function(rrv_spu2_library name)
     target_include_directories(${name}
         PUBLIC "${CMAKE_CURRENT_LIST_DIR}"
         PRIVATE "${CMAKE_CURRENT_LIST_DIR}/shim" "${RRV_PCSX2_SOURCE_DIR}/pcsx2")
+    rrv_flag_force_include(_rrv_spu2_prelude "${CMAKE_CURRENT_LIST_DIR}/shim/rrv_spu2_prelude.h")
+    rrv_flag_no_strict_aliasing(_rrv_no_strict_aliasing)
+    rrv_flag_fp_contract_off(_rrv_fp_contract_off)
     target_compile_options(${name} PRIVATE
-        "SHELL:-include \"${CMAKE_CURRENT_LIST_DIR}/shim/rrv_spu2_prelude.h\""
+        "${_rrv_spu2_prelude}"
         # As upstream pcsx2/CMakeLists.txt.
-        -fno-strict-aliasing
+        ${_rrv_no_strict_aliasing}
         # Upstream uses -ffp-contract=fast; the only float math here is the
         # host-side output stage (DC filter), kept FMA-free so every host
         # produces identical output samples.
-        -ffp-contract=off)
+        ${_rrv_fp_contract_off})
     find_package(Threads REQUIRED)
     target_link_libraries(${name} PUBLIC Threads::Threads)
 endfunction()
@@ -85,7 +90,8 @@ if(RRV_SPU2_BUILD_TESTS)
         add_test(NAME rspu2_determinism COMMAND rspu2_driver_test determinism)
     endif()
 
-    if(RRV_SPU2_TSAN_TESTS AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    rrv_sanitizers_available(_rrv_sanitizers)
+    if(RRV_SPU2_TSAN_TESTS AND _rrv_sanitizers)
         if(_rspu2_tests)
             add_executable(rspu2_driver_test_tsan test/rspu2_driver_test.cpp "${_rspu2_src}")
             target_include_directories(rspu2_driver_test_tsan PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../../src/audio")

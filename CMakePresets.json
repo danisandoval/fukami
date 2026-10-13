@@ -33,6 +33,23 @@
       "binaryDir": "${sourceDir}/build/m0-linux-x86_64"
     },
     {
+      "name": "m0-windows-x86_64",
+      "inherits": "m0-assetfree",
+      "displayName": "M0 Windows x86-64 (clang-cl, MSVC ABI) asset-free diagnostics",
+      "binaryDir": "${sourceDir}/build/m0-windows-x86_64",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl",
+        "CMAKE_LINKER": "lld-link",
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDLL"
+      }
+    },
+    {
       "name": "asan-ubsan-assetfree",
       "inherits": "m0-macos-arm64",
       "displayName": "Gate-9 S2: AddressSanitizer + UBSan, asset-free tests",

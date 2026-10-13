@@ -39,14 +39,33 @@
 namespace
 {
 // The PCSX2 hardware-GS device the product presents with: Metal on macOS,
-// Vulkan on Linux (Gate 5, Steam Deck).
+// Vulkan on Linux (Gate 5, Steam Deck), Direct3D 11 on Windows. Direct3D 11
+// is the Windows default (owner, 2026-10-12) because its frame pacing can be
+// controlled and measured there: DXGI holds a frame for a set number of
+// refreshes, reports when frames reached the screen and drives a
+// variable-refresh display; Vulkan on Windows offers none of the three
+// (docs/TESTING.md "Windows frame pacing"). Windows can ask for Vulkan:
+// rrv.ini `[rendering] backend = vulkan`, which the launcher passes as
+// RRV_PCSX2_GS_BACKEND=vulkan. Any other value, and the variable on another
+// platform, keeps the platform's own device.
+struct ProductBackend
+{
+    rrv::gsbackend::RendererKind kind;
+    std::string name;
+};
+
+ProductBackend productBackend()
+{
 #if defined(__APPLE__)
-constexpr rrv::gsbackend::RendererKind kProductRendererKind = rrv::gsbackend::RendererKind::Metal;
-#define RRV_PRODUCT_BACKEND_NAME "Metal"
+    return {rrv::gsbackend::RendererKind::Metal, "Metal"};
 #else
-constexpr rrv::gsbackend::RendererKind kProductRendererKind = rrv::gsbackend::RendererKind::Vulkan;
-#define RRV_PRODUCT_BACKEND_NAME "Vulkan"
+#if defined(_WIN32)
+    if (const char *requested = std::getenv("RRV_PCSX2_GS_BACKEND"); !requested || std::strcmp(requested, "vulkan") != 0)
+        return {rrv::gsbackend::RendererKind::Direct3D11, "Direct3D 11"};
 #endif
+    return {rrv::gsbackend::RendererKind::Vulkan, "Vulkan"};
+#endif
+}
 
 void printStartup()
 {
@@ -59,8 +78,7 @@ void printStartup()
         << " upstream-base=" << RRV_PRODUCER_BASE << '\n'
         << "[rrv-product] PCSX2 commit=" << RRV_PCSX2_COMMIT << '\n'
         << "[rrv-product] bridge ABI=5\n"
-        << "[rrv-product] requested renderer=PCSX2 hardware GS backend=" RRV_PRODUCT_BACKEND_NAME
-           " presentation=direct GPU\n"
+        << "[rrv-product] requested renderer=PCSX2 hardware GS backend=" << productBackend().name << " presentation=direct GPU\n"
         << "[rrv-product] continuous CPU readback=disabled\n"
         << "[rrv-product] diagnostic capture=available\n"
         << "[rrv-product] F7/P3 linked=no\n";
@@ -68,7 +86,8 @@ void printStartup()
     const auto launch = fukami::settings::LaunchConfig::fromEnvironment([](const char *name) { return std::getenv(name); });
     std::cerr << "[rrv-product] launch ratio=" << launch.ratio << " hud=" << launch.hud << " render=" << launch.renderMode
               << " scale=" << launch.scale << " aa1=" << launch.aa1 << " fxaa=" << launch.fxaa << " cas=" << launch.cas
-              << " aniso=" << launch.aniso << " texture-filter=" << launch.textureFilter << " mipmap=" << launch.mipmap
+              << " aniso=" << launch.aniso << " texture-filter=" << launch.textureFilter
+              << " sprite-filter=" << launch.spriteFilter << " mipmap=" << launch.mipmap
               << " analog=" << launch.analog
               << " rumble=" << launch.rumble << " car-lod=" << launch.carLod << " draw-distance=" << launch.drawDistance
               << " fast-unpack=" << launch.fastUnpack << " native-code=" << launch.nativeCode
@@ -463,9 +482,9 @@ Gate1Receipt runGate1ProducerControlCoverage(std::string_view scenario)
     rrv::host::SdlPresentation host;
     std::string hostError;
     gate1Check(host.create("RRV-Recomp Gate-1 producer control", &hostError),
-               ("Gate-1 SDL " RRV_PRODUCT_BACKEND_NAME " host initialization failed: " + hostError).c_str());
+               ("Gate-1 SDL " + productBackend().name + " host initialization failed: " + hostError).c_str());
     rrv::gsbackend::NativeSurface surface{};
-    gate1Check(host.currentSurface(&surface), "Gate-1 SDL " RRV_PRODUCT_BACKEND_NAME " host did not provide a drawable surface");
+    gate1Check(host.currentSurface(&surface), ("Gate-1 SDL " + productBackend().name + " host did not provide a drawable surface").c_str());
 
     PSPadBackend::setExternalBackendForProcess(host.padBackend());
     ExternalPadBackendReset resetExternalPadBackend;
@@ -474,7 +493,7 @@ Gate1Receipt runGate1ProducerControlCoverage(std::string_view scenario)
     PS2Runtime::HostPresentationConfig presentation{};
     presentation.backend.snapshotWidth = 640u;
     presentation.backend.snapshotHeight = 448u;
-    presentation.backend.rendererKind = kProductRendererKind;
+    presentation.backend.rendererKind = productBackend().kind;
     presentation.backend.presentationMode = rrv::gsbackend::PresentationMode::DirectGpu;
     presentation.backend.surface = surface;
     presentation.context = &host;
@@ -483,7 +502,7 @@ Gate1Receipt runGate1ProducerControlCoverage(std::string_view scenario)
     presentation.currentSurface = &rrv::host::SdlPresentation::surfaceCallback;
     runtime.setHostPresentationConfig(presentation);
     gate1Check(runtime.syncCoreSubsystems() && runtime.activeGsBackend() && runtime.directGpuPresentationActive(),
-               "Gate-1 actual rrv-product GS/" RRV_PRODUCT_BACKEND_NAME " initialization failed");
+               ("Gate-1 actual rrv-product GS/" + productBackend().name + " initialization failed").c_str());
 
     std::vector<Gate1IrqObservation> irqObservations;
     g_gate1IrqObservations = &irqObservations;
@@ -764,9 +783,12 @@ void printTerminalOutcome(const rrv::guestoutcome::TerminalOutcome &outcome)
 // one-shot: a second signal takes the default action. Host-only.
 #include <atomic>
 #include <csignal>
+#if !defined(_WIN32)
 #include <dlfcn.h>
+#endif
 
 namespace {
+#if !defined(_WIN32)
 // AppKit, QuartzCore, libobjc and CoreFoundation are already loaded through the
 // SDL runtime dependency; resolve them at run time instead of adding link
 // inputs to the candidate composition.
@@ -776,6 +798,7 @@ F gate3HeadlessSymbolV1(const char *name)
     return reinterpret_cast<F>(dlsym(RTLD_DEFAULT, name));
 }
 struct Gate3RectV1 { double x, y, width, height; }; // CGRect layout (arm64 HFA)
+#endif
 
 bool gate3HeadlessRequestedV1()
 {
@@ -798,6 +821,24 @@ public:
     HostPadCapabilities capabilities(unsigned) const override { return {}; }
 };
 
+#if defined(_WIN32)
+// Headless presentation is a macOS construct (a detached NSView/CAMetalLayer); Windows has none. The names stay so
+// main() reads the same on every platform, and asking for it is an error rather than a silent window.
+class Gate3HeadlessSurfaceV1
+{
+public:
+    bool create(std::string *error)
+    {
+        if (error) *error = "RRV_GATE3_HEADLESS is a macOS-only qualification mode";
+        return false;
+    }
+    bool currentSurface(rrv::gsbackend::NativeSurface *) const { return false; }
+    std::shared_ptr<HostPadBackend> pad = std::make_shared<Gate3NeutralHostPadV1>();
+    static void pumpCallback(void *) {}
+    static bool closeCallback(void *) { return false; }
+    static bool surfaceCallback(void *, rrv::gsbackend::NativeSurface *) { return false; }
+};
+#else
 class Gate3HeadlessSurfaceV1
 {
 public:
@@ -907,10 +948,14 @@ private:
     Id m_view = nullptr;
     Id m_layer = nullptr;
 };
+#endif
 } // namespace
 
 int main(int argc, char **argv)
 {
+    // Windows has no constructor hook before main(); the app launcher (fukami_app_win.cpp) starts here. A no-op on
+    // macOS and Linux, whose hooks have already run.
+    fukami::app::entry(argc, argv);
     // The developer launcher's single translation of rrv.ini and flags (see fukami_settings.h). It runs before
     // anything else: no ELF, no window, no game state.
     // From inside an app (Fukami.app, the Linux package) the answer includes the app's bundled defaults, as its
@@ -973,14 +1018,14 @@ int main(int argc, char **argv)
         std::string hostError;
         if (gate3Headless ? !headless.create(&hostError) : !host.create(title.c_str(), &hostError))
         {
-            std::cerr << "[rrv-product] SDL " RRV_PRODUCT_BACKEND_NAME " host initialization failed: " << hostError << '\n';
+            std::cerr << "[rrv-product] SDL " << productBackend().name << " host initialization failed: " << hostError << '\n';
             return 1;
         }
 
         rrv::gsbackend::NativeSurface initialSurface{};
         if (!(gate3Headless ? headless.currentSurface(&initialSurface) : host.currentSurface(&initialSurface)))
         {
-            std::cerr << "[rrv-product] SDL " RRV_PRODUCT_BACKEND_NAME " host did not provide a drawable surface\n";
+            std::cerr << "[rrv-product] SDL " << productBackend().name << " host did not provide a drawable surface\n";
             return 1;
         }
 
@@ -997,7 +1042,7 @@ int main(int argc, char **argv)
             PS2Runtime::HostPresentationConfig presentation{};
             presentation.backend.snapshotWidth = 640u;
             presentation.backend.snapshotHeight = 448u;
-            presentation.backend.rendererKind = kProductRendererKind;
+            presentation.backend.rendererKind = productBackend().kind;
             presentation.backend.presentationMode = rrv::gsbackend::PresentationMode::DirectGpu;
             presentation.backend.surface = initialSurface;
             presentation.context = gate3Headless ? static_cast<void*>(&headless) : static_cast<void*>(&host);
@@ -1028,14 +1073,13 @@ int main(int argc, char **argv)
                 std::cerr << "[rrv-product] runtime initialization failed\n";
             }
             else if (!runtime.activeGsBackend() || !runtime.directGpuPresentationActive() ||
-                     rrv::gsbackend::activeRendererKind() != kProductRendererKind)
+                     rrv::gsbackend::activeRendererKind() != productBackend().kind)
             {
-                std::cerr << "[rrv-product] direct PCSX2 hardware-GS " RRV_PRODUCT_BACKEND_NAME
-                             " presentation was not activated\n";
+                std::cerr << "[rrv-product] direct PCSX2 hardware-GS " << productBackend().name << " presentation was not activated\n";
             }
             else
             {
-                std::cerr << "[rrv-product] actual renderer=PCSX2 hardware GS backend=" RRV_PRODUCT_BACKEND_NAME " "
+                std::cerr << "[rrv-product] actual renderer=PCSX2 hardware GS backend=" << productBackend().name << " "
                              "presentation=direct GPU\n";
                 registerAllFunctions(runtime);
                 registerPatches(runtime);

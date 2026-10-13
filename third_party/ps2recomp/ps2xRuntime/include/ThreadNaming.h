@@ -4,24 +4,16 @@
 #include <string>
 
 #if defined(_WIN32)
+// RRV: the real header. The hand-written declarations that stood here clash with windows.h (HMODULE is a
+// pointer to a struct there), which the runtime sources now include for thread CPU time.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#ifndef WINAPI
-#define WINAPI __stdcall
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
 #endif
+#include <windows.h>
 
-extern "C"
-{
-    typedef void *HANDLE;
-    typedef void *HMODULE;
-    typedef const wchar_t *PCWSTR;
-    typedef long HRESULT;
-
-    __declspec(dllimport) HMODULE WINAPI GetModuleHandleW(const wchar_t *lpModuleName);
-    __declspec(dllimport) void *WINAPI GetProcAddress(HMODULE hModule, const char *lpProcName);
-    __declspec(dllimport) HANDLE WINAPI GetCurrentThread(void);
-}
 #elif defined(__APPLE__) || defined(__linux__)
 #include <pthread.h>
 #endif

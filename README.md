@@ -57,6 +57,7 @@ game files and will not link to them.
 - Steam Deck: the first 10-15 seconds of a race (the start area) can dip below 60 fps, mostly with scenery draw distance above 0 (the default). The start sections draw many more course strips than the rest of the lap; this is the game's own data, not a setting you can fix.
 - No in-game controller remapping yet; the default layout is in the user guide.
 - Audio is verified by listening and by measured tests, not by a full hardware comparison.
+- Widescreen HUD (`hud=fixed` or `race`): on the RETIRE result screen the RETRY / QUIT GP menu is drawn about 80 px to the left for its first visible frame.
 
 More in the release notes and on the [issue tracker](https://github.com/danisandoval/fukami/issues).
 

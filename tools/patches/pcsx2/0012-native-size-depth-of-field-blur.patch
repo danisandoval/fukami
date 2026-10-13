@@ -1,0 +1,216 @@
+diff --git a/pcsx2/GS/GS.cpp b/pcsx2/GS/GS.cpp
+index dab6413..b3def9a 100644
+--- a/pcsx2/GS/GS.cpp
++++ b/pcsx2/GS/GS.cpp
+@@ -92,6 +92,23 @@ void GSRrvSetRoundSpriteUOnly(bool u_only)
+ 	GSState::s_rrv_round_sprite_u_only = u_only;
+ }
+ 
++void GSRrvSetNativeBlurCopy(u32 scratch_block)
++{
++	GSState::s_rrv_native_blur_block = scratch_block;
++	GSState::s_rrv_native_blur_draws[0].store(0, std::memory_order_relaxed);
++	GSState::s_rrv_native_blur_draws[1].store(0, std::memory_order_relaxed);
++}
++
++u32 GSRrvNativeBlurCopyBlock()
++{
++	return GSState::s_rrv_native_blur_block;
++}
++
++u64 GSRrvGetNativeBlurCopyCount(u32 pass)
++{
++	return (pass == 1 || pass == 2) ? GSState::s_rrv_native_blur_draws[pass - 1].load(std::memory_order_relaxed) : 0;
++}
++
+ void GSRrvSetDropLargeSTTriangles(bool drop)
+ {
+ 	GSState::s_rrv_drop_large_st_triangles = drop;
+diff --git a/pcsx2/GS/GS.h b/pcsx2/GS/GS.h
+index 30838bd..d9ef60d 100644
+--- a/pcsx2/GS/GS.h
++++ b/pcsx2/GS/GS.h
+@@ -100,6 +100,26 @@ u64 GSRrvGetFieldOfyCanonicalCount();
+ // rows, so rounding V to the native field texel grid would drop the rows the
+ // other field shows. 1:1 sprites (post-processing page strips) keep V rounding.
+ void GSRrvSetRoundSpriteUOnly(bool u_only);
++// RRV RR5 extension (fukami#2, 2026-10-11): depth-of-field blur that keeps its
++// native size at an internal scale above 1. RR5 blurs by framebuffer feedback
++// through a scratch target (FBP 210 = block 0x1a40): a forward pass copies the
++// frame into it with a half-texel bilinear average, a return pass blends it back
++// with a half-texel bilinear average the other way. At scale N both targets are
++// N times larger and each resample is a 2-tap average of HOST texels, so the blur
++// is 1/N as wide on screen. With `scratch_block` non-zero (and the scale above
++// 1), a draw that matches the pattern in GSRendererHW::Draw() (1:1 same-width
++// 32-bit copy of 32x16 sprites into / out of that block, UV = XY + 1 texel
++// forward and + 0 return, the return blending Cs with Cd by Ad) is drawn from a
++// box-downsampled native-size copy of its source (PCSX2's m_downscale_source
++// path: the forward from the frame, the return from the scratch target as the
++// forward draws left it) and both passes align their texture coordinates to
++// half a NATIVE pixel (forward samples that copy at c + 0.5, return at c - 0.5
++// for a host pixel centre c in native pixels), so each round trip is the native
++// [1 2 1] / 4 kernel at every scale. 0 (the default) = stock.
++// The counts are monotonic totals of matched draws (pass 1 forward, 2 return).
++void GSRrvSetNativeBlurCopy(u32 scratch_block);
++u32 GSRrvNativeBlurCopyBlock();
++u64 GSRrvGetNativeBlurCopyCount(u32 pass);
+ // RRV Gate-6 extension: when set, UserHacks_RewriteLargeST also collapses
+ // every triangle whose ST it had to rewrite (degenerate Q), so it draws nothing.
+ void GSRrvSetDropLargeSTTriangles(bool drop);
+diff --git a/pcsx2/GS/GSState.cpp b/pcsx2/GS/GSState.cpp
+index ca7a11a..f126d8e 100644
+--- a/pcsx2/GS/GSState.cpp
++++ b/pcsx2/GS/GSState.cpp
+@@ -28,6 +28,8 @@ std::atomic<u64> GSState::s_rrv_ofy_canonical_count{0};
+ bool GSState::s_rrv_round_sprite_u_only = false;
+ bool GSState::s_rrv_drop_large_st_triangles = false;
+ std::atomic<u64> GSState::s_rrv_dropped_large_st_triangles{0};
++u32 GSState::s_rrv_native_blur_block = 0;
++std::atomic<u64> GSState::s_rrv_native_blur_draws[2] = {0, 0};
+ 
+ static __fi bool IsAutoFlushEnabled()
+ {
+diff --git a/pcsx2/GS/GSState.h b/pcsx2/GS/GSState.h
+index 1c73d15..cffb4e4 100644
+--- a/pcsx2/GS/GSState.h
++++ b/pcsx2/GS/GSState.h
+@@ -327,6 +327,9 @@ public:
+ 	static bool s_rrv_round_sprite_u_only;
+ 	static bool s_rrv_drop_large_st_triangles;
+ 	static std::atomic<u64> s_rrv_dropped_large_st_triangles;
++	// RRV native-size blur copy, see GSRrvSetNativeBlurCopy(). Block 0 = off.
++	static u32 s_rrv_native_blur_block;
++	static std::atomic<u64> s_rrv_native_blur_draws[2]; // [0] forward, [1] return
+ 
+ 	GSPerfMon m_perfmon_frame; // Track stat across a frame.
+ 	GSPerfMon m_perfmon_draw;  // Track stat across a draw.
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+index a22f6eb..4ea39f1 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+@@ -1276,6 +1276,28 @@ void GSRendererHW::ConvertSpriteTextureShuffle(GSTextureCache::Target* rt, GSTex
+ 
+ GSVector4 GSRendererHW::RealignTargetTextureCoordinate(const GSTextureCache::Source* tex)
+ {
++	// RRV native-size blur copy (see Draw(), GSRrvSetNativeBlurCopy). Both passes
++	// are drawn from a box-downsampled NATIVE-size copy of their source (the
++	// forward from the frame, the return from the scratch target) and sample it at
++	// a host pixel's centre c (in native pixels) moved by half a native pixel: the
++	// stock mapping sends GS coordinate p to the first host pixel of native pixel
++	// p, so a sample at p + off lands off a host texel centre; subtracting
++	// (0.5 - 0.5 / N) texels (8 - 8 / N in the 1/16 texel UV units) from the UV of
++	// a forward draw (off = +1) and of a return draw (off = 0) gives samples at
++	// c + 0.5 (forward: scratch = bilinear(S, c + 0.5), S = native copy of the
++	// frame) and c - 0.5 (return: frame = bilinear(T, c - 0.5) blended by Ad, T =
++	// native copy of the scratch target). The two shifts cancel (no drift) and a
++	// round trip is the native [1 2 1] / 4 kernel. (Measured 2026-10-11 on
++	// a0408bf, where only the forward was a native copy: the return sampled the
++	// N-times scratch at c - 0.5, which for even N is exactly a host texel centre,
++	// so it only shifted back, the frame got bilinear(S, c) and a round trip was
++	// not [1 2 1] / 4.)
++	if (m_rrv_blur_pass != 0)
++	{
++		const float o = 8.0f - 8.0f / GetUpscaleMultiplier();
++		return GSVector4(o, o, 0.0f, 0.0f);
++	}
++
+ 	if (GSConfig.UserHacks_HalfPixelOffset <= GSHalfPixelOffset::Normal ||
+ 		GSConfig.UserHacks_HalfPixelOffset >= GSHalfPixelOffset::Native ||
+ 		GetUpscaleMultiplier() == 1.0f || m_downscale_source || tex->GetScale() == 1.0f ||
+@@ -3667,6 +3689,7 @@ void GSRendererHW::Draw()
+ 	bool scaled_copy = false;
+ 	int scale_draw = IsScalingDraw(src, m_primitive_covers_without_gaps != NoGapsType::GapsFound);
+ 	m_downscale_source = false;
++	m_rrv_blur_pass = 0;
+ 
+ 	if (GSConfig.UserHacks_NativeScaling != GSNativeScaling::Off)
+ 	{
+@@ -3707,6 +3730,73 @@ void GSRendererHW::Draw()
+ 	{
+ 		target_scale = src->m_from_target->GetScale();
+ 	}
++
++	// RRV RR5 extension (fukami#2, 2026-10-11): the depth-of-field blur keeps its
++	// native width at an internal scale above 1. The guest (FUN_00240cb0
++	// -> FUN_00240a48, called from func_233240 via FUN_00240ca0; also FUN_002429d0
++	// and FUN_002aaa60) blurs by feedback through FBP 210 (block 0x1a40), 1 to 5
++	// round trips per field (5 on the memory-card save screen via FUN_002aaa60,
++	// script-driven counts via FUN_002429d0, 3 in the attract) of 280 sprites of
++	// 32x16 (FST, TEX1 linear, CLAMP, CT32, FBW 10). Seen firing (2026-10-11, the
++	// RRV_PCSX2_GS_FULL_DOF_LOG log): the attract (fields 378-3286), the
++	// "SELECT SAVE FILE / Now saving" screen (1471-1537) and the pre-race fly-by
++	// (2984-3153, 3308-3704); not reached: the replay camera (FUN_002413d8) and the
++	// VS-menu caller; nothing in other menus, car select, the race or pause.
++	//   forward: FRAME = block, TEX0 = the frame, UV = XY + 1.0 texel (U0 = 16),
++	//            no blend: a half-texel 2x2 average;
++	//   return:  FRAME = the frame, TEX0 = block, UV = XY + 0, ABE with
++	//            A=Cs B=Cd C=Ad D=Cd (weighted by a depth-built destination-alpha
++	//            mask): the average the other way.
++	// Per round trip a [1 2 1] / 4 kernel in native pixels. At scale N both targets
++	// are N times larger and every resample is a 2-tap bilinear of HOST texels, so
++	// the blur is 1/N as wide (measured on field 1140: background detail 1.44x and
++	// 1.67x of the 1x frame at 2x and 4x; no stock setting fixes it). Both passes
++	// are made from a box-downsampled native-size copy of their source (the
++	// m_downscale_source path stock PCSX2 uses for native scaling: the draw then
++	// samples a native texture): the forward from the frame, the return from the
++	// scratch target. HandleTextureHazards takes that copy per draw, from the
++	// target's live texture (no cache across draws or passes), so a return draw
++	// sees what the forward draws of its round trip wrote; the destination alpha
++	// of the return's blend is read from the N-times frame, unaffected. (a0408bf
++	// copied only the forward: the return then sampled the N-times scratch at a
++	// host texel centre and a round trip was not the native kernel.) Both passes
++	// align their texture coordinates to half a native pixel
++	// (RealignTargetTextureCoordinate). The pattern is
++	// narrow (exactly this block, a 1:1 same-width CT32 copy of 32x16 sprites, U/V
++	// offset exactly 16 or 0, that blend) so other users of FBP 210 (the bloom
++	// chain, FUN_00247730 and FUN_00226460) do not match. Off at scale 1 and when
++	// GSRrvSetNativeBlurCopy() is 0.
++	if (const u32 blur_block = s_rrv_native_blur_block;
++		blur_block != 0 && src && src->m_from_target && m_vertex->next >= 2 &&
++		src->m_from_target->GetScale() > 1.0f && std::floor(src->m_from_target->GetScale()) == src->m_from_target->GetScale() &&
++		src->m_from_target->GetScale() == target_scale &&
++		m_vt.m_primclass == GS_SPRITE_CLASS && PRIM->TME && PRIM->FST && m_vt.IsRealLinear() &&
++		!m_texture_shuffle && !m_channel_shuffle &&
++		m_cached_ctx.TEX0.PSM == PSMCT32 && m_cached_ctx.FRAME.PSM == PSMCT32 &&
++		m_cached_ctx.TEX0.TBW == m_cached_ctx.FRAME.FBW)
++	{
++		const GSVertex* v = &m_vertex->buff[0];
++		const int ox = m_context->XYOFFSET.OFX, oy = m_context->XYOFFSET.OFY;
++		const int du = static_cast<int>(v[0].U) - (static_cast<int>(v[0].XYZ.X) - ox);
++		const int dv = static_cast<int>(v[0].V) - (static_cast<int>(v[0].XYZ.Y) - oy);
++		const bool sprite_32x16 = (static_cast<int>(v[1].XYZ.X) - static_cast<int>(v[0].XYZ.X)) == (32 << 4) &&
++		                          (static_cast<int>(v[1].XYZ.Y) - static_cast<int>(v[0].XYZ.Y)) == (16 << 4);
++		if (sprite_32x16 && m_cached_ctx.FRAME.Block() == blur_block && m_cached_ctx.TEX0.TBP0 != blur_block &&
++			du == 16 && dv == 16 && !PRIM->ABE)
++		{
++			m_rrv_blur_pass = 1;
++			m_downscale_source = true;
++			s_rrv_native_blur_draws[0].fetch_add(1, std::memory_order_relaxed);
++		}
++		else if (sprite_32x16 && m_cached_ctx.TEX0.TBP0 == blur_block && m_cached_ctx.FRAME.Block() != blur_block &&
++				 du == 0 && dv == 0 && PRIM->ABE && m_context->ALPHA.A == 0 && m_context->ALPHA.B == 1 &&
++				 m_context->ALPHA.C == 1 && m_context->ALPHA.D == 1)
++		{
++			m_rrv_blur_pass = 2;
++			m_downscale_source = true;
++			s_rrv_native_blur_draws[1].fetch_add(1, std::memory_order_relaxed);
++		}
++	}
+ 	// This upscaling hack is for games which construct P8 textures by drawing a bunch of small sprites in C32,
+ 	// then reinterpreting it as P8. We need to keep the off-screen intermediate textures at native resolution,
+ 	// but not propagate that through to the normal render targets. Test Case: Crash Wrath of Cortex.
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.h b/pcsx2/GS/Renderers/HW/GSRendererHW.h
+index 4ee9d55..d60756a 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.h
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.h
+@@ -306,6 +306,10 @@ private:
+ 
+ 	bool m_process_texture = false;
+ 	bool m_downscale_source = false;
++	// RRV native-size blur copy (GSRrvSetNativeBlurCopy): 1 forward pass, 2 return
++	// pass of the current draw, 0 none. Set in Draw(), read when the texture
++	// offset is computed (RealignTargetTextureCoordinate).
++	u8 m_rrv_blur_pass = 0;
+ 
+ 	TextureShuffleInfo m_texture_shuffle;
+ 

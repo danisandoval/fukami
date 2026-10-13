@@ -19,10 +19,13 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#if defined(_WIN32)
+#include <filesystem>
+#else
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-
+#endif
 namespace rrv::gsrecord {
 
 namespace {
@@ -78,12 +81,28 @@ void onCaptureSignal(int) { g_signalPending.store(1, std::memory_order_relaxed);
 void restoreCaptureSignal() {
     g_signalArmEnabled.store(false, std::memory_order_relaxed);
     g_signalPending.store(0, std::memory_order_relaxed);
+#if !defined(_WIN32)
     if (g_signalHandlerInstalled.exchange(false, std::memory_order_relaxed) &&
         std::signal(SIGUSR1, g_previousSignalHandler) == SIG_ERR) {
         std::fprintf(stderr, "[rrv-gs-record] could not restore SIGUSR1 disposition\n");
     }
+#endif
 }
 
+#if defined(_WIN32)
+bool looksLikePath(const char* v) {
+    if (!v || !*v) return false;
+    if (std::strchr(v, '/') || std::strchr(v, '\\')) return true;
+    std::error_code ec;
+    return std::filesystem::is_directory(std::filesystem::path(v), ec);
+}
+
+void ensureParentDir(const std::string& filePath) {
+    std::error_code ec;
+    const auto parent = std::filesystem::path(filePath).parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+}
+#else
 bool looksLikePath(const char* v) {
     if (!v || !*v) return false;
     if (std::strchr(v, '/')) return true;
@@ -111,6 +130,7 @@ void ensureParentDir(const std::string& filePath) {
         start = slash + 1;
     }
 }
+#endif
 
 void writeEvent(EventTag tag, uint8_t pathId, const void* payload, uint32_t size) {
     std::lock_guard<std::mutex> lk(g_fileMutex);
@@ -159,7 +179,14 @@ void rrv_gs_record_init_from_env(const uint8_t* vram, uint32_t vramSize,
     const char* v = std::getenv("RRV_GS_RECORD");
     if (!v || !*v) { g_enabled.store(false); return; }
 
-    std::string path = looksLikePath(v) ? std::string(v) : std::string("/tmp/rrv_gs_record/rec.gsr");
+#if defined(_WIN32)
+    std::error_code tempError;
+    const std::string defaultPath =
+        (std::filesystem::temp_directory_path(tempError) / "rrv_gs_record" / "rec.gsr").string();
+#else
+    const std::string defaultPath = "/tmp/rrv_gs_record/rec.gsr";
+#endif
+    std::string path = looksLikePath(v) ? std::string(v) : defaultPath;
 
     g_armedVram = vram;
     g_armedVramSize = vramSize;
@@ -183,6 +210,12 @@ void rrv_gs_record_init_from_env(const uint8_t* vram, uint32_t vramSize,
         g_armedPath = path;
         g_armed.store(true, std::memory_order_relaxed);
         g_enabled.store(false, std::memory_order_relaxed);
+#if defined(_WIN32)
+        // The capture trigger is a POSIX signal (kill -USR1); Windows has none. The armed recording starts through
+        // rrv_gs_record_trigger() only.
+        if (const char* signal = std::getenv("RRV_GS_RECORD_SIGNAL"); signal && signal[0] != '\0')
+            std::fprintf(stderr, "[rrv-gs-record] RRV_GS_RECORD_SIGNAL is not available on Windows; ignored\n");
+#else
         if (const char* signal = std::getenv("RRV_GS_RECORD_SIGNAL");
             signal && std::strcmp(signal, "USR1") == 0) {
             const SignalHandler previous = std::signal(SIGUSR1, onCaptureSignal);
@@ -198,6 +231,7 @@ void rrv_gs_record_init_from_env(const uint8_t* vram, uint32_t vramSize,
                 return;
             }
         }
+#endif
         std::fprintf(stderr,
                      "[rrv-gs-record] ARMED -> %s (waiting for trigger; frame cap %llu)\n",
                      path.c_str(), static_cast<unsigned long long>(g_maxFrames));

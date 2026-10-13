@@ -73,9 +73,15 @@ struct Spec
     double maxValue = 0.0;
     Apply apply = Apply::restart;
     bool inMenu = true;                    // false: advanced, ini only
+    bool experimental = false;             // menu page "Experimental" instead of its section's page
 };
 
 const std::vector<Spec> &schema();
+// True on a Steam Deck (Linux, DMI board vendor Valve); RRV_STEAM_DECK=0/1 overrides it (tests).
+bool steamDeck();
+// The internal scale a host can use: on a Steam Deck an odd scale above 1 becomes the even one below it. The
+// Deck's GPU does not reproduce its own depth at 3x (docs/TESTING.md T-DECK-3X-HATCH; 5 and 7 were not tested).
+int hostScale(int scale, bool deck);
 const Spec *find(std::string_view section, std::string_view key);
 // True when `value` is legal for the spec (same rules as run_gate4_product.sh).
 bool valid(const Spec &spec, std::string_view value);
@@ -95,21 +101,27 @@ bool envAllowed(std::string_view name, bool developer);
 struct LaunchConfig
 {
     // [display]
-    std::string ratio = "16:9", hud = "stretch", aspect, window;
+    std::string ratio = "16:9", hud = "race", aspect, window;
     bool fullscreen = false, integerScaling = false, presentPacing = true;
+    std::string refreshRate = "auto"; // full-screen display rate, Windows: auto | 60 | 120 | 180 | 240 | off (RRV_DISPLAY_REFRESH)
+    std::string vrr = "auto";         // variable refresh, Windows Direct3D 11: auto | on | off (RRV_PCSX2_GS_VRR=1|0)
+    bool syncToDisplay = true;        // the display paces the game; acts on Windows Direct3D 11 only (RRV_DISPLAY_LOCK=1, RRV_AUDIO_RATE_CONTROL=1)
     // [rendering]
     std::string renderMode = "full";
     int scale = 4;
     bool aa1 = true, fxaa = false;
     int cas = 0, aniso = 0;
     std::string textureFilter = "ps2";
-    bool mipmap = true;
+    std::string spriteFilter = "even"; // point-sampled 2D sprites: even | ps2 (RRV_PCSX2_GS_SPRITE_FILTER)
+    bool mipmap = false;
+    std::string backend = "auto"; // graphics API: auto | vulkan | d3d11 (RRV_PCSX2_GS_BACKEND; Windows: auto is d3d11)
     // [input]
     bool analog = true, rumble = true;
     // [game]
     std::string carLod = "4";
     int drawDistance = 0;
     bool fastUnpack = true, nativeCode = true;
+    bool carDepthFix = false; // [game] car_depth_fix: RRV_RR5_CAR_ZTIE
     bool logging = false; // [game] logging: the app launchers write a session folder only when true
     // [timing]
     bool unpaced = false, inlineExecution = false, headless = false;
@@ -223,13 +235,17 @@ template <class Getter> LaunchConfig LaunchConfig::fromEnvironment(Getter get)
     c.cas = set("RRV_PCSX2_GS_CAS") ? std::atoi(text("RRV_PCSX2_GS_CAS").c_str()) : 0;
     c.aniso = set("RRV_PCSX2_GS_ANISO") ? std::atoi(text("RRV_PCSX2_GS_ANISO").c_str()) : 0;
     c.textureFilter = set("RRV_PCSX2_GS_TEXTURE_FILTER") ? text("RRV_PCSX2_GS_TEXTURE_FILTER") : "ps2";
+    c.spriteFilter = set("RRV_PCSX2_GS_SPRITE_FILTER") ? text("RRV_PCSX2_GS_SPRITE_FILTER") : "even";
     c.mipmap = text("RRV_PCSX2_GS_FULL_HWMIPMAP") != "0";
+    if (set("RRV_PCSX2_GS_BACKEND"))
+        c.backend = text("RRV_PCSX2_GS_BACKEND");
     c.analog = text("RRV_PAD_ANALOG") != "0";
     c.rumble = text("RRV_PAD_RUMBLE") != "0";
     c.carLod = set("RRV_RR5_CAR_LOD") ? text("RRV_RR5_CAR_LOD") : "1";
     c.drawDistance = set("RRV_RR5_DRAW_DISTANCE") ? std::atoi(text("RRV_RR5_DRAW_DISTANCE").c_str()) : 0;
     c.fastUnpack = text("RRV_RR5_FAST_UNPACK") == "1";
     c.nativeCode = text("RRV_RR5_NATIVE_HOT") == "1";
+    c.carDepthFix = set("RRV_RR5_CAR_ZTIE") && text("RRV_RR5_CAR_ZTIE") != "0";
     c.ratio = set("RRV_RR5_WIDESCREEN") ? text("RRV_RR5_WIDESCREEN") : "4:3";
     c.hud = !set("RRV_PCSX2_GS_HUD_SCALE") ? "stretch" : (text("RRV_PCSX2_GS_HUD_MODE") == "race" ? "race" : "fixed");
     c.aspect = text("RRV_PCSX2_GS_ASPECT");
@@ -237,6 +253,11 @@ template <class Getter> LaunchConfig LaunchConfig::fromEnvironment(Getter get)
     c.fullscreen = text("RRV_WINDOW_FULLSCREEN") == "1";
     c.integerScaling = text("RRV_PCSX2_GS_INTEGER_SCALING") == "1";
     c.presentPacing = text("RRV_PCSX2_GS_PRESENT_PACING") != "0";
+    if (set("RRV_DISPLAY_REFRESH"))
+        c.refreshRate = text("RRV_DISPLAY_REFRESH");
+    if (set("RRV_PCSX2_GS_VRR"))
+        c.vrr = text("RRV_PCSX2_GS_VRR") == "1" ? "on" : "off";
+    c.syncToDisplay = text("RRV_DISPLAY_LOCK") == "1";
     return c;
 }
 

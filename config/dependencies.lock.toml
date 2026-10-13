@@ -49,6 +49,15 @@ version = "2.32.10"
 tag = "release-2.32.10"
 revision = "5d249570393f7a37e037abf22cd6012a4cc56a71"
 
+[sdl_windows]
+# Windows x86-64 (scripts/prepare_sdl.py --platform windows-x86_64): the official Visual C++ development package of
+# the same release as [sdl] (prebuilt SDL2.dll + SDL2.lib), not a build from the pinned source. The digest is the
+# one GitHub records for the release asset; prepare_sdl.py refuses a download that differs.
+version = "2.32.10"
+url = "https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-VC.zip"
+sha256 = "af347939395a58b365846aaea27391e69f9ec9d4dd650d6ac40802159b418a6e"
+size = 7172966
+
 [pcsx2]
 url = "https://github.com/PCSX2/pcsx2.git"
 revision = "fd9d310ccbb6b8b62c976da8886a3c8fd3a10ff3"
@@ -57,16 +66,28 @@ require_clean_checkout = true
 # Git tree of the locked revision with the whole bridge patch series applied (the index tree the
 # bridge manifest records as pcsx2_source.patched_tree); scripts/pcsx2_patch_series.py check
 # --pcsx2-source proves the series reproduces it.
-bridge_patched_tree = "6bf1a4edd0a772afaee775b772a9d148a46b58a3"
+bridge_patched_tree = "d5f35d7e1ab9777564d59a381bdce4370cc3c647"
 
 [[pcsx2_bridge_patches]]
 path = "tools/patches/pcsx2-gs-bridge-target.patch"
-sha256 = "a5d0088d69219ef4703863d38c8abb81d1fdb5b7ae7bbdcea3d9a1b0eb5ff281"
+sha256 = "86333f08df077a5865866be6fe473dbd0e58c902bc8b021a4292a37837a4722b"
 
 # Linux/Steam Deck only (Gate 5): applied after the target patch.
 [[pcsx2_bridge_linux_patches]]
 path = "tools/patches/pcsx2-gs-bridge-linux.patch"
-sha256 = "6b3958e18f0bd52ca4f86dd8c577d8f305b41fef8ff55050021ea7e4fff8e28b"
+sha256 = "082891426cefdda4d40150c35931fecd1cb7814bfb7726b3f0b71626db88c122"
+
+# Windows (clang-cl; Vulkan, optional Direct3D 11): stacked after the target patch, in this order. The first is the Linux patch's Vulkan
+# present accounting (GSDeviceVK::EndPresent), the same file and digest as above: Windows presents through the same
+# renderer. Further entries are Windows-only source changes.
+[[pcsx2_bridge_windows_patches]]
+path = "tools/patches/pcsx2-gs-bridge-linux.patch"
+sha256 = "082891426cefdda4d40150c35931fecd1cb7814bfb7726b3f0b71626db88c122"
+
+# Windows presentation: the Direct3D 11 present pacer (RRVPresentPacer.h), the present trace and Direct3D 11 present accounting.
+[[pcsx2_bridge_windows_patches]]
+path = "tools/patches/pcsx2-gs-bridge-windows-d3d11.patch"
+sha256 = "0c8f3b557effdc829b86d4fb72caaf71807dad6a31e11ef1ba184e5e187c8528"
 
 [[pcsx2_gt_capture_patches]]
 path = "tools/patches/pcsx2-gt-capture.patch"
@@ -87,3 +108,108 @@ sha256 = "eb61633fde4554b7f2f6d803dee7571aea241978317318ea958827efa6b9e876"
 [[pcsx2_gt_debug_server_patch]]
 path = "tools/patches/pcsx2-debug-server.patch"
 sha256 = "7c2f2fe6b0e8e05677c21eb126e1d45ca98fd3d600ea8b5a1fc1d35f7b31c950"
+
+# Windows only: the third-party sources scripts/build_pcsx2_windows_deps.py builds for PCSX2's CMake build. The set,
+# versions and digests are those of PCSX2's own .github/workflows/scripts/windows/build-dependencies.bat at the locked
+# revision, minus the Qt, KDDockWidgets, FFmpeg and Agility SDK entries the GS bridge does not use.
+[[pcsx2_windows_source]]
+name = "zlib"
+filename = "zlib132.zip"
+url = "https://github.com/madler/zlib/releases/download/v1.3.2/zlib132.zip"
+sha256 = "e8bf55f3017aa181690990cb58a994e77885da140609fc8f94abe9b65d2cae28"
+
+[[pcsx2_windows_source]]
+name = "libpng"
+filename = "lpng1658.zip"
+url = "https://download.sourceforge.net/libpng/lpng1658.zip"
+sha256 = "b32f170855dbbe3e6d9e645af40b538137041773672c3ba3e02db5816c82d376"
+
+[[pcsx2_windows_source]]
+name = "libjpeg-turbo"
+filename = "libjpeg-turbo-3.2.0.tar.gz"
+url = "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.2.0/libjpeg-turbo-3.2.0.tar.gz"
+sha256 = "6f30092cef9fb839779646608f4ee14ae3cbac989c47fa05e841b0841f09878e"
+
+[[pcsx2_windows_source]]
+name = "lz4"
+filename = "lz4-1.10.0.zip"
+url = "https://github.com/lz4/lz4/archive/refs/tags/v1.10.0.zip"
+sha256 = "3224b4c80f351f194984526ef396f6079bd6332dd9825c72ac0d7a37b3cdc565"
+
+[[pcsx2_windows_source]]
+name = "freetype"
+filename = "freetype-2.14.3.tar.gz"
+url = "https://sourceforge.net/projects/freetype/files/freetype2/2.14.3/freetype-2.14.3.tar.gz/download"
+sha256 = "e61b31ab26358b946e767ed7eb7f4bb2e507da1cfefeb7a8861ace7fd5c899a1"
+
+[[pcsx2_windows_source]]
+name = "harfbuzz"
+filename = "harfbuzz-14.2.0.zip"
+url = "https://github.com/harfbuzz/harfbuzz/archive/refs/tags/14.2.0.zip"
+sha256 = "bb2f83255706b1c92d731541c7cefaf98bb5b93e8f76d16f6deda05225ff20ee"
+
+[[pcsx2_windows_source]]
+name = "zstd"
+filename = "zstd-1.5.7.zip"
+url = "https://github.com/facebook/zstd/archive/refs/tags/v1.5.7.zip"
+sha256 = "7897bc5d620580d9b7cd3539c44b59d78f3657d33663fe97a145e07b4ebd69a4"
+
+[[pcsx2_windows_source]]
+name = "libwebp"
+filename = "libwebp-1.6.0.tar.gz"
+url = "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.6.0.tar.gz"
+sha256 = "e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564"
+
+[[pcsx2_windows_source]]
+name = "sdl3"
+filename = "SDL3-3.4.12.zip"
+url = "https://libsdl.org/release/SDL3-3.4.12.zip"
+sha256 = "3d4de8967a49c0451e775a0c1e9022092c19fdef41ba38a83fcf031c5a6496e2"
+
+[[pcsx2_windows_source]]
+name = "plutovg"
+filename = "plutovg-1.3.2.zip"
+url = "https://github.com/sammycage/plutovg/archive/v1.3.2.zip"
+sha256 = "4fe4e48f28aa80171b2166d45c0976ab0f21eecedb52cd4c3ef73b5afb48fac9"
+
+[[pcsx2_windows_source]]
+name = "plutosvg"
+filename = "plutosvg-0.0.7.zip"
+url = "https://github.com/sammycage/plutosvg/archive/v0.0.7.zip"
+sha256 = "82dee2c57ad712bdd6d6d81d3e76249d89caa4b5a4214353660fd5adff12201a"
+
+[[pcsx2_windows_source]]
+name = "rapidyaml"
+filename = "rapidyaml-0.12.1-src.zip"
+url = "https://github.com/biojppm/rapidyaml/releases/download/v0.12.1/rapidyaml-0.12.1-src.zip"
+sha256 = "96276f55b9fa7837ac8f3f72fd52965879cbb5d5d2e6af548c69a177fb078304"
+
+[[pcsx2_windows_source]]
+name = "directx-headers"
+filename = "DirectX-Headers-1.619.1.zip"
+url = "https://github.com/microsoft/DirectX-Headers/archive/v1.619.1.zip"
+sha256 = "9eb8b102a90a42e4ea72a825f7d249d55ec90d164f030966c9b7784b93374927"
+
+[[pcsx2_windows_source]]
+name = "shaderc"
+filename = "shaderc-2026.2.zip"
+url = "https://github.com/google/shaderc/archive/refs/tags/v2026.2.zip"
+sha256 = "f9401cc5cb36c276cd1e072b6595dbd728148e8dba389e50f7339e2d388dbc08"
+
+[[pcsx2_windows_source]]
+name = "shaderc-glslang"
+filename = "shaderc-glslang-275822a6261ee689aadb1da5f09a0ec2f058685c.zip"
+url = "https://github.com/KhronosGroup/glslang/archive/275822a6261ee689aadb1da5f09a0ec2f058685c.zip"
+sha256 = "2b63189efad0348d88d410a5e12ec550a612e0b6ceef64624b8f45491269fb9c"
+
+[[pcsx2_windows_source]]
+name = "shaderc-spirv-headers"
+filename = "shaderc-spirv-headers-58006c901d1d5c37dece6b6610e9af87fa951375.zip"
+url = "https://github.com/KhronosGroup/SPIRV-Headers/archive/58006c901d1d5c37dece6b6610e9af87fa951375.zip"
+sha256 = "d2f071e94c081f5a4606559770ebf1f7d1eac92a1def0c3e10609844aa8b69b2"
+
+[[pcsx2_windows_source]]
+name = "shaderc-spirv-tools"
+filename = "shaderc-spirv-tools-6337eb62cadd7d124ac6789bf39c0f71148f0a73.zip"
+url = "https://github.com/KhronosGroup/SPIRV-Tools/archive/6337eb62cadd7d124ac6789bf39c0f71148f0a73.zip"
+sha256 = "4011be89aa73e3461c9deef73936a62c79a3097590c5135d058041cc9fb99c6f"

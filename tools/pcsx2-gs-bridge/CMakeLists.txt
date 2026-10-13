@@ -21,6 +21,14 @@ if(APPLE)
     # compiling Objective-C++. This small adapter is the only ObjC++ source.
     set_source_files_properties(metal_surface_adapter.mm PROPERTIES
         SKIP_PRECOMPILE_HEADERS ON)
+elseif(WIN32)
+    # Windows: the Win32 (HWND) surface check + owner-thread sideband for PCSX2's Vulkan renderer. Plain C++ over
+    # windows.h. The DLL and its staged resources stay at <build>/pcsx2-gs-bridge as on macOS and Linux.
+    target_sources(rrv-pcsx2-gs-bridge PRIVATE win32_surface_adapter.cpp)
+    set_target_properties(rrv-pcsx2-gs-bridge PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+        PREFIX "")
 else()
     # Linux (Gate 5): X11/Wayland surface checks + owner-thread sideband for
     # PCSX2's Vulkan renderer. Plain C++; no windowing headers or libraries.
@@ -56,6 +64,27 @@ add_custom_command(TARGET rrv-pcsx2-gs-bridge POST_BUILD
             "$<TARGET_FILE_DIR:rrv-pcsx2-gs-bridge>/resources"
     VERBATIM
 )
+
+if(WIN32)
+    # The libraries PCSX2's own Windows build loads next to its executable (scripts/build_pcsx2_windows_deps.py
+    # prefix), staged beside the bridge DLL: LoadLibraryEx(LOAD_WITH_ALTERED_SEARCH_PATH) resolves a DLL's imports from
+    # its own directory. RRV_PCSX2_DEPS_BIN is the prefix's bin directory (scripts/build_pcsx2_gs_bridge.py).
+    if(NOT RRV_PCSX2_DEPS_BIN)
+        message(FATAL_ERROR "Set RRV_PCSX2_DEPS_BIN to the bin directory of the PCSX2 dependency prefix")
+    endif()
+    foreach(dependency_dll IN ITEMS freetype.dll harfbuzz.dll jpeg62.dll libpng16.dll libsharpyuv.dll libwebp.dll
+                                    lz4.dll SDL3.dll shaderc_shared.dll z.dll zstd.dll plutovg.dll plutosvg.dll ryml.dll)
+        if(NOT EXISTS "${RRV_PCSX2_DEPS_BIN}/${dependency_dll}")
+            message(FATAL_ERROR "Missing ${RRV_PCSX2_DEPS_BIN}/${dependency_dll} (scripts/build_pcsx2_windows_deps.py)")
+        endif()
+        add_custom_command(TARGET rrv-pcsx2-gs-bridge POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${RRV_PCSX2_DEPS_BIN}/${dependency_dll}"
+                    "$<TARGET_FILE_DIR:rrv-pcsx2-gs-bridge>/${dependency_dll}"
+            VERBATIM
+        )
+    endforeach()
+endif()
 
 if(APPLE)
     foreach(metal_library IN ITEMS default.metallib Metal22.metallib Metal23.metallib)

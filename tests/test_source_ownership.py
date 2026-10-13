@@ -21,7 +21,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 GEN = ROOT / "generated/rr5"
-ACCOUNTED_MANIFEST_SHA256 = "eb1c6078f6c7ff89d28144beeebda3901225def392c5f29f8ff2780ad87880f5"
+ACCOUNTED_MANIFEST_SHA256 = "a9fd33a838cb623f07153cfbeb11f3a7b729e371511beead8debb1490740357c"
 # The game code is derived from the user's own ELF: a public checkout has it only after
 # scripts/fukami_generate.py, so the checks on the generated tree skip when it is absent.
 HAVE_GENERATED = (GEN / "output").is_dir()

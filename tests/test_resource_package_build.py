@@ -69,7 +69,7 @@ rrv_use_gs_resource_package(TARGET reader_two PACKAGE fixture)
         copied = self.root / "repo O'Brien ü"
         for relative in ("cmake/RrvResourcePackage.cmake", "cmake/rrv_resource_package_binding.cpp.in",
                          "scripts/resource_package.py", "scripts/resource_package_fs.py", "scripts/pcsx2_bridge_manifest.py",
-                         "src/host/rrv_resource_package.h", "src/host/rrv_resource_package.cpp",
+                         "src/host/rrv_resource_package.h", "src/host/rrv_resource_package_common.h", "src/host/rrv_resource_package.cpp",
                          "tests/resource_package_native_tests.cpp"):
             destination = copied / relative; destination.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(ROOT / relative, destination)
         source = self.root / "source O'Brien ü"; build = self.root / "build O'Brien ü"; source.mkdir()

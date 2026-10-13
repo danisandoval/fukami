@@ -36,7 +36,8 @@ add_library(ps2_runtime STATIC
 file(GLOB_RECURSE KERNEL_SRC_FILES CONFIGURE_DEPENDS "${RRV_RT}/src/lib/Kernel/*.cpp")
 target_sources(ps2_runtime PRIVATE ${KERNEL_SRC_FILES})
 # The PS2 VU FMAC is not a fused multiply-add (docs/TESTING.md T-P7-VUSTEP).
-set_source_files_properties("${RRV_RT}/src/lib/ps2_vu1.cpp" PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+rrv_flag_fp_contract_off(_rrv_fp_contract_off)
+set_source_files_properties("${RRV_RT}/src/lib/ps2_vu1.cpp" PROPERTIES COMPILE_OPTIONS "${_rrv_fp_contract_off}")
 target_include_directories(ps2_runtime PUBLIC "${RRV_RT}/include"
     "${CMAKE_SOURCE_DIR}/src"
     "${RRV_RT}/src/lib/Kernel"

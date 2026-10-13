@@ -22,6 +22,13 @@ WHAT CHANGES
   committed before every runtime interaction (MMIO load/store, VU0
   microprogram, exception, call to another guest function, return), so the
   runtime sees exactly the state the per-instruction calls would have left.
+  A call is `callee(rdram, ctx, runtime);`, alone or followed by `return;` (a
+  tail call, where a function runs into the next one): both get the commit
+  before and the re-read after. Without the re-read a tail call's return
+  would commit the caller's stale count over the callee's (found 2026-10-05:
+  none of the first 29 functions has a tail call, 29 of the next 250 do, and
+  the 8-car replay's digests differed from start 17,050). Any other line that
+  passes (rdram, ctx, runtime) is refused.
   Back-edge scheduler checks are skipped only while the window is armed and
   the generation is unchanged: then the scheduler is provably quiet and the
   check is a no-op (every scheduler change bumps the generation). Scratchpad
@@ -30,6 +37,8 @@ WHAT CHANGES
   Nothing else changes: same statements, same order, same guest-visible state
   at every runtime interaction. A function containing anything the translator
   does not know (syscalls, COP0 writes, unknown runtime methods) is refused.
+
+TAIL CALLS (generator version 3): see WHAT CHANGES.
 
 HOOKS (generator version 2)
   A hand-written native routine can take over a stretch of a native function
@@ -66,7 +75,7 @@ import re
 import sys
 from pathlib import Path
 
-GENERATOR_VERSION = 2
+GENERATOR_VERSION = 3
 
 # runtime-> methods the translator understands. Anything else: refuse.
 KNOWN_RT = {
@@ -78,7 +87,10 @@ REFUSE = ('cop0_status', 'handleSyscall', 'ps2_syscalls::', 'ps2_stubs::',
 
 FUNC_RE = re.compile(r'^void (sub_([0-9A-F]{8})_0x([0-9a-f]+))\(uint8_t\* rdram, R5900Context\* ctx, PS2Runtime \*runtime\) \{$')
 WORD_RE = re.compile(r'^\s*// 0x([0-9a-f]+): 0x([0-9a-f]+)\s')
-CALL_RE = re.compile(r'^(\s*)((?:targetFn|sub_[0-9A-F]{8}_0x[0-9a-f]+)\(rdram, ctx, runtime\);)$')
+# A call of another guest function, alone on its line or followed by `return;` (the function falls
+# through or jumps into the next one: a tail call).
+CALL_RE = re.compile(r'^(\s*)((?:targetFn|sub_[0-9A-F]{8}_0x[0-9a-f]+)\(rdram, ctx, runtime\);)( return;)?$')
+ANY_CALL_RE = re.compile(r'\(\s*rdram\s*,\s*ctx\s*,\s*runtime\s*\)')
 LABEL_RE = re.compile(r'^label_([0-9a-f]+):$')
 CALLEE_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z_][A-Za-z0-9_]*)*$')
 
@@ -99,7 +111,7 @@ def parse_hook(text: str, probe: bool) -> dict:
 
 
 def translate(path: Path, hooks: list[dict] = (), probes: list[dict] = ()) -> tuple[str, str, list[tuple[int, int]]]:
-    lines = path.read_text().split('\n')
+    lines = path.read_text(encoding='utf-8').split('\n')
     out: list[str] = []
     words: list[tuple[int, int]] = []
     name = None
@@ -142,8 +154,11 @@ def translate(path: Path, hooks: list[dict] = (), probes: list[dict] = ()) -> tu
         elif s == 'runtime->gate3BeginInstructionV1(ctx);':
             line = line.replace('runtime->gate3BeginInstructionV1(ctx);', 'rrvNative.begin();')
         elif CALL_RE.match(line):
-            ind, call = CALL_RE.match(line).groups()
-            line = f'{ind}rrvNative.sync(); {call} rrvNative.reload();'
+            ind, call, ret = CALL_RE.match(line).groups()
+            line = f'{ind}rrvNative.sync(); {call} rrvNative.reload();{ret or ""}'
+        elif ANY_CALL_RE.search(code):
+            # Every call of guest code needs the clock committed before it and re-read after it.
+            raise ValueError(f'{path.name}: unexpected call form: {line.strip()}')
         else:
             line = line.replace('runtime->shouldPreemptGuestExecution()', 'rrvNative.preempt()')
             line = line.replace('runtime->SignalException(', 'rrvNative.signal(')
@@ -176,7 +191,7 @@ def main() -> int:
     if a.from_manifest:
         if a.addresses or hooks or probes:
             raise SystemExit('--from-manifest takes no addresses, hooks or probes')
-        previous = json.loads(a.from_manifest.read_text())
+        previous = json.loads(a.from_manifest.read_text(encoding='utf-8'))
         a.addresses = [f['address'] for f in previous['functions']]
         hooks, probes = previous.get('hooks', []), previous.get('probes', [])
     if not a.addresses:
@@ -216,7 +231,7 @@ def main() -> int:
     parts.append('};\n')
     inc = ''.join(parts)
     a.output.mkdir(parents=True, exist_ok=True)
-    (a.output / 'rrv_ee_native.inc').write_text(inc)
+    (a.output / 'rrv_ee_native.inc').write_bytes(inc.encode('utf-8'))
     manifest = {
         'schema': 1,
         'generator': 'tools/ee-native/ee_native_gen.py',
@@ -227,7 +242,7 @@ def main() -> int:
         'probes': probes,
         'inc_sha256': hashlib.sha256(inc.encode()).hexdigest(),
     }
-    (a.output / 'manifest.json').write_text(json.dumps(manifest, indent=1) + '\n')
+    (a.output / 'manifest.json').write_bytes((json.dumps(manifest, indent=1) + '\n').encode('utf-8'))
     print(f'{len(funcs)} functions -> {a.output}/rrv_ee_native.inc ({len(inc)} bytes)')
     return 0
 

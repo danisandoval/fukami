@@ -256,7 +256,9 @@ namespace rrv::gifguard
             return;
         s_installed = true;
         std::signal(SIGSEGV, onFatalSignal);
+#if defined(SIGBUS) // no SIGBUS on Windows
         std::signal(SIGBUS, onFatalSignal);
+#endif
         std::signal(SIGABRT, onFatalSignal);
     }
 

@@ -45,6 +45,7 @@ namespace
     constexpr uint32_t kSurfaceMacosViewMetalLayer = 1u;
     constexpr uint32_t kSurfaceLinuxX11 = 2u;     // Gate 5 (Linux/Steam Deck)
     constexpr uint32_t kSurfaceLinuxWayland = 3u; // Gate 5 (Linux/Steam Deck)
+    constexpr uint32_t kSurfaceWin32 = 4u;        // Windows: HWND + HINSTANCE
     constexpr uint32_t kSurfaceCallerOwnsHandles = 1u << 0;
     constexpr uint32_t kSurfaceMainThreadPrepared = 1u << 1;
     constexpr uint32_t kCapabilityDirectPresent = 1u << 2;
@@ -523,6 +524,7 @@ bool Backend::loadBridge(const InitializeOptions &options, std::string *error)
     case NativeSurfaceKind::MacosViewMetalLayer: surfaceKind = kSurfaceMacosViewMetalLayer; break;
     case NativeSurfaceKind::LinuxX11: surfaceKind = kSurfaceLinuxX11; break;
     case NativeSurfaceKind::LinuxWayland: surfaceKind = kSurfaceLinuxWayland; break;
+    case NativeSurfaceKind::Win32: surfaceKind = kSurfaceWin32; break;
     case NativeSurfaceKind::None: break;
     }
     BridgeSurface surface{sizeof(BridgeSurface), surfaceKind,

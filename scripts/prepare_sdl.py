@@ -14,9 +14,12 @@ import json
 import os
 import pathlib
 import platform
+import struct
 import subprocess
 import sys
 import tempfile
+import urllib.request
+import zipfile
 
 from prepare_dependencies import load_toml, repo_state, run
 
@@ -27,13 +30,65 @@ LIBRARY = "lib/libSDL2-2.0.0.dylib"
 INCLUDE = "include/SDL2"
 REQUIRED = {LIBRARY, "LICENSE.txt", *(f"{INCLUDE}/{name}" for name in
             ("SDL.h", "SDL_version.h", "SDL_config.h"))}
+# Windows: the official Visual C++ development package of the same release, not a build from source. Installed layout:
+# bin/SDL2.dll (run time), lib/SDL2.lib (import library), include/SDL2/*.h, LICENSE.txt.
+WINDOWS_PLATFORM = "windows-x86_64"
+WINDOWS_LIBRARY = "bin/SDL2.dll"
+WINDOWS_IMPORT_LIBRARY = "lib/SDL2.lib"
+WINDOWS_REQUIRED = {WINDOWS_LIBRARY, WINDOWS_IMPORT_LIBRARY, "LICENSE.txt", *(f"{INCLUDE}/{name}" for name in
+                    ("SDL.h", "SDL_version.h", "SDL_config.h"))}
+WINDOWS_PACKAGE_ROOT = f"SDL2-{VERSION}"
+# System DLLs a Windows SDL2.dll may import (the package ships a dynamic SDL; nothing app-local).
+WINDOWS_SYSTEM_DLL_PREFIXES = ("api-ms-win-", "ext-ms-win-")
 
 
 def native_platform() -> str:
     arch = platform.machine().lower()
+    if platform.system() == "Windows" and arch in ("amd64", "x86_64"):
+        return WINDOWS_PLATFORM
     if platform.system() != "Darwin" or arch not in ("arm64", "x86_64"):
-        raise RuntimeError("SDL product preparation currently supports native macOS arm64/x86_64 only")
+        raise RuntimeError("SDL product preparation supports native macOS arm64/x86_64 and Windows x86-64 only")
     return f"macos-{arch}"
+
+
+def windows_lock() -> dict:
+    lock = load_toml(ROOT / "config/dependencies.lock.toml").get("sdl_windows")
+    if not lock or lock.get("version") != VERSION or len(lock.get("sha256", "")) != 64:
+        raise RuntimeError("dependencies.lock.toml lacks the [sdl_windows] pin for SDL " + VERSION)
+    return lock
+
+
+def pe_machine_and_imports(path: pathlib.Path) -> tuple[int, list[str]]:
+    """Machine type and imported DLL names of a PE file (enough to tell x64 and the DLL closure)."""
+    data = path.read_bytes()
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    if data[pe:pe + 4] != b"PE\0\0":
+        raise RuntimeError(f"not a PE file: {path.name}")
+    machine, sections, _, _, _, optional_size = struct.unpack_from("<HHIIIH", data, pe + 4)
+    optional = pe + 24
+    magic = struct.unpack_from("<H", data, optional)[0]
+    directory = optional + (112 if magic == 0x20B else 96)
+    import_rva = struct.unpack_from("<I", data, directory + 8)[0]
+    table = optional + optional_size
+    spans = [struct.unpack_from("<IIII", data, table + 40 * i + 8) for i in range(sections)]  # vsize, rva, rawsize, raw
+
+    def to_offset(rva: int) -> int:
+        for vsize, base, _, raw in spans:
+            if base <= rva < base + max(vsize, 1):
+                return raw + rva - base
+        raise RuntimeError("PE import table points outside its sections")
+
+    names: list[str] = []
+    if import_rva:
+        entry = to_offset(import_rva)
+        while True:
+            name_rva = struct.unpack_from("<I", data, entry + 12)[0]
+            if name_rva == 0:
+                break
+            start = to_offset(name_rva)
+            names.append(data[start:data.index(b"\0", start)].decode("ascii").lower())
+            entry += 20
+    return machine, names
 
 
 def lock_identity() -> dict:
@@ -59,7 +114,34 @@ def inventory(prefix: pathlib.Path) -> tuple[dict, dict]:
     return files, symlinks
 
 
+def verify_windows(prefix: pathlib.Path) -> dict:
+    lock = windows_lock()
+    manifest = json.loads((prefix / "manifest.json").read_text())
+    expected = {"schema_version": 1, "name": "SDL2", "version": VERSION, "revision": REVISION,
+                "platform": WINDOWS_PLATFORM, "library": WINDOWS_LIBRARY, "import_library": WINDOWS_IMPORT_LIBRARY,
+                "include_dir": INCLUDE, "package_sha256": lock["sha256"]}
+    for key, value in expected.items():
+        if manifest.get(key) != value:
+            raise RuntimeError(f"SDL manifest {key} differs: expected {value!r}")
+    files, symlinks = inventory(prefix)
+    if not WINDOWS_REQUIRED.issubset(files):
+        raise RuntimeError(f"SDL install missing required files: {sorted(WINDOWS_REQUIRED - files.keys())}")
+    if files != manifest.get("files") or symlinks:
+        raise RuntimeError("SDL installed files differ from manifest hashes")
+    machine, imports = pe_machine_and_imports(prefix / WINDOWS_LIBRARY)
+    if machine != 0x8664:
+        raise RuntimeError("SDL2.dll must be an x86-64 (AMD64) image")
+    # Every import must be a Windows system DLL; the product ships SDL2.dll and nothing else of SDL's.
+    system32 = pathlib.Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+    for name in imports:
+        if not name.startswith(WINDOWS_SYSTEM_DLL_PREFIXES) and not (system32 / name).is_file():
+            raise RuntimeError(f"SDL2.dll imports a DLL that is not a system DLL: {name}")
+    return manifest
+
+
 def verify(prefix: pathlib.Path, target: str) -> dict:
+    if target == WINDOWS_PLATFORM:
+        return verify_windows(prefix)
     lock_identity()
     manifest = json.loads((prefix / "manifest.json").read_text())
     expected = {"schema_version": 1, "name": "SDL2", "version": VERSION,
@@ -87,8 +169,60 @@ def verify(prefix: pathlib.Path, target: str) -> dict:
     return manifest
 
 
+def download(url: str, destination: pathlib.Path, sha256: str, size: int | None) -> None:
+    """Fetch the pinned package over HTTPS; the SHA-256 (and size, when pinned) must match before anything is read."""
+    if not url.startswith("https://"):
+        raise RuntimeError(f"refusing a non-HTTPS SDL package URL: {url}")
+    digest, total = hashlib.sha256(), 0
+    with urllib.request.urlopen(url, timeout=60) as response, destination.open("wb") as out:
+        while chunk := response.read(1 << 20):
+            digest.update(chunk)
+            total += len(chunk)
+            out.write(chunk)
+    if digest.hexdigest() != sha256 or (size is not None and total != size):
+        raise RuntimeError(f"downloaded SDL package does not match its pin (sha256 {digest.hexdigest()}, {total} bytes)")
+
+
+def prepare_windows(prefix: pathlib.Path) -> None:
+    lock = windows_lock()
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".rrv-sdl-stage-", dir=prefix.parent) as temporary:
+        package = pathlib.Path(temporary) / "package.zip"
+        staged = pathlib.Path(temporary) / "install"
+        download(str(lock["url"]), package, str(lock["sha256"]), lock.get("size"))
+        wanted = {f"{WINDOWS_PACKAGE_ROOT}/lib/x64/SDL2.dll": WINDOWS_LIBRARY,
+                  f"{WINDOWS_PACKAGE_ROOT}/lib/x64/SDL2.lib": WINDOWS_IMPORT_LIBRARY,
+                  f"{WINDOWS_PACKAGE_ROOT}/LICENSE.txt": "LICENSE.txt"}
+        with zipfile.ZipFile(package) as archive:
+            for name in archive.namelist():
+                headers = f"{WINDOWS_PACKAGE_ROOT}/include/"
+                if name.startswith(headers) and name.endswith(".h") and "/" not in name[len(headers):]:
+                    wanted[name] = f"{INCLUDE}/{name[len(headers):]}"
+            missing = [name for name in wanted if name not in archive.namelist()]
+            if missing:
+                raise RuntimeError(f"SDL package lacks expected members: {missing}")
+            # Only the named members are read, to fixed relative destinations: nothing in the archive picks a path.
+            for member, relative in wanted.items():
+                destination = staged / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(archive.read(member))
+        files, _ = inventory(staged)
+        manifest = {"schema_version": 1, "name": "SDL2", "version": VERSION, "revision": REVISION,
+                    "platform": WINDOWS_PLATFORM, "library": WINDOWS_LIBRARY, "import_library": WINDOWS_IMPORT_LIBRARY,
+                    "include_dir": INCLUDE, "package_sha256": lock["sha256"], "files": files, "symlinks": {},
+                    "provenance": {"method": "official-release-package", "url": lock["url"]}}
+        (staged / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        verify_windows(staged)
+        publish_directory(staged, prefix)
+    print(f"Installed and verified SDL: {prefix}")
+
+
 def publish_directory(staged: pathlib.Path, prefix: pathlib.Path) -> None:
-    """Atomically publish on macOS, refusing even an empty existing directory."""
+    """Atomically publish, refusing even an empty existing directory."""
+    if platform.system() != "Darwin":
+        # Windows (and any other host): a directory rename onto an existing path fails, which is the same refusal.
+        os.rename(staged, prefix)
+        return
     # Darwin sys/stdio.h: RENAME_EXCL = 0x00000004 (macOS 10.12+).
     libc = ctypes.CDLL(None, use_errno=True)
     rename_exclusive = libc.renamex_np
@@ -104,6 +238,9 @@ def prepare(prefix: pathlib.Path, source: pathlib.Path, target: str, jobs: int) 
     if prefix.exists():
         verify(prefix, target)
         print(f"Existing SDL installation verified; preserved: {prefix}")
+        return
+    if target == WINDOWS_PLATFORM:
+        prepare_windows(prefix)
         return
     if not source.exists():
         source.parent.mkdir(parents=True, exist_ok=True)
@@ -158,7 +295,8 @@ def main() -> int:
     actions.add_argument("--verify", action="store_true", help="verify installed hashes, pin and Mach-O identity")
     parser.add_argument("--from-source", type=pathlib.Path, help="existing clean pinned SDL Git checkout")
     parser.add_argument("--prefix", type=pathlib.Path, help="installation prefix (default: runtime-deps/sdl/VERSION/PLATFORM)")
-    parser.add_argument("--platform", choices=("macos-arm64", "macos-x86_64"), help="expected native target")
+    parser.add_argument("--platform", choices=("macos-arm64", "macos-x86_64", WINDOWS_PLATFORM),
+                        help="expected native target")
     parser.add_argument("--jobs", type=int, default=4)
     args = parser.parse_args()
     try:

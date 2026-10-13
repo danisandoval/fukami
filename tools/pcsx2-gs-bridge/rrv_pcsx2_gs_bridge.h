@@ -36,6 +36,9 @@ enum {
     RRV_PCSX2_GS_RENDERER_AUTO = 3,
     // Linux/Steam Deck (Gate 5). AUTO also resolves to Vulkan off macOS.
     RRV_PCSX2_GS_RENDERER_VULKAN = 4,
+    // Windows only: PCSX2's Direct3D 11 renderer, on the same Win32 surface. AUTO stays Vulkan. A new enumerator
+    // only: no structure changed, so the ABI version stays 5.
+    RRV_PCSX2_GS_RENDERER_D3D11 = 5,
     // `presentation_mode` is a request, not a fallback preference. Direct
     // presentation must fail closed when these requirements cannot be met.
     RRV_PCSX2_GS_PRESENTATION_LEGACY_CPU_SNAPSHOT = 0,
@@ -50,6 +53,10 @@ enum {
     // Steam Deck Game Mode (gamescope) runs SDL on XWayland, i.e. X11.
     RRV_PCSX2_GS_SURFACE_LINUX_X11 = 2,
     RRV_PCSX2_GS_SURFACE_LINUX_WAYLAND = 3,
+    // Windows, from SDL_GetWindowWMInfo (SDL_SYSWM_WINDOWS): native_view = HWND,
+    // native_layer = HINSTANCE. Maps to PCSX2 WindowInfo (Win32 surface). A new
+    // enumerator only: no structure changed, so the ABI version stays 5.
+    RRV_PCSX2_GS_SURFACE_WIN32 = 4,
     // The SDL platform shell retains both handles from create through destroy.
     // The bridge borrows them and never transfers or exposes their ownership.
     RRV_PCSX2_GS_SURFACE_FLAG_CALLER_OWNS_HANDLES = 1u << 0,
@@ -68,6 +75,7 @@ enum {
     RRV_PCSX2_GS_CAP_ON_DEMAND_CAPTURE = 1u << 3,
     RRV_PCSX2_GS_CAP_LEGACY_CPU_SNAPSHOT = 1u << 4,
     RRV_PCSX2_GS_CAP_VULKAN_BACKEND = 1u << 5,
+    RRV_PCSX2_GS_CAP_D3D11_BACKEND = 1u << 6,
 };
 
 typedef struct RrvPcsx2GsBridge RrvPcsx2GsBridge;

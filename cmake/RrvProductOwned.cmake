@@ -35,6 +35,22 @@ foreach(_property IN ITEMS INCLUDE_DIRECTORIES COMPILE_DEFINITIONS
 endforeach()
 set_target_properties(Fukami PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/candidate-bin")
+if(WIN32)
+    # The GUI subsystem is a target property, not one of the copied lists above (cmake/RrvFukamiApp.cmake sets it).
+    get_target_property(_rrv_product_gui rrv-product WIN32_EXECUTABLE)
+    if(_rrv_product_gui)
+        set_target_properties(Fukami PROPERTIES WIN32_EXECUTABLE TRUE)
+    endif()
+    # Windows finds SDL2.dll only beside the executable (or on PATH): stage it in candidate-bin, where the product runs
+    # from the build tree. The packaged app ships the same file beside Fukami.exe (scripts/package_fukami_windows.py).
+    add_custom_command(TARGET Fukami POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:SDL2::SDL2>" "$<TARGET_FILE_DIR:Fukami>"
+        VERBATIM)
+    # rrv-disc-extract links libchdr against the dependency prefix's zlib and zstd DLLs (cmake/RrvDiscExtract.cmake).
+    add_custom_command(TARGET Fukami POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${RRV_DISC_RUNTIME_DLLS} "$<TARGET_FILE_DIR:Fukami>"
+        VERBATIM)
+endif()
 add_dependencies(Fukami rrv-resource-package-producer)
 
 # Gate 8 audio: PCSX2 SPU2 core (tools/pcsx2-spu2) and the host rewrite of RR5's IOP sound

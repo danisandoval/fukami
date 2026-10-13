@@ -16,6 +16,7 @@
 // sessions/). The CHD comes from the first .chd argument, FUKAMI_CHD, a .chd
 // file placed in the data folder, or a zenity/kdialog file picker if present.
 #include "fukami_app.h"
+#include "fukami_app_common.h"
 #include "fukami_settings.h"
 #include "disc_extract.h"
 
@@ -45,10 +46,7 @@ extern char **environ;
 namespace {
 
 namespace fs = std::filesystem;
-constexpr const char *kChild = "RRV_FUKAMI_CHILD";
-constexpr const char *kIni = "RRV_FUKAMI_INI";
-constexpr const char *kSupport = "RRV_FUKAMI_SUPPORT";
-constexpr const char *kVerifiedMarker = ".fukami-disc-verified";
+using namespace fukami::app::detail; // kChild, discReady(), effectiveSettings(), ... (fukami_app_common.h)
 
 fs::path executablePath()
 {
@@ -191,42 +189,6 @@ fs::path pickChd()
 
 // ---- disc setup ------------------------------------------------------------
 
-bool discReady(const fs::path &disc)
-{
-    std::ifstream marker(disc / kVerifiedMarker);
-    if (!marker)
-        return false;
-    std::string name;
-    uintmax_t size = 0;
-    int files = 0;
-    while (marker >> name >> size)
-    {
-        std::error_code ec;
-        if (fs::file_size(disc / name, ec) != size || ec)
-            return false;
-        ++files;
-    }
-    return files == 9;
-}
-
-void writeMarker(const fs::path &disc)
-{
-    std::ofstream marker(disc / kVerifiedMarker, std::ios::trunc);
-    for (const auto &entry : fs::directory_iterator(disc))
-        if (entry.is_regular_file() && entry.path().filename() != kVerifiedMarker &&
-            entry.path().filename().string().front() != '.')
-            marker << entry.path().filename().string() << ' ' << entry.file_size() << '\n';
-}
-
-bool isChd(const fs::path &path)
-{
-    std::string ext = path.extension().string();
-    for (auto &c : ext)
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    std::error_code ec;
-    return (ext == ".chd" || ext == ".cue" || ext == ".bin") && fs::is_regular_file(path, ec);
-}
-
 // Unpacks with a text progress line on stderr and, when zenity is present, a
 // progress window (closing it cancels).
 fukami::disc::Result extractWithProgress(const fs::path &chd, const fs::path &disc)
@@ -328,34 +290,10 @@ bool setUpDisc(const fs::path &support, const fs::path &disc, const std::vector<
 
 // ---- launch ------------------------------------------------------------------
 
-std::string timestamp()
-{
-    char buffer[32];
-    const std::time_t now = std::time(nullptr);
-    std::tm utc{};
-    gmtime_r(&now, &utc);
-    std::strftime(buffer, sizeof buffer, "%Y%m%dT%H%M%SZ", &utc);
-    return buffer;
-}
-
 [[noreturn]] void quit(int code)
 {
     std::fflush(nullptr);
     std::_Exit(code);
-}
-
-// The settings to launch with: the user's file, and for every setting it does
-// not have (a file written by an older version) the app's default ini, not the
-// schema default. The user's file is not rewritten for that.
-fukami::settings::IniDocument effectiveSettings(fukami::settings::IniDocument doc, const fs::path &defaults)
-{
-    const auto packaged = fukami::settings::IniDocument::load(defaults);
-    if (!packaged)
-        return doc;
-    for (const auto &entry : fukami::settings::inherited(doc, *packaged))
-        std::fprintf(stderr, "[fukami] settings: %s.%s = %s (app default; not in the settings file)\n",
-                     entry.section.c_str(), entry.key.c_str(), entry.value.c_str());
-    return fukami::settings::withDefaults(std::move(doc), *packaged);
 }
 
 std::optional<fukami::settings::IniDocument> loadSettings(const fs::path &ini, const fs::path &defaults)
@@ -467,18 +405,7 @@ void launchFromApp(const fs::path &exe, const fs::path &root, const std::vector<
 
     // env(1) semantics: a later NAME wins. Keep only the last occurrence of
     // each name, in first-seen order.
-    std::map<std::string, std::string> last;
-    std::vector<std::string> order;
-    for (const auto &entry : env)
-    {
-        const std::string name = entry.substr(0, entry.find('='));
-        if (!last.count(name))
-            order.push_back(name);
-        last[name] = entry;
-    }
-    std::vector<std::string> finalEnv;
-    for (const auto &name : order)
-        finalEnv.push_back(last[name]);
+    std::vector<std::string> finalEnv = lastWins(env);
     std::vector<char *> envp;
     for (auto &entry : finalEnv)
         envp.push_back(entry.data());
@@ -533,22 +460,12 @@ __attribute__((constructor)) void fukamiAppEntry(int argc, char **argv, char **)
 
 namespace fukami::app {
 
-bool inApp() { return std::getenv(kChild) != nullptr; }
-
-std::filesystem::path iniPath()
-{
-    const char *value = std::getenv(kIni);
-    return value && *value ? std::filesystem::path(value) : std::filesystem::path{};
-}
-
 std::filesystem::path defaultIniPath()
 {
     const fs::path exe = executablePath();
     const fs::path root = exe.empty() ? fs::path{} : appRoot(exe);
     return root.empty() ? fs::path{} : root / "share" / "fukami-default.ini";
 }
-
-bool canRestart() { return inApp(); }
 
 void restart()
 {
@@ -569,18 +486,6 @@ void restart()
     std::string exePath = exe.string();
     char *argv[] = {exePath.data(), nullptr};
     execve(exePath.c_str(), argv, envp.data());
-}
-
-std::filesystem::path savesFolder()
-{
-    const char *value = std::getenv("RRV_GATE3_MC_ROOT");
-    return value && *value ? std::filesystem::path(value) : std::filesystem::path{};
-}
-
-std::filesystem::path logsFolder()
-{
-    const char *value = std::getenv("RRV_GATE3_RECORD_PAD");
-    return value && *value ? std::filesystem::path(value).parent_path() : std::filesystem::path{};
 }
 
 void reveal(const std::filesystem::path &path)
