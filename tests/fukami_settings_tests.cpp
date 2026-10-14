@@ -9,7 +9,17 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#if defined(_WIN32)
+#include <io.h>
+#include <process.h>
+#include <stdlib.h>
+#define getpid _getpid
+// _putenv_s(name, "") removes the variable, as unsetenv does.
+#define unsetenv(name) _putenv_s(name, "")
+#define setenv(name, value, overwrite) _putenv_s(name, value)
+#else
 #include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 using namespace fukami::settings;
@@ -79,6 +89,9 @@ void testValidation()
     expect(ok("rendering", "texture_filter", "ps2") && ok("rendering", "texture_filter", "bilinear") &&
                !ok("rendering", "texture_filter", "nearest") && !ok("rendering", "texture_filter", ""),
            "texture_filter");
+    expect(ok("rendering", "sprite_filter", "even") && ok("rendering", "sprite_filter", "ps2") &&
+               !ok("rendering", "sprite_filter", "bilinear") && !ok("rendering", "sprite_filter", ""),
+           "sprite_filter");
     expect(ok("game", "car_lod", "6.5") && !ok("game", "car_lod", "best") && !ok("game", "car_lod", "1."), "car_lod");
     expect(ok("game", "draw_distance", "0") && ok("game", "draw_distance", "16") &&
                !ok("game", "draw_distance", "17") && !ok("game", "draw_distance", "2.5"),
@@ -123,17 +136,40 @@ void testLaunchConfig()
 {
     // What the bash launcher produced for the repository's rrv.ini defaults (tests/fixtures/launch_env/golden.json,
     // "empty ini"), which the app and ./run.sh must keep giving the runtime. Since 2026-10-04 (owner) split_gs is on by
-    // default, which adds RRV_VU1GS_SPLIT=1 right after the owner-async line (the golden file records it too).
+    // default, which adds RRV_VU1GS_SPLIT=1 right after the owner-async line (the golden file records it too). Since
+    // 2026-10-12 (owner) mipmaps are off by default: RRV_PCSX2_GS_FULL_HWMIPMAP=0 after the scale (recorded too).
+    // Since 2026-10-13 (owner) the HUD default is race: the two HUD lines after the widescreen one (recorded too).
     const std::vector<std::string> oldDefaults = {
+#if defined(_WIN32)
+        // Windows: no HOME, TMPDIR or DYLD_LIBRARY_PATH (see environment() in fukami_settings.cpp).
+        "USERPROFILE=/home/test", "PATH=/usr/bin:/bin", "TEMP=/tmp/rrv-test", "TMP=/tmp/rrv-test",
+#else
         "HOME=/home/test", "PATH=/usr/bin:/bin", "TMPDIR=/tmp/rrv-test", "DYLD_LIBRARY_PATH=/R/runtime/x/lib",
+#endif
         "RRV_GATE3_BOUND_WORKLOAD=/W/bound-workload.txt", "RRV_GATE3_MC_ROOT=/R/local/product/mc",
         "RRV_GATE3_MC_PERSISTENT=1", "RRV_GATE3_RECORD_PAD=/R/local/product/sessions/S/pad.jsonl",
         "RRV_GATE3_REALTIME=1", "RRV_PCSX2_GS_VSYNC=1", "RRV_GS_EXECUTION=worker-sync",
         "RRV_VU1GS_EXECUTION=owner-async", "RRV_VU1GS_SPLIT=1", "RRV_GS_RENDER_MODE=full", "RRV_PCSX2_GS_FULL_SCALE=4",
-        "RRV_RR5_CAR_LOD=4", "RRV_RR5_FAST_UNPACK=1", "RRV_RR5_NATIVE_HOT=1", "RRV_RR5_WIDESCREEN=16:9",
-        "RRV_PCSX2_GS_ASPECT=16:9", "RRV_GATE4_START_CLOCK=/R/local/product/sessions/S/start-clock.txt",
+        "RRV_PCSX2_GS_FULL_HWMIPMAP=0", "RRV_RR5_CAR_LOD=4", "RRV_RR5_FAST_UNPACK=1", "RRV_RR5_NATIVE_HOT=1", "RRV_RR5_WIDESCREEN=16:9",
+        "RRV_PCSX2_GS_HUD_SCALE=0.75", "RRV_PCSX2_GS_HUD_MODE=race",
+        "RRV_PCSX2_GS_ASPECT=16:9",
+#if defined(_WIN32)
+        // Windows: sync_to_display is on by default (owner, 2026-10-13), which only Windows acts on.
+        "RRV_DISPLAY_LOCK=1", "RRV_AUDIO_RATE_CONTROL=1",
+#endif
+        "RRV_GATE4_START_CLOCK=/R/local/product/sessions/S/start-clock.txt",
     };
     expect(defaultEnvironment(IniDocument::parse("")) == oldDefaults, "default environment equals the old launcher's");
+
+    // Steam Deck: odd scales above 1 are not used (T-DECK-3X-HATCH); other hosts keep them.
+    expect(hostScale(3, true) == 2 && hostScale(5, true) == 4 && hostScale(7, true) == 6 && hostScale(1, true) == 1 &&
+               hostScale(4, true) == 4 && hostScale(3, false) == 3,
+           "host scale");
+    setenv("RRV_STEAM_DECK", "1", 1);
+    expect(LaunchConfig::fromIni(IniDocument::parse("[rendering]\nscale = 3\n")).scale == 2, "odd scale on a Steam Deck");
+    setenv("RRV_STEAM_DECK", "0", 1);
+    expect(LaunchConfig::fromIni(IniDocument::parse("[rendering]\nscale = 3\n")).scale == 3, "odd scale elsewhere");
+    unsetenv("RRV_STEAM_DECK");
 
     // Typed values.
     const LaunchConfig c = LaunchConfig::fromIni(IniDocument::parse(
@@ -213,6 +249,41 @@ void testLaunchConfig()
                       "RRV_GATE3_REALTIME_SPIN_MS="),
            "unpaced ignores pacer_spin");
 
+    // The graphics API (Windows): auto adds nothing, so the environment of every earlier file is unchanged.
+    expect(!hasPrefix(defaultEnvironment(IniDocument::parse("[rendering]\nbackend = auto\n")), "RRV_PCSX2_GS_BACKEND="),
+           "backend = auto sets no variable");
+    expect(hasPrefix(defaultEnvironment(IniDocument::parse("[rendering]\nbackend = d3d11\n")), "RRV_PCSX2_GS_BACKEND=d3d11"),
+           "backend = d3d11 is passed to the product");
+    expect(!check(IniDocument::parse("[rendering]\nbackend = opengl\n"), false).empty(), "an unknown backend is refused");
+    expect(hasPrefix(defaultEnvironment(IniDocument::parse("[rendering]\nbackend = vulkan\n")), "RRV_PCSX2_GS_BACKEND=vulkan"),
+           "backend = vulkan is passed to the product (Windows: auto is Direct3D 11)");
+
+    // Full-screen refresh rate and variable refresh (Windows): the defaults set no variable.
+    expect(!hasPrefix(defaultEnvironment(IniDocument::parse("")), "RRV_DISPLAY_REFRESH=") &&
+               !hasPrefix(defaultEnvironment(IniDocument::parse("")), "RRV_PCSX2_GS_VRR="),
+           "refresh_rate = auto and vrr = auto set no variable");
+    expect(hasPrefix(defaultEnvironment(IniDocument::parse("[display]\nrefresh_rate = 120\n")), "RRV_DISPLAY_REFRESH=120"),
+           "refresh_rate = 120 is passed to the product");
+    expect(hasPrefix(defaultEnvironment(IniDocument::parse("[display]\nrefresh_rate = off\n")), "RRV_DISPLAY_REFRESH=off"),
+           "refresh_rate = off is passed to the product");
+    expect(!check(IniDocument::parse("[display]\nrefresh_rate = 165\n"), false).empty(), "a rate that is not a multiple of 60 is refused");
+    expect(hasPrefix(defaultEnvironment(IniDocument::parse("[display]\nvrr = on\n")), "RRV_PCSX2_GS_VRR=1"), "vrr = on is RRV_PCSX2_GS_VRR=1");
+    expect(hasPrefix(defaultEnvironment(IniDocument::parse("[display]\nvrr = off\n")), "RRV_PCSX2_GS_VRR=0"), "vrr = off is RRV_PCSX2_GS_VRR=0");
+    expect(!check(IniDocument::parse("[display]\nvrr = maybe\n"), false).empty(), "an unknown vrr value is refused");
+    // Sync to display: on by default, and only Windows with Direct3D 11 acts on it (there the present's wait for the
+    // display holds the game back); the display lock and the audio rate control go together.
+    const auto lockOf = [&](const char *ini) { return hasPrefix(defaultEnvironment(IniDocument::parse(ini)), "RRV_DISPLAY_LOCK=1"); };
+    const auto rateOf = [&](const char *ini) { return hasPrefix(defaultEnvironment(IniDocument::parse(ini)), "RRV_AUDIO_RATE_CONTROL=1"); };
+#if defined(_WIN32)
+    expect(lockOf("") && rateOf(""), "Windows: sync_to_display is on by default: RRV_DISPLAY_LOCK=1 with RRV_AUDIO_RATE_CONTROL=1");
+    expect(!lockOf("[rendering]\nbackend = vulkan\n") && !rateOf("[rendering]\nbackend = vulkan\n"), "Windows: Vulkan has no display lock");
+#else
+    expect(!lockOf("") && !rateOf("") && !lockOf("[display]\nsync_to_display = true\n"),
+           "outside Windows sync_to_display sets no variable, whatever its value");
+#endif
+    expect(!lockOf("[display]\nsync_to_display = false\n") && !rateOf("[display]\nsync_to_display = false\n"),
+           "sync_to_display = false sets no variable");
+    expect(!lockOf("[timing]\nunpaced = true\n"), "an unpaced run has no display lock");
     // texture_filter: the stock filter sends nothing (so the default environment above is unchanged); bilinear
     // names PCSX2's forced bilinear for the bridge, from the ini and from the flag.
     expect(!hasPrefix(defaultEnvironment(IniDocument::parse("[rendering]\ntexture_filter = ps2\n")),
@@ -221,6 +292,13 @@ void testLaunchConfig()
     expect(hasLine(defaultEnvironment(IniDocument::parse("[rendering]\ntexture_filter = bilinear\n")),
                    "RRV_PCSX2_GS_TEXTURE_FILTER=bilinear"),
            "texture_filter = bilinear reaches the bridge");
+    // sprite_filter: even is the bridge's own default and sends nothing; ps2 is passed.
+    expect(!hasPrefix(defaultEnvironment(IniDocument::parse("[rendering]\nsprite_filter = even\n")),
+                      "RRV_PCSX2_GS_SPRITE_FILTER="),
+           "sprite_filter = even sends nothing");
+    expect(hasLine(defaultEnvironment(IniDocument::parse("[rendering]\nsprite_filter = ps2\n")),
+                   "RRV_PCSX2_GS_SPRITE_FILTER=ps2"),
+           "sprite_filter = ps2 reaches the bridge");
     {
         std::vector<Override> filter;
         IniDocument filtered;
@@ -235,10 +313,11 @@ void testLaunchConfig()
     // The environment is only the transport: reading it back gives the same typed view, and the same environment.
     for (const char *text : {"", "[display]\nratio = 21:9\nhud = fixed\naspect = stretch\nfullscreen = true\n",
                              "[rendering]\nscale = 2\naa1 = no\nfxaa = yes\ncas = 50\naniso = 8\nmipmap = off\n",
-                             "[game]\ncar_lod = 1\ndraw_distance = 3\nfast_unpack = no\nnative_code = no\n",
+                             "[game]\ncar_lod = 1\ndraw_distance = 3\nfast_unpack = no\nnative_code = no\ncar_depth_fix = yes\n",
                              "[timing]\nheadless = true\nunpaced = true\ninline = true\n[input]\nanalog = no\nrumble = no\n",
                              "[timing]\nsplit_gs = true\n", "[timing]\npacer_spin = 17\n",
-                             "[rendering]\ntexture_filter = bilinear\n"})
+                             "[rendering]\ntexture_filter = bilinear\n",
+                             "[rendering]\nbackend = d3d11\n"})
     {
         const auto env = defaultEnvironment(IniDocument::parse(text));
         const auto get = [&](const char *name) -> const char * {
@@ -328,7 +407,9 @@ void testPackageDefaults()
     expect(has(env, "RRV_GATE3_REALTIME_SPIN_MS=17"), "old ini + package default: the pacer spins 17 ms");
     expect(has(env, "RRV_PCSX2_GS_FULL_SCALE=4") && has(env, "RRV_RR5_WIDESCREEN=16:9") && has(env, "RRV_WINDOW_FULLSCREEN=1"),
            "keys the user's file has keep the user's value, not the package's");
-    expect(!hasName(env, "RRV_PCSX2_GS_HUD_SCALE"), "[env] lines of the default ini are not inherited");
+    // The schema's own HUD default (race, 0.75 at 16:9) is there; the package's [env] value is not.
+    expect(has(env, "RRV_PCSX2_GS_HUD_SCALE=0.75") && !has(env, "RRV_PCSX2_GS_HUD_SCALE=0.5"),
+           "[env] lines of the default ini are not inherited");
     expect(user.text() == oldUser, "the user's document is unchanged");
     expect(check(effective, false).empty(), "the effective document is valid");
 
@@ -361,13 +442,26 @@ void testPackageDefaults()
         for (auto &arg : args)
             argv.push_back(arg.data());
         std::fflush(stdout);
-        const int saved = dup(STDOUT_FILENO);
+#if defined(_WIN32)
+        const int stdoutFd = 1;
+        const int saved = _dup(stdoutFd);
+        std::FILE *out = std::fopen(outPath.string().c_str(), "w");
+        _dup2(_fileno(out), stdoutFd);
+#else
+        const int stdoutFd = STDOUT_FILENO;
+        const int saved = dup(stdoutFd);
         std::FILE *out = std::fopen(outPath.c_str(), "w");
-        dup2(fileno(out), STDOUT_FILENO);
+        dup2(fileno(out), stdoutFd);
+#endif
         const int rc = launchEnvMain(static_cast<int>(argv.size()), argv.data(), appDefaults);
         std::fflush(stdout);
-        dup2(saved, STDOUT_FILENO);
+#if defined(_WIN32)
+        _dup2(saved, stdoutFd);
+        _close(saved);
+#else
+        dup2(saved, stdoutFd);
         close(saved);
+#endif
         std::fclose(out);
         std::ifstream in(outPath);
         std::vector<std::string> lines;
@@ -388,10 +482,13 @@ void testPackageDefaults()
                                     defaultsPath);
     expect(rcSet == 0 && !hasName(overridden, "RRV_VU1GS_SPLIT") && has(overridden, "RRV_GATE3_REALTIME_SPIN_MS=17"),
            "an override still wins over a package default");
-    std::ifstream reread(userPath);
-    std::ostringstream text;
-    text << reread.rdbuf();
-    expect(text.str() == oldUser, "the user's file on disk is not rewritten");
+    {
+        // Scoped: Windows cannot delete a directory while one of its files is still open.
+        std::ifstream reread(userPath);
+        std::ostringstream text;
+        text << reread.rdbuf();
+        expect(text.str() == oldUser, "the user's file on disk is not rewritten");
+    }
     fs::remove_all(dir);
 }
 

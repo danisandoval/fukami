@@ -70,6 +70,21 @@ extern "C" int rrv_pcsx2_gs_bridge_configure_native_surface(
     info.type = WindowInfo::Type::MacOS;
     info.window_handle = native_view;
     info.surface_handle = native_layer;
+#elif defined(_WIN32)
+    // Windows: SDL's Win32 handles (native_view = HWND, native_layer = HINSTANCE) in the shape PCSX2's Qt host builds
+    // (pcsx2-qt/QtUtils.h GetWindowInfoForWindow: type Win32, window_handle = the HWND) and
+    // VKSwapChain::CreateVulkanSurface consumes (vkCreateWin32SurfaceKHR on window_handle; the HINSTANCE is not used).
+    if (kind != RRV_PCSX2_GS_SURFACE_WIN32 || !native_view || !native_layer || width_pixels == 0u ||
+        height_pixels == 0u || backing_scale <= 0.0f)
+    {
+        if (error && error_capacity)
+            std::snprintf(error, error_capacity, "invalid Windows direct-present surface");
+        return 0;
+    }
+    std::lock_guard<std::mutex> lock(s_surface_mutex);
+    WindowInfo info{};
+    info.type = WindowInfo::Type::Win32;
+    info.window_handle = native_view;
 #else
     // Linux (Gate 5): SDL's X11 (Display*, Window XID) or Wayland
     // (wl_display*, wl_surface*) handles, in the shape PCSX2's own Qt host

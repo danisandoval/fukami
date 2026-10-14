@@ -2,10 +2,11 @@
 
 **1.0 (macOS Apple silicon, Steam Deck):** the first public release; see the [changelog](../CHANGELOG.md).
 
+**1.1 (Windows x86-64):** Direct3D 11 and Vulkan through the same PCSX2 GS bridge.
+
 Planned, in no firm order:
 
-- **Windows (x86-64):** a Vulkan/D3D12 path through the same PCSX2 GS bridge, MSVC/clang-cl builds of the generated code,
-  Windows paths and file locking in the runtime, a Windows release.
+- **Windows build guide** in BUILDING.md (clang-cl, Ninja).
 - **Developer ID signing and notarisation** for the macOS build.
 - **Flatpak / AppImage** packaging for desktop Linux.
 - **Controller remapping** in the in-game menu.

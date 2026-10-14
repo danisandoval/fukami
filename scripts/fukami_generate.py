@@ -11,7 +11,7 @@ config/rr5/ (the hashes are not the work; a different ELF or a different generat
 --elf defaults to the SLUS_200.02 that Fukami.app unpacked from your CHD (Application Support), then
 to local/rrv_boot.elf. Needs cmake, a C++20 compiler and network access for the recompiler's pinned
 source dependencies (they are fetched by CMake). It takes several minutes (recompiler build plus a
-1,857-file generation) and writes only under generated/rr5/ and --work (default build/fukami-generate).
+1,869-file generation) and writes only under generated/rr5/ and --work (default build/fukami-generate).
 Afterwards: scripts/build_fukami_runtime.sh (see BUILDING.md).
 
 In the private repository generated/rr5 is tracked; there the command only verifies it.

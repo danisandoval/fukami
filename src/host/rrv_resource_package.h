@@ -7,6 +7,15 @@
 
 namespace rrv::resource_package {
 
+// What a directory, lock or package root is held by: a file descriptor on macOS and Linux, a HANDLE on Windows.
+#if defined(_WIN32)
+using NativeHandle = void*;
+inline const NativeHandle kInvalidHandle = reinterpret_cast<NativeHandle>(~static_cast<uintptr_t>(0));
+#else
+using NativeHandle = int;
+inline constexpr NativeHandle kInvalidHandle = -1;
+#endif
+
 enum class EntryType : uint8_t { file, directory };
 
 // This is generated at configuration time. It deliberately contains neither a
@@ -31,7 +40,7 @@ extern const Binding rrv_resource_package_binding;
 class ReaderLease {
 public:
     ReaderLease() = default;
-    explicit ReaderLease(int lock_fd);
+    explicit ReaderLease(NativeHandle lock_handle);
     ~ReaderLease();
     ReaderLease(const ReaderLease&) = delete;
     ReaderLease& operator=(const ReaderLease&) = delete;
@@ -39,12 +48,12 @@ public:
     ReaderLease& operator=(ReaderLease&& other) noexcept;
 
 private:
-    int fd_ = -1;
+    NativeHandle fd_ = kInvalidHandle;
 };
 
 class Package {
 public:
-    // Uses the native process-image API, then accepts only B/bin/<image>.
+    // Uses the native process-image API, then accepts only B/bin/<image> (Windows: also Fukami.exe beside resources/).
     // The returned object keeps its shared lease through its destructor.
     static Package Open(const Binding& binding);
     ~Package();
@@ -64,11 +73,11 @@ public:
     [[nodiscard]] std::filesystem::path loaded_image_path() const;
 
 private:
-    Package(Binding binding, std::filesystem::path root, int package_fd, ReaderLease lease);
+    Package(Binding binding, std::filesystem::path root, NativeHandle package_fd, ReaderLease lease);
     void close() noexcept;
     Binding binding_{};
     std::filesystem::path root_;
-    int package_fd_ = -1;
+    NativeHandle package_fd_ = kInvalidHandle;
     void* image_ = nullptr;
     std::filesystem::path loaded_image_;
     ReaderLease lease_;

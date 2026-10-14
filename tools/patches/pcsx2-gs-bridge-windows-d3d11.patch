@@ -1,0 +1,711 @@
+diff --git a/pcsx2/GS/Renderers/DX11/GSDevice11.cpp b/pcsx2/GS/Renderers/DX11/GSDevice11.cpp
+index 2339328b4..d12043cdd 100644
+--- a/pcsx2/GS/Renderers/DX11/GSDevice11.cpp
++++ b/pcsx2/GS/Renderers/DX11/GSDevice11.cpp
+@@ -5,6 +5,11 @@
+ #include "GS/GSGL.h"
+ #include "GSDevice11.h"
+ #include "GS/Renderers/DX11/D3D.h"
++#include "GS/Renderers/DX11/RRVPresentPacer.h"
++#include <d3d11_4.h>
++
++// RRV GS bridge: the device context is multithread-protected (set in Create).
++static bool s_rrv_multithread_protected = false;
+ #include "GS/GSExtra.h"
+ #include "GS/GSPerfMon.h"
+ #include "GS/GSUtil.h"
+@@ -141,6 +146,18 @@ bool GSDevice11::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
+ 		return false;
+ 	}
+ 
++	// RRV GS bridge: the presenter thread (RRVPresentPacer.h) calls GetData and
++	// Present while this thread issues the next field's draws, so the context
++	// has to serialise its calls. Only when that thread can be used.
++	s_rrv_multithread_protected = false;
++	RrvPresentPacerWin::Get().Configure(m_dev.get());
++	if (wil::com_ptr_nothrow<ID3D11Multithread> rrv_multithread; RrvPresentPacerWin::Get().pace &&
++		RrvPresentPacerWin::Get().use_thread && m_ctx.try_query_to(&rrv_multithread))
++	{
++		rrv_multithread->SetMultithreadProtected(TRUE);
++		s_rrv_multithread_protected = true;
++	}
++
+ 	// we re-grab these later, see below
+ 	dxgi_adapter.reset();
+ 	temp_dev.reset();
+@@ -613,6 +630,7 @@ bool GSDevice11::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
+ 
+ void GSDevice11::Destroy()
+ {
++	RrvPresentPacerWin::Get().Join(true); // RRV GS bridge: no present may be pending
+ 	delete m_null_texture;
+ 	
+ 	GSDevice::Destroy();
+@@ -750,6 +768,7 @@ bool GSDevice11::HasSurface() const
+ 
+ void GSDevice11::SetVSyncMode(GSVSyncMode mode, bool allow_present_throttle)
+ {
++	RrvPresentPacerWin::Get().Join(true); // RRV GS bridge: no present may be pending
+ 	m_allow_present_throttle = allow_present_throttle;
+ 
+ 	// Using mailbox-style no-allow-tearing causes tearing in exclusive fullscreen.
+@@ -954,6 +973,7 @@ bool GSDevice11::CreateSwapChainRTV()
+ 
+ void GSDevice11::DestroySwapChain()
+ {
++	RrvPresentPacerWin::Get().Join(true); // RRV GS bridge: no present may be pending
+ 	if (!m_swap_chain)
+ 		return;
+ 
+@@ -1037,6 +1057,7 @@ std::string GSDevice11::GetDriverInfo() const
+ 
+ void GSDevice11::ResizeWindow(u32 new_window_width, u32 new_window_height, float new_window_scale)
+ {
++	RrvPresentPacerWin::Get().Join(true); // RRV GS bridge: no present may be pending
+ 	if (!m_swap_chain || m_is_exclusive_fullscreen)
+ 		return;
+ 
+@@ -1063,6 +1084,9 @@ bool GSDevice11::SupportsExclusiveFullscreen() const
+ 
+ GSDevice::PresentResult GSDevice11::BeginPresent(bool frame_skip)
+ {
++	// RRV GS bridge: the previous frame may still be waiting for its slot on
++	// the presenter thread; the back buffer is its until it has been presented.
++	RrvPresentPacerWin::Get().Join();
+ 	if (frame_skip || !m_swap_chain)
+ 		return PresentResult::FrameSkipped;
+ 
+@@ -1148,7 +1172,65 @@ void GSDevice11::EndPresent()
+ 
+ 	const UINT sync_interval = static_cast<UINT>(m_vsync_mode == GSVSyncMode::FIFO);
+ 	const UINT flags = (m_vsync_mode == GSVSyncMode::Disabled && m_using_allow_tearing) ? DXGI_PRESENT_ALLOW_TEARING : 0;
+-	m_swap_chain->Present(sync_interval, flags);
++	// RRV GS bridge: even frame pacing (RRVPresentPacer.h). On a display whose
++	// rate is the game's or a multiple (60, 120, 180, 240 Hz) DXGI holds every frame
++	// for that many refreshes (the sync interval) and the GS thread waits for
++	// nothing; on any other display the frame waits for its slot on the grid.
++	RrvPresentPacerWin& rrv_pacer = RrvPresentPacerWin::Get();
++	rrv_pacer.Configure();
++	const bool rrv_fifo = m_vsync_mode == GSVSyncMode::FIFO;
++	rrv_pacer.Join();
++	const unsigned rrv_interval = rrv_fifo ? rrv_pacer.SyncInterval() : 0;
++	// Presents and reads the display's vertical blank clock (the pacer's
++	// classification, slots and trace). Counts the frame
++	// (GSRrvRecordDirectPresent, the Direct3D 11 counterpart of
++	// GSDeviceVK::EndPresent's) only when DXGI accepted it, so a failed present
++	// (device removed, occluded) does not inflate the bridge's present counter.
++	// A swap chain only exists for a real window, which in the bridge is always
++	// the RRV-supplied Win32 surface.
++	const auto rrv_present = [&rrv_pacer, swap_chain = m_swap_chain.get()](UINT interval, UINT present_flags, unsigned long long row) {
++		const HRESULT result = swap_chain->Present(interval, present_flags);
++		DXGI_FRAME_STATISTICS stats = {};
++		if (FAILED(swap_chain->GetFrameStatistics(&stats)))
++			stats = {};
++		rrv_pacer.AfterPresent(row, stats.PresentCount, stats.PresentRefreshCount, stats.SyncRefreshCount,
++			stats.SyncQPCTime.QuadPart);
++		if (result == S_OK)
++			GSRrvRecordDirectPresent();
++	};
++	wil::com_ptr_nothrow<ID3D11Query> rrv_done_query;
++	const D3D11_QUERY_DESC rrv_done_desc = {D3D11_QUERY_EVENT, 0};
++	if (rrv_fifo && rrv_pacer.pace && rrv_interval == 0 && rrv_pacer.use_thread && s_rrv_multithread_protected &&
++		SUCCEEDED(m_dev->CreateQuery(&rrv_done_desc, rrv_done_query.put())))
++	{
++		ID3D11Query* const rrv_done = rrv_done_query.get();
++		// On a variable-refresh display (FreeSync, G-Sync) a present that is
++		// allowed to tear is the one the display follows at once, and it does
++		// not tear there: the frame is shown at its slot. With display sync the
++		// same display followed the frames only part of the time.
++		const bool rrv_immediate = rrv_pacer.Immediate() && m_using_allow_tearing;
++		// The event query ends when the GPU has run everything issued before
++		// it. The presenter thread waits for that and for the frame's slot; this
++		// thread goes on and joins it in BeginPresent, before the next frame
++		// reaches the swap chain.
++		m_ctx->End(rrv_done);
++		m_ctx->Flush();
++		rrv_pacer.Submit(
++			[ctx = m_ctx.get(), rrv_done] {
++				BOOL done = FALSE;
++				return ctx->GetData(rrv_done, &done, sizeof(done), 0) == S_OK && done;
++			},
++			[rrv_present, sync_interval, flags, rrv_immediate, keep = rrv_done_query](unsigned long long row) {
++				if (rrv_immediate)
++					rrv_present(0, DXGI_PRESENT_ALLOW_TEARING, row);
++				else
++					rrv_present(sync_interval, flags, row);
++			});
++	}
++	else
++	{
++		rrv_present(rrv_interval ? rrv_interval : sync_interval, flags, rrv_pacer.BeforePresent(rrv_fifo && rrv_interval == 0));
++	}
+ 
+ 	if (m_gpu_timing_enabled)
+ 		KickTimestampQuery();
+diff --git a/pcsx2/GS/Renderers/DX11/RRVPresentPacer.h b/pcsx2/GS/Renderers/DX11/RRVPresentPacer.h
+new file mode 100644
+index 000000000..0c56b6fc4
+--- /dev/null
++++ b/pcsx2/GS/Renderers/DX11/RRVPresentPacer.h
+@@ -0,0 +1,529 @@
++// SPDX-License-Identifier: GPL-3.0+
++// RRV GS bridge (pcsx2-gs-bridge-windows-d3d11.patch). Not PCSX2 code.
++
++#pragma once
++
++#ifdef _WIN32
++
++#include "common/RedtapeWindows.h"
++#include <dxgi.h>
++
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <cmath>
++#include <condition_variable>
++#include <cstdio>
++#include <cstdlib>
++#include <functional>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <thread>
++
++// RRV frame pacing for the bridge's direct present on Windows: the counterpart
++// of the Metal pacer (0011-metal-present-pacing.patch, RrvPresentPacer), which
++// has the reasoning. The GS field service reaches the present after a variable
++// amount of EE and GS host work, so the presents arrive at 59.94 Hz plus a few
++// milliseconds of jitter, and the GPU finishes each frame a variable time
++// after that. Measured with display sync and no pacing (docs/TESTING.md
++// "Windows frame pacing"): at a fixed 240 Hz 16% of the frames stay up 3 or 5
++// refreshes instead of 4; a variable-refresh panel (FreeSync) follows the
++// frames and repeats their jitter, when it follows them at all.
++//
++// Direct3D 11. What a frame gets depends on what the display does, which the
++// DXGI frame statistics tell (Sync, Classify, Follow):
++//  - Fixed refresh at the game's rate or a multiple of it (60, 120, 180, 240 Hz):
++//    DXGI holds every frame for that many refreshes (Present's sync interval).
++//    Nothing waits. A late frame moves the cadence one refresh later once,
++//    instead of costing a short frame and a long one.
++//  - Anything else (not known yet, a fixed rate that is not such a multiple,
++//    variable refresh, which Follow tells from a fixed 60 Hz): the frame is
++//    presented at its slot on an even 1001/60000 s grid. The slot is planned
++//    from the moment the GPU finished the frame (an event query), because
++//    that, not the present call, is when a frame can reach the screen. The
++//    grid follows those moments from behind: it moves 15 us earlier per frame
++//    and up to 500 us later on a frame that was not ready by its slot (which
++//    is then shown as soon as it is), so it settles where about 3 frames in
++//    100 are late; when every frame of the last one to two seconds had room
++//    to spare (a hitch moved the grid) it returns by a tenth of that room per
++//    frame; it re-anchors after a pause or a burst. The Metal pacer's grid
++//    sits after the latest arrival instead; here that left it 12 ms late
++//    after every slow frame. At a fixed rate that is not a multiple (165 Hz)
++//    the slot also moves to a fixed part of a refresh after a vertical blank,
++//    away from the refresh edge.
++//    Windows has no present-at-time, and waiting on the GS thread for the GPU
++//    and the slot cost it 13 ms per frame, so a presenter thread waits and
++//    presents (Submit) while the GS thread goes on with the next field; the GS
++//    thread joins it before it touches the swap chain again (Join). The device
++//    context is multithread-protected for this.
++//  - Variable refresh (RRV_PCSX2_GS_VRR, `[display] vrr`): once the display
++//    has been seen following the frames (Follow; or always with 1, never with
++//    0) the slot's present is made without display sync and allowed to tear.
++//    That is the present a FreeSync or G-Sync display follows at once, and it
++//    does not tear there; with display sync the same panel followed the frames
++//    only part of the time and scanned at its own 165 Hz the rest. If the
++//    display later shows a steady refresh faster than the frames (the window
++//    moved to a fixed display, where such presents do tear) it goes back.
++// Vulkan has no sync interval, no display feedback and no such present on
++// Windows, and a wait for the grid slot on the GS thread cost starts on a
++// throttled machine: its frames are not paced (BeforePresent(false): the trace
++// only).
++// Host-only: the guest never sees any of it.
++// RRV_PCSX2_GS_PRESENT_PACING=0 turns it all off. Developer variables:
++// RRV_PCSX2_GS_PRESENT_MARGIN_US (default 500, ready-to-slot margin),
++// RRV_PCSX2_GS_PRESENT_CREEP_US (default 15), RRV_PCSX2_GS_PRESENT_INTERVAL
++// (0 never use the sync interval, 1-4 force it), RRV_PCSX2_GS_PRESENT_THREAD=0
++// (wait on the GS thread, from the present call), RRV_PCSX2_GS_PRESENT_VBLANK_LOCK=0
++// and RRV_PCSX2_GS_PRESENT_VBLANK_PHASE (default 0.25 of a refresh after the
++// blank). RRV_PCSX2_GS_PRESENT_TRACE=<path> writes one line per present at
++// exit: "arrival ready slot call returned present_count present_refresh
++// sync_refresh sync_qpc" (times in seconds of the performance counter; the DXGI
++// frame statistics are 0 where the renderer has none, as on Vulkan);
++// tools/win-profile/present_stats.py reads it.
++struct RrvPresentPacerWin
++{
++	static constexpr double kPeriod = 1001.0 / 60000.0;
++	static constexpr size_t kTraceRows = 1u << 20;
++	static constexpr double kLateStep = 500e-6; // how far one late frame moves the grid
++	static constexpr double kFarAhead = 2e-3; // every recent frame this early for its slot: the grid is behind
++	static constexpr size_t kSteps = 32; // refresh intervals the display is classified from
++	enum class Display { Unknown, Fixed, Variable };
++	struct Row
++	{
++		double arrival, ready, slot, call, returned, sync_qpc;
++		unsigned present_count, present_refresh, sync_refresh;
++	};
++	bool configured = false, pace = true, have = false, use_thread = true, vblank_lock = true, lock = false;
++	int interval_mode = -1; // -1 from the display, 0 never, 1..4 forced
++	// RRV_PCSX2_GS_VRR: 1 present at the slot without display sync (a variable-refresh display), 0 never,
++	// auto (-1, the default) once the display has been seen following the frames (Follow).
++	int vrr_mode = -1;
++	bool vrr_seen = false;
++	int follow_score = 0;
++	unsigned long long vrr_found = 0, vrr_lost = 0;
++	unsigned long long immediate_presents = 0;
++	double margin = 0.0005, creep = 15e-6, target = 0.0, qpc_period = 0.0, vblank_phase = 0.25;
++	unsigned long long presents = 0, late = 0, reanchors = 0, snapped = 0, interval_presents = 0, threaded = 0;
++	unsigned long long seen_fixed = 0, seen_variable = 0;
++	unsigned last_interval = 0, room_count = 0;
++	double room_now = 1.0, room_before = 0.0;
++	double waited = 0.0, gpu_waited = 0.0;
++
++	// The display's vertical blanks, from the DXGI frame statistics.
++	unsigned sync_refresh = 0;
++	double sync_time = 0.0, refresh_period = 0.0;
++	std::array<double, kSteps> steps{};
++	size_t step_count = 0;
++	Display display = Display::Unknown;
++	HANDLE timer = nullptr;
++	std::string trace_path;
++	std::unique_ptr<Row[]> rows;
++	// Presenter thread: one job at a time.
++	bool presenter_started = false;
++	std::mutex mutex;
++	std::condition_variable wake, idle;
++	std::function<bool()> job_gpu_done;
++	std::function<void(unsigned long long)> job_present;
++	double job_arrival = 0.0;
++	bool job_pending = false;
++	double join_blocked = 0.0, pulled = 0.0; // the GS thread's wait in Join since the last Submit, and in total
++	std::atomic<bool> hurry{false}; // present the pending frame now (Join)
++	unsigned long long hurried = 0;
++
++	// Never destroyed: the presenter thread outlives static destruction.
++	static RrvPresentPacerWin& Get()
++	{
++		static RrvPresentPacerWin* const p = new RrvPresentPacerWin;
++		return *p;
++	}
++	double Now() const
++	{
++		LARGE_INTEGER t;
++		QueryPerformanceCounter(&t);
++		return static_cast<double>(t.QuadPart) * qpc_period;
++	}
++	static bool EnvOff(const char* name)
++	{
++		const char* v = std::getenv(name);
++		return v && v[0] == '0';
++	}
++	void Configure(IUnknown* device = nullptr)
++	{
++		if (configured)
++			return;
++		configured = true;
++		LARGE_INTEGER f;
++		QueryPerformanceFrequency(&f);
++		qpc_period = 1.0 / static_cast<double>(f.QuadPart);
++		pace = !EnvOff("RRV_PCSX2_GS_PRESENT_PACING");
++		use_thread = !EnvOff("RRV_PCSX2_GS_PRESENT_THREAD");
++		vblank_lock = !EnvOff("RRV_PCSX2_GS_PRESENT_VBLANK_LOCK");
++		if (const char* v = std::getenv("RRV_PCSX2_GS_PRESENT_INTERVAL"); v && v[0] >= '0' && v[0] <= '4' && !v[1])
++			interval_mode = v[0] - '0';
++		if (const char* v = std::getenv("RRV_PCSX2_GS_VRR"); v && (v[0] == '0' || v[0] == '1') && !v[1])
++			vrr_mode = v[0] - '0';
++		// RRV_DISPLAY_LOCK=1 (`[display] sync_to_display`): the game runs as fast as the display takes its frames
++		// (the runtime's pacer only caps it; gate3_temporal_runtime.inc), so the swap chain holds the GS thread
++		// back after one queued frame instead of DXGI's default three, which would be 50 ms of delay. Where the
++		// frames go to the presenter thread (variable refresh, a rate that is no multiple of the game's), its
++		// grid of 1001/60000 s is what holds the GS thread (Join), and the game keeps its own rate.
++		if (const char* v = std::getenv("RRV_DISPLAY_LOCK"); v && v[0] == '1' && !v[1])
++		{
++			lock = true;
++			IDXGIDevice1* dxgi = nullptr;
++			if (device && SUCCEEDED(device->QueryInterface(__uuidof(IDXGIDevice1), reinterpret_cast<void**>(&dxgi))))
++			{
++				const HRESULT latency = dxgi->SetMaximumFrameLatency(1);
++				dxgi->Release();
++				std::fprintf(stderr, "[pcsx2-gs-bridge] display lock: one queued frame (%s)\n",
++					SUCCEEDED(latency) ? "set" : "not set");
++			}
++		}
++		if (const char* v = std::getenv("RRV_PCSX2_GS_PRESENT_MARGIN_US"); v && v[0])
++			margin = std::strtod(v, nullptr) * 1e-6;
++		if (const char* v = std::getenv("RRV_PCSX2_GS_PRESENT_CREEP_US"); v && v[0])
++			creep = std::strtod(v, nullptr) * 1e-6;
++		if (const char* v = std::getenv("RRV_PCSX2_GS_PRESENT_VBLANK_PHASE"); v && v[0])
++			vblank_phase = std::clamp(std::strtod(v, nullptr), 0.0, 0.95);
++		if (const char* v = std::getenv("RRV_PCSX2_GS_PRESENT_TRACE"); v && v[0])
++		{
++			trace_path = v;
++			rows = std::make_unique<Row[]>(kTraceRows);
++		}
++		// CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (Windows 10 1803): a wait that
++		// ends within about half a millisecond without raising the system timer
++		// rate. Without it the waits below spin.
++		timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
++		std::fprintf(stderr,
++			"[pcsx2-gs-bridge] present pacing=%d interval=%d vrr=%d thread=%d margin_us=%.0f vblank_lock=%d phase=%.2f timer=%s trace=%s\n",
++			pace ? 1 : 0, interval_mode, vrr_mode, use_thread ? 1 : 0, margin * 1e6, vblank_lock ? 1 : 0, vblank_phase,
++			timer ? "high-resolution" : "spin", trace_path.empty() ? "off" : trace_path.c_str());
++		static const bool at_exit = [] { std::atexit([] { Get().Write(); }); return true; }();
++		(void)at_exit;
++	}
++	// When to present the frame that was ready at `ready`: its slot on the grid, or now if that has passed.
++	double Plan(double ready)
++	{
++		const double earliest = ready + margin;
++		if (!have)
++		{
++			have = true;
++			target = earliest;
++			return target;
++		}
++		const double next = target + kPeriod;
++		if (earliest > next + 2.0 * kPeriod || next > earliest + 2.0 * kPeriod)
++		{
++			++reanchors;
++			target = earliest;
++			return target;
++		}
++		if (earliest > next)
++		{
++			// Late: shown as soon as it is ready. The grid follows by a step at
++			// most, so one slow frame does not delay all that come after it.
++			++late;
++			target = next + std::min(earliest - next, kLateStep);
++			Room(0.0);
++			return earliest;
++		}
++		// Every frame of the last one to two seconds well ahead of its slot (a
++		// hitch moved the grid, and with it the GS thread and the game behind
++		// their clocks): come back by a tenth of that room per frame, 1 ms at
++		// most. 100 us per frame did not outrun one hitch a second.
++		const double room = std::min(room_now, room_before);
++		target = std::max(earliest, next - (room > kFarAhead ? std::min(room * 0.1, 1e-3) : creep));
++		Room(target - earliest);
++		return target;
++	}
++	// The least room (slot minus ready minus margin) of the current and of the previous 60 presents.
++	void Room(double room)
++	{
++		room_now = std::min(room_now, room);
++		if (++room_count >= 60)
++		{
++			room_before = room_now;
++			room_now = 1.0;
++			room_count = 0;
++		}
++	}
++	// At a fixed refresh rate: the first point `vblank_phase` of a refresh after a vertical blank that is not before `at`.
++	// Not when the display refreshes at the game's own rate: that is a 60 Hz display, where it gains little, or a
++	// variable-refresh display following evenly paced frames, whose "blanks" are these very presents.
++	double Snap(double at, double now)
++	{
++		if (!vblank_lock || display != Display::Fixed || refresh_period <= 0.0 || std::fabs(now - sync_time) > 1.0 ||
++			std::fabs(kPeriod / refresh_period - 1.0) < 0.05)
++			return at;
++		const double offset = vblank_phase * refresh_period;
++		++snapped;
++		return sync_time + std::ceil((at - offset - sync_time) / refresh_period) * refresh_period + offset;
++	}
++	// A vertical blank the display reported (DXGI_FRAME_STATISTICS SyncRefreshCount, SyncQPCTime).
++	void Sync(unsigned refresh, long long qpc)
++	{
++		if (!refresh || qpc <= 0)
++			return;
++		const double time = static_cast<double>(qpc) * qpc_period;
++		if (sync_refresh && refresh > sync_refresh && refresh - sync_refresh <= 16 && time > sync_time)
++		{
++			const double step = (time - sync_time) / static_cast<double>(refresh - sync_refresh);
++			steps[step_count++ % kSteps] = step;
++			Classify();
++			Follow(refresh - sync_refresh == 1 && std::fabs(step - kPeriod) < 0.25 * kPeriod);
++		}
++		else if (refresh < sync_refresh || time < sync_time || refresh - sync_refresh > 16)
++		{
++			// A mode change or a pause: what the display did before says nothing now.
++			step_count = 0;
++			display = Display::Unknown;
++		}
++		sync_refresh = refresh;
++		sync_time = time;
++	}
++	// Fixed when nearly all recent refresh intervals equal their median (then
++	// that is the refresh period); variable when they spread, as they do when a
++	// FreeSync or G-Sync display follows the frames.
++	void Classify()
++	{
++		if (step_count < kSteps)
++			return;
++		std::array<double, kSteps> sorted = steps;
++		std::sort(sorted.begin(), sorted.end());
++		const double median = sorted[kSteps / 2];
++		size_t close = 0;
++		for (const double step : sorted)
++			close += std::fabs(step - median) < 0.02 * median;
++		if (close >= kSteps - 3 && median > 1.0 / 500.0 && median < 1.0 / 20.0)
++		{
++			display = Display::Fixed;
++			refresh_period = median;
++			++seen_fixed;
++		}
++		else
++		{
++			display = Display::Variable;
++			++seen_variable;
++		}
++	}
++	// Whether the display is a variable-refresh one (FreeSync, G-Sync) that follows the frames. Evidence for: one
++	// refresh per frame, about a game period apart, for two seconds, and those intervals uneven (a fixed 60 Hz
++	// display also refreshes once per frame, but on its own even clock). Evidence against, once presenting without
++	// display sync: a steady refresh faster than the frames (a fixed display, where such presents tear).
++	void Follow(bool one_refresh_per_frame)
++	{
++		follow_score = one_refresh_per_frame ? std::min(follow_score + 1, 240) : std::max(follow_score - 4, 0);
++		if (!vrr_seen && follow_score >= 120 && step_count >= kSteps)
++		{
++			std::array<double, kSteps> sorted = steps;
++			std::sort(sorted.begin(), sorted.end());
++			const double median = sorted[kSteps / 2];
++			size_t uneven = 0;
++			for (const double step : sorted)
++				uneven += std::fabs(step - median) > 0.01 * median;
++			if (uneven >= kSteps / 4)
++			{
++				vrr_seen = true;
++				++vrr_found;
++			}
++		}
++		else if (vrr_seen && follow_score == 0 && display == Display::Fixed && refresh_period < 0.9 * kPeriod)
++		{
++			vrr_seen = false;
++			++vrr_lost;
++		}
++	}
++	// Direct3D 11: whether the frame is presented without display sync at its slot (variable refresh).
++	bool Immediate()
++	{
++		const bool on = Vrr();
++		immediate_presents += on;
++		return on;
++	}
++	bool Vrr() const { return pace && (vrr_mode == 1 || (vrr_mode < 0 && vrr_seen)); }
++	// Direct3D 11: the DXGI sync interval that holds every frame for the same
++	// number of refreshes, or 0 when the frame has to be paced here instead (a
++	// variable or unknown display, a rate that is not a multiple of the game's,
++	// pacing off). DXGI takes 1 to 4.
++	unsigned SyncInterval()
++	{
++		if (!pace || interval_mode == 0 || Vrr())
++			return 0;
++		unsigned interval = 0;
++		if (interval_mode > 0)
++			interval = static_cast<unsigned>(interval_mode);
++		else if (display == Display::Fixed && refresh_period > 0.0)
++		{
++			const double ratio = kPeriod / refresh_period;
++			const double whole = std::round(ratio);
++			// From 1: at a fixed 60 Hz the slot wait and the present each waited for a refresh (T-WIN-PACING-2).
++			if (whole >= 1.0 && whole <= 4.0 && std::fabs(ratio - whole) < 0.02 * whole)
++				interval = static_cast<unsigned>(whole);
++		}
++		if (interval)
++		{
++			++interval_presents;
++			last_interval = interval;
++		}
++		return interval;
++	}
++	void Nap(double seconds)
++	{
++		LARGE_INTEGER due;
++		due.QuadPart = -std::max<long long>(1, static_cast<long long>(seconds * 1e7));
++		if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE))
++			WaitForSingleObject(timer, 100);
++		else
++			YieldProcessor();
++	}
++	// Returns false when it was cut short (Join).
++	bool WaitUntil(double at)
++	{
++		// Sleep to within 1 ms of the slot, in steps that notice `hurry`, then
++		// spin: the sleep's own error would be the jitter this is here to remove.
++		const double spin = 0.001;
++		for (double now = Now(); timer && at - now > spin; now = Now())
++		{
++			if (hurry.load(std::memory_order_relaxed))
++				return false;
++			Nap(std::min(at - now - spin, 0.001));
++		}
++		while (Now() < at)
++		{
++			if (hurry.load(std::memory_order_relaxed))
++				return false;
++			YieldProcessor();
++		}
++		return true;
++	}
++	// Waits for the GPU and for the frame's slot (when `wait`), and returns the trace row of this present.
++	template <class GpuDone>
++	unsigned long long Pace(bool wait, double arrival, GpuDone&& gpu_done)
++	{
++		double ready = arrival, at = 0.0;
++		if (pace && wait)
++		{
++			// Bounded: a device that never reports completion must not stop the picture.
++			const double give_up = arrival + 0.050;
++			while (!gpu_done() && Now() < give_up && !hurry.load(std::memory_order_relaxed))
++				Nap(0.0003);
++			ready = Now();
++			gpu_waited += ready - arrival;
++			at = Snap(Plan(ready), ready);
++			if (at > ready)
++			{
++				if (!WaitUntil(at))
++					++hurried;
++				waited += Now() - ready;
++			}
++		}
++		const unsigned long long row = presents++;
++		if (rows && row < kTraceRows)
++			rows[row] = Row{arrival, ready, at, Now(), 0.0, 0.0, 0, 0, 0};
++		return row;
++	}
++	// On the calling thread, just before its present (Vulkan; Direct3D 11 with the sync interval or without the thread).
++	unsigned long long BeforePresent(bool wait)
++	{
++		Configure();
++		return Pace(wait, Now(), [] { return true; });
++	}
++	// Direct3D 11: hands the frame to the presenter thread, which waits until
++	// `gpu_done()` and the frame's slot and then calls `present(row)`. The caller
++	// must Join() before it uses the swap chain, or anything `present` uses, again.
++	void Submit(std::function<bool()> gpu_done, std::function<void(unsigned long long)> present)
++	{
++		Join();
++		std::lock_guard lock(mutex);
++		pulled += join_blocked;
++		join_blocked = 0.0;
++		hurry.store(false, std::memory_order_relaxed);
++		if (!presenter_started)
++		{
++			presenter_started = true;
++			std::thread([this] { Presenter(); }).detach();
++		}
++		job_gpu_done = std::move(gpu_done);
++		job_present = std::move(present);
++		job_arrival = Now();
++		job_pending = true;
++		++threaded;
++		wake.notify_one();
++	}
++	// Returns when no present is pending. The GS thread calls it with the next
++	// frame: when the GPU needs most of a period for a frame (an integrated GPU
++	// on battery: 7 ms mean, 16 ms at the 95th percentile), that frame's slot is
++	// after the next one's arrival and the GS thread waits here for it. That is
++	// the pacing doing its work, as display sync would; presenting the pending
++	// frame at once instead (`now`) cut 2,528 of 3,554 frames short, which is no
++	// pacing. After a hitch the grid is late by the hitch and every frame waits
++	// here; Plan's return of the grid ends that. `now` is for a resize or the end.
++	void Join(bool now = false)
++	{
++		std::unique_lock lock(mutex);
++		if (!job_pending)
++			return;
++		const double start = Now();
++		if (now)
++			hurry.store(true, std::memory_order_relaxed);
++		idle.wait(lock, [this] { return !job_pending; });
++		join_blocked += Now() - start;
++	}
++	void Presenter()
++	{
++		SetThreadDescription(GetCurrentThread(), L"rrv-present");
++		// Its waits end on a deadline: do not let the scheduler hold it behind
++		// the game's worker threads.
++		SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
++		std::unique_lock lock(mutex);
++		for (;;)
++		{
++			wake.wait(lock, [this] { return job_pending; });
++			lock.unlock();
++			// The pacer's state belongs to this thread while a job is pending.
++			const unsigned long long row = Pace(true, job_arrival, job_gpu_done);
++			job_present(row);
++			lock.lock();
++			job_gpu_done = nullptr;
++			job_present = nullptr;
++			job_pending = false;
++			idle.notify_all();
++		}
++	}
++	void AfterPresent(unsigned long long row, unsigned present_count = 0, unsigned present_refresh = 0,
++		unsigned sync_refresh_count = 0, long long sync_qpc = 0)
++	{
++		Sync(sync_refresh_count, sync_qpc);
++		if (!rows || row >= kTraceRows)
++			return;
++		rows[row].returned = Now();
++		rows[row].present_count = present_count;
++		rows[row].present_refresh = present_refresh;
++		rows[row].sync_refresh = sync_refresh_count;
++		rows[row].sync_qpc = static_cast<double>(sync_qpc) * qpc_period;
++	}
++	void Write()
++	{
++		const double n = presents ? static_cast<double>(presents) : 1.0;
++		std::fprintf(stderr,
++			"[pcsx2-gs-bridge] present pacing presents=%llu late=%llu reanchors=%llu gpu_wait_ms=%.3f slot_wait_ms=%.3f "
++			"threaded=%llu immediate=%llu (vrr found %llu lost %llu) hurried=%llu join_wait_ms=%.3f vblank_locked=%llu sync_interval=%u for %llu presents; display fixed=%llu variable=%llu "
++			"last_refresh_hz=%.3f\n",
++			presents, late, reanchors, gpu_waited * 1e3 / n, waited * 1e3 / n, threaded, immediate_presents, vrr_found, vrr_lost, hurried, pulled * 1e3 / n, snapped, last_interval,
++			interval_presents, seen_fixed, seen_variable, refresh_period > 0.0 ? 1.0 / refresh_period : 0.0);
++		if (!rows)
++			return;
++		FILE* f = std::fopen(trace_path.c_str(), "w");
++		if (!f)
++			return;
++		const unsigned long long count = std::min<unsigned long long>(presents, kTraceRows);
++		for (unsigned long long i = 0; i < count; ++i)
++			std::fprintf(f, "%.6f %.6f %.6f %.6f %.6f %u %u %u %.6f\n", rows[i].arrival, rows[i].ready, rows[i].slot,
++				rows[i].call, rows[i].returned, rows[i].present_count, rows[i].present_refresh, rows[i].sync_refresh,
++				rows[i].sync_qpc);
++		std::fclose(f);
++	}
++};
++
++#endif // _WIN32
+diff --git a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
+index 2bfbe1ab3..bc48d5697 100644
+--- a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
++++ b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
+@@ -2,6 +2,9 @@
+ // SPDX-License-Identifier: GPL-3.0+
+ 
+ #include "GS/GS.h"
++#ifdef _WIN32
++#include "GS/Renderers/DX11/RRVPresentPacer.h"
++#endif
+ #include "GS/GSGL.h"
+ #include "GS/GSPerfMon.h"
+ #include "GS/GSUtil.h"
+@@ -1350,8 +1353,17 @@ void GSDeviceVK::SubmitCommandBuffer(VKSwapChain* present_swap_chain)
+ 
+ 		present_swap_chain->ResetImageAcquireResult();
+ 
++#ifdef _WIN32
++		// RRV GS bridge: the present trace only (RRVPresentPacer.h). Vulkan on Windows has no sync interval, no
++		// display feedback and no variable-refresh present, and waiting for a grid slot on this thread cost starts
++		// on battery (58.4 per second in the attract 3D scene), so its frames are not paced.
++		const unsigned long long rrv_row = RrvPresentPacerWin::Get().BeforePresent(false);
++#endif
+ 		const u64 rrv_present_start = GSRrvNowNs();
+ 		res = vkQueuePresentKHR(m_present_queue, &present_info);
++#ifdef _WIN32
++		RrvPresentPacerWin::Get().AfterPresent(rrv_row);
++#endif
+ 		g_rrv_wait_stats.present_ns += GSRrvNowNs() - rrv_present_start;
+ 		g_rrv_wait_stats.presents++;
+ 		if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 import hashlib, json, os, pathlib, shutil, subprocess, sys, tempfile, unittest
 
+from fs_support import is_dir_link, make_dir_link, remove_dir_link, symlinks_available
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PRODUCER = ROOT / "scripts/resource_package.py"
 
@@ -84,8 +86,8 @@ class ResourcePackageTests(unittest.TestCase):
         packages = self.build / ".rrv-resource-packages"; current = packages / "current"
         outside = self.root / "outside"; outside.mkdir(); sentinel = outside / "sentinel"; sentinel.write_text("preserve")
         def restore() -> None:
-            if current.is_symlink() or current.exists():
-                if current.is_symlink(): current.unlink()
+            if is_dir_link(current) or current.exists():
+                if is_dir_link(current): remove_dir_link(current)
                 else: shutil.rmtree(current)
             self.ensure(sha)
         def reject(mutate) -> None:
@@ -96,14 +98,15 @@ class ResourcePackageTests(unittest.TestCase):
             self.assertEqual(sentinel.read_text(), "preserve")
             self.assertFalse((packages / "temporary").exists())
             restore()
-        old = packages / "old-current"; current.rename(old); current.symlink_to(outside, target_is_directory=True)
+        old = packages / "old-current"; current.rename(old); make_dir_link(current, outside)
         before = os.lstat(current); self.ensure(sha, ok=False)
-        self.assertTrue(current.is_symlink()); self.assertEqual(os.lstat(current).st_ino, before.st_ino)
+        self.assertTrue(is_dir_link(current)); self.assertEqual(os.lstat(current).st_ino, before.st_ino)
         self.assertEqual(sentinel.read_text(), "preserve"); self.assertFalse((packages / "temporary").exists())
-        current.unlink(); old.rename(current)
-        reject(lambda: (current / "resources/leak").symlink_to(sentinel))
+        remove_dir_link(current); old.rename(current)
+        if symlinks_available(): reject(lambda: (current / "resources/leak").symlink_to(sentinel))
         reject(lambda: os.link(current / "bridge.dylib", current / "resources/hard-link"))
-        reject(lambda: os.mkfifo(current / "resources/fifo"))
+        if hasattr(os, "mkfifo"): reject(lambda: os.mkfifo(current / "resources/fifo"))
+        else: reject(lambda: make_dir_link(current / "resources/junction", outside))  # a reparse point inside the tree
     def test_illegal_names_collisions_and_output_escape_reject(self) -> None:
         raw = json.loads(self.manifest.read_text()); raw["entries"][1]["path"] = "a/../b"; self.manifest.write_text(json.dumps(raw))
         self.assertNotEqual(run("configure", "--input", str(self.manifest), "--build-root", str(self.build), "--spec", str(self.spec), ok=False).returncode, 0)
@@ -111,9 +114,10 @@ class ResourcePackageTests(unittest.TestCase):
         self.assertNotEqual(run("configure", "--input", str(self.manifest), "--build-root", str(self.build), "--spec", str(self.spec), ok=False).returncode, 0)
         raw["entries"][1]["path"] = "resources/default.metallib"; self.manifest.write_text(json.dumps(raw))
         self.assertNotEqual(run("configure", "--input", str(self.manifest), "--build-root", str(self.build), "--spec", str(self.root / "outside.json"), ok=False).returncode, 0)
-        linked = self.root / "linked.dylib"; linked.symlink_to(self.bridge)
-        raw["entries"][0]["source"] = str(linked); self.manifest.write_text(json.dumps(raw))
-        self.assertNotEqual(run("configure", "--input", str(self.manifest), "--build-root", str(self.build), "--spec", str(self.spec), ok=False).returncode, 0)
+        if symlinks_available():
+            linked = self.root / "linked.dylib"; linked.symlink_to(self.bridge)
+            raw["entries"][0]["source"] = str(linked); self.manifest.write_text(json.dumps(raw))
+            self.assertNotEqual(run("configure", "--input", str(self.manifest), "--build-root", str(self.build), "--spec", str(self.spec), ok=False).returncode, 0)
         raw["entries"][0]["source"] = str(self.bridge); hard = self.root / "hard.metallib"; os.link(self.metal, hard); raw["entries"][1]["source"] = str(hard); self.manifest.write_text(json.dumps(raw))
         self.assertNotEqual(run("configure", "--input", str(self.manifest), "--build-root", str(self.build), "--spec", str(self.spec), ok=False).returncode, 0)
 

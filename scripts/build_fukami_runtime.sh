@@ -30,11 +30,14 @@ tag="${3:-${${name#*-gate*-}%%-*}}"
 # the app and the Linux package take only the finished libraries from runtime/NAME.
 work="${FUKAMI_BUILD_DIR:-$repo/build/fukami}"
 mkdir -p "$work"
-# FUKAMI_METAL_RESOURCES points at an existing Metal-resources directory; the owner's older hash-named one is reused.
+# FUKAMI_METAL_RESOURCES points at an existing Metal-resources directory. Otherwise the owner's hash-named one is
+# reused when it exists: build-gate6-metal-resources-<first 12 hex of the locked bridge target patch SHA-256> (the
+# resource manifest pins that patch, so the name follows config/dependencies.lock.toml and never goes stale).
 metal="${FUKAMI_METAL_RESOURCES:-}"
 if [[ -z "$metal" ]]; then
-    if [[ -d "$repo/build-gate6-metal-resources-a5d0088d6921" ]]; then
-        metal="$repo/build-gate6-metal-resources-a5d0088d6921"
+    patch_sha="$(grep -A2 '^\[\[pcsx2_bridge_patches\]\]' "$repo/config/dependencies.lock.toml" | sed -n 's/^sha256 = "\([0-9a-f]\{12\}\).*/\1/p')"
+    if [[ -n "$patch_sha" && -d "$repo/build-gate6-metal-resources-$patch_sha" ]]; then
+        metal="$repo/build-gate6-metal-resources-$patch_sha"
     else
         metal="$work/metal"
     fi

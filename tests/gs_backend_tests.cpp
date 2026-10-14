@@ -928,11 +928,15 @@ int main()
     check(!backend.initialize(640u, 448u, &error), "invalid render mode is rejected");
     check(error.find("invalid RRV_GS_RENDER_MODE=invalid") != std::string::npos,
           "invalid render mode error is actionable");
+#if !defined(_WIN32)
+    // The CRT cannot hold an empty-valued variable: _putenv_s(name, "") deletes it, so there is no way to make
+    // getenv return "" in this process on Windows. The empty case is exercised on macOS and Linux only.
     setEnvironment("RRV_GS_RENDER_MODE", "");
     error.clear();
     check(!backend.initialize(640u, 448u, &error), "empty render mode is rejected");
     check(error.find("invalid RRV_GS_RENDER_MODE=<empty>") != std::string::npos,
           "empty render mode error is actionable");
+#endif
 
 #if defined(RRV_GS_CONSUMER_RECEIPT_CLIENT)
     // The live receipt boundary is requested before the next VSync, but the

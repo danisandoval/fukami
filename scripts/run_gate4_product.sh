@@ -66,8 +66,8 @@
 # fixed everywhere; race only during races (menus stay stretched;
 # RRV_PCSX2_GS_HUD_MODE=race); stretch (alias no47, and the old
 # --stretched-hud) never, which is what No.47's hack shows: it changes only
-# the 3D camera. Defaults (owner decision 2026-09-27): --ratio 16:9 --hud
-# stretch; --ratio 4:3 is the stock game.
+# the 3D camera. Defaults: --ratio 16:9 (owner decision 2026-09-27) --hud
+# race (owner decision 2026-10-13; stretch before); --ratio 4:3 is the stock game.
 # --widescreen is --ratio 16:9.
 #
 # The runtime package (runtime/NAME, made by scripts/package_gate4_product.py)
@@ -85,7 +85,7 @@
 # --inline runs them on the EE thread, as before.
 set -eu
 root="${0:A:h:h}"
-runtime_name="game001-gate9-v155-9cdff06"
+runtime_name="game001-gate9-v178-788e560"
 usage='Usage: ./run.sh [--headless] [--unpaced] [--inline] [--render-mode field|full] [--scale 1..8] [--no-aa1] [--fxaa] [--cas 0..100] [--aniso 0|2|4|8|16] [--texture-filter ps2|bilinear] [--no-mipmap] [--no-analog] [--no-rumble] [--car-lod FACTOR] [--draw-distance N] [--no-fast-unpack] [--no-native-code]
                 [--ratio 4:3|16:9|16:10|21:9] [--widescreen] [--hud fixed|race|stretch|no47] [--aspect auto|4:3|16:9|16:10|21:9|stretch] [--window WxH] [--fullscreen] [--integer-scaling] [--no-present-pacing]
                 [--workload DIR] [--replay DIR [--from START]] [--runtime NAME] [--config FILE] [/path/to/user-owned.elf]

@@ -13,8 +13,7 @@ It is not an emulator and it does not run other games.
 
 - Source code written for this project, and code derived from GPL-licensed projects (PCSX2, PS2Recomp), under the
   GNU General Public License v3.0 ([LICENSE](LICENSE), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
-- Release builds also contain the game's code **translated into native machine code** by the recompiler. A release never
-  contains disc data, the original executable, the IOP modules, textures, models, audio, videos or any other asset, and
+- A release never contains disc data, the original executable, the IOP modules, textures, models, audio, videos or any other asset, and
   no PS2 BIOS: the kernel is reimplemented.
 - The source repository contains no game code at all. It is generated on your computer from your own disc by
   `scripts/fukami_generate.py` and kept in an ignored folder.

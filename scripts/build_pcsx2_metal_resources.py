@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Build the pinned PCSX2 Metal shader libraries from clean source.
 
+The shaders are compiled with the locked bridge patch applied: the Metal
+directory of the pinned revision is exported into the output directory and
+the patch's changes to that directory are applied there (the checkout itself
+stays clean). Until 2026-10-13 the unpatched shaders were compiled, which was
+the same thing while no patch changed a shader; patch 0013 (sprite coverage)
+does.
+
 Outputs are generated artifacts. The output directory must be supplied
 explicitly and must be new or empty; this script never reads a PCSX2.app or a
 prebuilt metallib.
@@ -25,6 +32,10 @@ except ModuleNotFoundError:  # Python 3.9 supplied by older macOS toolchains.
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 LOCK_PATH = REPO_ROOT / "config" / "dependencies.lock.toml"
 PIN_MARKER = REPO_ROOT / "tools" / "pcsx2-gs-bridge" / "PINNED_REVISION"
+METAL_DIR = "pcsx2/GS/Renderers/Metal"
+# The Metal directory and what its shaders include from outside it (GSShaderEnums.h through the
+# shared header; the FidelityFX and FXAA sources in cas.metal and fxaa.metal).
+SHADER_INCLUDE_DIRS = (METAL_DIR, "pcsx2/GS/Renderers/Common", "bin/resources/shaders/common")
 SHADERS = (
     "pcsx2/GS/Renderers/Metal/cas.metal",
     "pcsx2/GS/Renderers/Metal/convert.metal",
@@ -148,6 +159,30 @@ def ensure_clean_source(source: pathlib.Path, revision: str, patch: pathlib.Path
             raise RuntimeError(f"pinned PCSX2 source is missing required Metal input: {relative}")
 
 
+def export_patched_metal_sources(source: pathlib.Path, patch: pathlib.Path,
+                                 output: pathlib.Path) -> pathlib.Path:
+    """The pinned revision's Metal shader inputs with the locked bridge patch applied to them.
+
+    Returns the root under which the SHADERS and SHADER_HEADERS paths resolve.
+    """
+    root = output / "patched-source"
+    root.mkdir()
+    archive = subprocess.run(["git", "archive", "--format=tar", "HEAD", *SHADER_INCLUDE_DIRS], cwd=source,
+                             stdout=subprocess.PIPE, check=False)
+    if archive.returncode:
+        raise RuntimeError(f"git archive of the Metal shader inputs failed ({archive.returncode})")
+    extract = subprocess.run(["tar", "-xf", "-", "-C", str(root)], input=archive.stdout, check=False)
+    if extract.returncode:
+        raise RuntimeError(f"cannot extract the Metal shader inputs ({extract.returncode})")
+    # The export is not a checkout, and the output directory may sit inside another repository:
+    # the ceiling keeps git from finding one, so `git apply` patches the plain files here.
+    environment = os.environ.copy()
+    environment["GIT_CEILING_DIRECTORIES"] = str(root.parent)
+    run(["git", "apply", *(f"--include={directory}/*" for directory in SHADER_INCLUDE_DIRS), str(patch)],
+        cwd=root, environment=environment)
+    return root
+
+
 def write_verifier_manifest(output: pathlib.Path, revision: str,
                             hashes: dict[str, str]) -> None:
     lines = [f'pcsx2_revision = "{revision}"', ""]
@@ -197,7 +232,9 @@ def main() -> int:
         "sdk_path": run(["xcrun", "--show-sdk-path"], environment=environment),
         "xcode_version": run(["xcodebuild", "-version"], environment=environment),
     }
-    input_hashes = {name: sha256(source / name) for name in (*SHADERS, *SHADER_HEADERS)}
+    patched = export_patched_metal_sources(source, patch, output)
+    input_hashes = {name: sha256(patched / name) for name in (*SHADERS, *SHADER_HEADERS)}
+    unpatched_hashes = {name: sha256(source / name) for name in (*SHADERS, *SHADER_HEADERS)}
     commands: list[list[str]] = []
     output_hashes: dict[str, str] = {}
     air_root = output / "air"
@@ -210,7 +247,7 @@ def main() -> int:
             command = [
                 "xcrun", "metal", "-ffast-math", f"-std={language}", "-target", triple,
                 f"-fmodules-cache-path={module_cache}",
-                "-o", str(air), "-c", str(source / relative),
+                "-o", str(air), "-c", str(patched / relative),
             ]
             run(command, environment=environment)
             commands.append(command)
@@ -227,6 +264,9 @@ def main() -> int:
         "bridge_patch": {"path": str(patch.relative_to(REPO_ROOT)), "sha256": patch_hash},
         "source": str(source),
         "source_status": "clean detached",
+        "shader_inputs": "locked bridge patch applied to an export of " + ", ".join(SHADER_INCLUDE_DIRS),
+        "shader_inputs_changed_by_patch": sorted(
+            name for name in input_hashes if input_hashes[name] != unpatched_hashes[name]),
         "toolchain": toolchain,
         "source_inputs_sha256": input_hashes,
         "commands": commands,

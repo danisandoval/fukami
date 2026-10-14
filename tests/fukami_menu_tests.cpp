@@ -15,7 +15,15 @@
 #include <map>
 #include <sstream>
 #include <string>
+#if defined(_WIN32)
+#include <process.h>
+#include <stdlib.h>
+#define getpid _getpid
+// _putenv_s(name, "") removes the variable, as unsetenv does.
+#define unsetenv(name) _putenv_s(name, "")
+#else
 #include <unistd.h>
+#endif
 #include <vector>
 
 namespace fs = std::filesystem;

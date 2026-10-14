@@ -21,6 +21,8 @@ import sys
 import tempfile
 import unittest
 
+from cxx_compiler import compile_cpp, find_compiler
+
 ROOT = Path(__file__).resolve().parents[1]
 
 MACROS = ROOT / "third_party/ps2recomp/ps2xRuntime/include/ps2_runtime_macros.h"
@@ -81,8 +83,7 @@ class EeFpClampTests(unittest.TestCase):
             self.assertNotIn(gone, gen)
 
     def test_helpers_match_pcsx2(self):
-        compiler = shutil.which("c++")
-        self.assertIsNotNone(compiler, "a C++ compiler is required")
+        self.assertIsNotNone(find_compiler(), "a C++ compiler is required")
         neon = sse2neon_dir()
         arm = platform.machine().lower() in ("arm64", "aarch64")
         if arm:
@@ -101,12 +102,7 @@ class EeFpClampTests(unittest.TestCase):
             cpp = Path(directory) / "t.cpp"
             exe = Path(directory) / "t"
             cpp.write_text(source)
-            cmd = [compiler, "-std=c++20", "-O1", str(cpp), "-o", str(exe)]
-            if arm:
-                cmd.insert(1, f"-I{neon}")
-            else:
-                cmd.insert(1, "-msse4.1")
-            subprocess.run(cmd, check=True)
+            exe = compile_cpp(cpp, exe, optimize="1", sse41=not arm, include_dirs=[neon] if arm else [])
             on = subprocess.run([str(exe)], capture_output=True, text=True, check=True)
             self.assertEqual(on.stdout.strip().splitlines()[-1], "0", on.stdout)
             env = dict(os.environ, RRV_EE_FPCLAMP="0")

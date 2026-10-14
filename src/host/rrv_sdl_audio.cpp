@@ -1,4 +1,5 @@
 #include "rrv_sdl_audio.h"
+#include "rrv_platform.h"
 
 #include <SDL.h>
 #include <algorithm>
@@ -90,9 +91,7 @@ SDL_AudioDeviceID openDevice(SDL_AudioSpec* obtained)
 // (mach_continuous_time), unlike steady_clock.
 uint64_t continuousNs()
 {
-    timespec ts{};
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return uint64_t(ts.tv_sec) * 1000000000ull + uint64_t(ts.tv_nsec);
+    return rrv::platform::MonotonicNs();
 }
 
 // Host-stall watchdog (Gate-8 L3, 2026-09-29). When the whole process is

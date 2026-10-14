@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <map>
 #include <regex>
@@ -15,6 +16,13 @@
 
 namespace fukami::settings {
 namespace {
+
+// A path as UTF-8 text, the encoding of the ini and of the child's environment on every platform\n// (path::string() would be the ANSI code page on Windows and lose non-ASCII folder names).
+std::string pathText(const std::filesystem::path& p)
+{
+    const auto text = p.generic_u8string(); // forward slashes on every platform; Windows accepts them
+    return std::string(text.begin(), text.end());
+}
 
 std::string lower(std::string_view text)
 {
@@ -253,7 +261,7 @@ const std::vector<Spec> &schema()
         {"display", "ratio", "Widescreen", "Real widescreen: the game renders a wider view. 4:3 is the stock game.",
          Kind::choice, "16:9", {"4:3", "16:9", "16:10", "21:9"}},
         {"display", "hud", "HUD", "How 2D (HUD, menus, text) shows on a wide picture.",
-         Kind::choice, "stretch", {"stretch", "fixed", "race"}},
+         Kind::choice, "race", {"stretch", "fixed", "race"}},
         {"display", "aspect", "Picture fit", "How the picture fits the window. Empty follows Widescreen.",
          Kind::choice, "", {"", "auto", "4:3", "16:9", "16:10", "21:9", "stretch"}, 0, 0, Apply::live},
         {"display", "window", "Window size", "Starting window size, WIDTHxHEIGHT. Empty is automatic.",
@@ -263,8 +271,42 @@ const std::vector<Spec> &schema()
         {"display", "integer_scaling", "Integer scaling", "Snap the picture to whole-number sizes.",
          Kind::boolean, "false", {}, 0, 0, Apply::live},
         {"display", "present_pacing", "Even frame pacing",
-         "Shows every frame for the same time (smooth motion). Off: about 6-9 ms less delay, some judder.",
+         "Shows every frame for the same time (smooth motion; on Linux, a heavy frame does not hold up the next). "
+         "Off: about 6-9 ms less delay on a Mac, some judder.",
          Kind::boolean, "true"},
+        // Windows only (src/host/rrv_display_refresh.h): in full screen the display is switched to a multiple of 60 Hz.
+        {"display", "refresh_rate", "Full-screen refresh rate",
+         "In full screen the display runs at a multiple of 60 Hz, so every frame stays up the same time. "
+         "auto: only a display that is not at one already (165 Hz goes to 120). off: leave the display alone.",
+         Kind::choice, "auto", {"auto", "60", "120", "180", "240", "off"}, 0, 0, Apply::restart,
+#if defined(_WIN32)
+         true},
+#else
+         false},
+#endif
+        // Windows, Direct3D 11 only (RRVPresentPacer.h): frames are presented at their own time on a FreeSync/G-Sync display.
+        {"display", "vrr", "Variable refresh (FreeSync / G-Sync)",
+         "auto: used when the display is seen following the game. on: always (tears on a display without it). off: never.",
+         Kind::choice, "auto", {"auto", "on", "off"}, 0, 0, Apply::restart,
+#if defined(_WIN32)
+         true},
+#else
+         false},
+#endif
+        // Windows, Direct3D 11 only (gate3_temporal_runtime.inc "Display lock", RRVPresentPacer.h): the display paces the game.
+        // On by default (owner, 2026-10-13). The key exists on every platform; only Windows acts on it (environment()).
+        {"display", "sync_to_display", "Sync to display",
+         "The game makes 59.94 frames a second and a display shows 60.00, so now and then a frame has to stay up longer "
+         "and motion stutters for a moment. On: the display is the game's clock. On a 60, 120 or 240 Hz display the "
+         "game runs at 60.00 (0.1% faster; the sound follows, 2 cents higher) and every frame stays up the same time. "
+         "Costs one frame (17 ms) of delay. A FreeSync / G-Sync display is paced by variable refresh either way. "
+         "Off: the exact 59.94, least delay.",
+         Kind::boolean, "true", {}, 0, 0, Apply::restart,
+#if defined(_WIN32)
+         true},
+#else
+         false},
+#endif
         // [rendering]
         {"rendering", "render_mode", "Render mode", "full: progressive full frames. field: the older half-height output.",
          Kind::choice, "full", {"full", "field"}},
@@ -283,8 +325,25 @@ const std::vector<Spec> &schema()
         {"rendering", "texture_filter", "Texture filtering",
          "PS2: as the game asks (car textures show their pixels). Bilinear: smooths every 3D texture, cars included.",
          Kind::choice, "ps2", {"ps2", "bilinear"}},
+        // Host enhancement, on by default (owner request 2026-10-12; docs/TESTING.md T-SPRITE-COVERAGE). RR5 draws
+        // its 2D as point-sampled sprites, which come out even only when a texel covers a whole number of output
+        // pixels; `even` weights the texels under each output pixel instead (PCSX2 patch 0013).
+        {"rendering", "sprite_filter", "2D filtering",
+         "Even: HUD, menus, text and logos keep even pixels at every resolution. PS2: one texture pixel per screen pixel.",
+         Kind::choice, "even", {"even", "ps2"}},
+        // Off by default (owner, 2026-10-12): at the internal scales this is played at, the smaller copies only blur.
         {"rendering", "mipmap", "Mipmaps", "Emulate the PS2's mipmaps (on is what the hardware does).",
-         Kind::boolean, "true"},
+         Kind::boolean, "false"},
+        // Windows only (the other platforms have one graphics API): auto is Direct3D 11, the API whose frame pacing
+        // can be controlled and measured there (docs/TESTING.md "Windows frame pacing"). In the menu on Windows.
+        {"rendering", "backend", "Graphics API",
+         "auto is Direct3D 11 (even frame pacing, variable refresh). vulkan: try it if Direct3D 11 has problems.",
+         Kind::choice, "auto", {"auto", "vulkan", "d3d11"}, 0, 0, Apply::restart,
+#if defined(_WIN32)
+         true},
+#else
+         false},
+#endif
         // [input]
         {"input", "analog", "Analog controller", "DualShock 2 sticks and trigger pressure. Off: d-pad only.",
          Kind::boolean, "true"},
@@ -302,6 +361,12 @@ const std::vector<Spec> &schema()
         {"game", "native_code", "Native hot code",
          "Runs the game's busiest code as native code: same result, less CPU. Off runs all of it as recompiled code.",
          Kind::boolean, "true"},
+        // Experimental (menu page "Experimental"): removes the hatch of T-DECK-3X-HATCH in a race, but part of the
+        // hood of the car sliding into the selection screen turns black (docs/TESTING.md). Off by default.
+        {"game", "car_depth_fix", "Car paint depth fix",
+         "Experimental. Draws a car's second paint layer and reflection a hair in front of the paint, for hatched "
+         "panels at odd resolutions. Known fault: dark patches on the car in the selection screen.",
+         Kind::boolean, "false", {}, 0, 0, Apply::restart, true, true},
         // Logs: off by default. Off, the launcher creates no session folder and writes no file (logs, pad record,
         // start clocks, the card copy); the game's stdout/stderr go nowhere. Takes effect on restart.
         {"game", "logging", "Write logs",
@@ -357,6 +422,29 @@ bool boolValue(std::string_view value)
     return v == "true" || v == "yes" || v == "on" || v == "1";
 }
 
+bool steamDeck()
+{
+    if (const char *e = std::getenv("RRV_STEAM_DECK"); e && e[0])
+        return e[0] != '0';
+#ifdef __linux__
+    static const bool deck = [] {
+        char vendor[32] = {};
+        if (std::FILE *f = std::fopen("/sys/devices/virtual/dmi/id/board_vendor", "r"))
+        {
+            const size_t n = std::fread(vendor, 1, sizeof(vendor) - 1, f);
+            std::fclose(f);
+            return std::string_view(vendor, n).substr(0, 5) == "Valve";
+        }
+        return false;
+    }();
+    return deck;
+#else
+    return false;
+#endif
+}
+
+int hostScale(int scale, bool deck) { return deck && scale > 1 && (scale & 1) ? scale - 1 : scale; }
+
 bool valid(const Spec &spec, std::string_view value)
 {
     const std::string key(spec.key);
@@ -410,7 +498,9 @@ const std::vector<std::string_view> &userEnvAllowlist()
         "RRV_PCSX2_GS_HUD_MODE",        "RRV_PCSX2_GS_INTEGER_SCALING",  "RRV_WINDOW_SIZE",
         "RRV_WINDOW_FULLSCREEN",        "RRV_PAD_ANALOG",                "RRV_PAD_RUMBLE",
         "RRV_RR5_CAR_LOD",              "RRV_RR5_DRAW_DISTANCE",         "RRV_RR5_FAST_UNPACK",
-        "RRV_RR5_NATIVE_HOT",           "RRV_RR5_WIDESCREEN",
+        "RRV_RR5_NATIVE_HOT",           "RRV_RR5_WIDESCREEN",            "RRV_RR5_CAR_ZTIE",
+        "RRV_PCSX2_GS_BACKEND",         "RRV_DISPLAY_REFRESH",           "RRV_PCSX2_GS_VRR",
+        "RRV_PCSX2_GS_SPRITE_FILTER",   "RRV_DISPLAY_LOCK",              "RRV_AUDIO_RATE_CONTROL",
     };
     return names;
 }
@@ -432,10 +522,14 @@ const std::map<std::string, std::string> &messages()
         {"aspect", "aspect must be empty, auto, 4:3, 16:9, 16:10, 21:9 or stretch"},
         {"window", "window must be empty or WIDTHxHEIGHT, e.g. 1920x1080"},
         {"render_mode", "render_mode must be full or field"},
+        {"backend", "backend must be auto, vulkan or d3d11 (d3d11: Windows only)"},
+        {"refresh_rate", "refresh_rate must be auto, 60, 120, 180, 240 or off"},
+        {"vrr", "vrr must be auto, on or off"},
         {"scale", "scale must be 1 to 8"},
         {"cas", "cas must be 0 to 100 (0 = off)"},
         {"aniso", "aniso must be 0, 2, 4, 8 or 16"},
         {"texture_filter", "texture_filter must be ps2 or bilinear"},
+        {"sprite_filter", "sprite_filter must be even or ps2"},
         {"car_lod", "car_lod must be a number (1 = stock game)"},
         {"draw_distance", "draw_distance must be 0 to 16 (0 = stock game)"},
         {"pacer_spin", "pacer_spin must be 0 to 17 (ms; 0 = sleep)"},
@@ -504,20 +598,26 @@ LaunchConfig LaunchConfig::fromIni(const IniDocument &doc, const bool developerO
     c.fullscreen = boolValue(get("display", "fullscreen"));
     c.integerScaling = boolValue(get("display", "integer_scaling"));
     c.presentPacing = boolValue(get("display", "present_pacing"));
+    c.refreshRate = get("display", "refresh_rate");
+    c.vrr = get("display", "vrr");
+    c.syncToDisplay = boolValue(get("display", "sync_to_display"));
     c.renderMode = get("rendering", "render_mode");
-    c.scale = std::stoi(get("rendering", "scale"));
+    c.scale = hostScale(std::stoi(get("rendering", "scale")), steamDeck());
     c.aa1 = boolValue(get("rendering", "aa1"));
     c.fxaa = boolValue(get("rendering", "fxaa"));
     c.cas = std::stoi(get("rendering", "cas"));
     c.aniso = std::stoi(get("rendering", "aniso"));
     c.textureFilter = get("rendering", "texture_filter");
+    c.spriteFilter = get("rendering", "sprite_filter");
     c.mipmap = boolValue(get("rendering", "mipmap"));
+    c.backend = get("rendering", "backend");
     c.analog = boolValue(get("input", "analog"));
     c.rumble = boolValue(get("input", "rumble"));
     c.carLod = get("game", "car_lod");
     c.drawDistance = std::stoi(get("game", "draw_distance"));
     c.fastUnpack = boolValue(get("game", "fast_unpack"));
     c.nativeCode = boolValue(get("game", "native_code"));
+    c.carDepthFix = boolValue(get("game", "car_depth_fix"));
     c.logging = boolValue(get("game", "logging"));
     c.unpaced = boolValue(get("timing", "unpaced"));
     c.inlineExecution = boolValue(get("timing", "inline"));
@@ -547,12 +647,23 @@ std::string LaunchConfig::problem() const
 std::vector<std::string> environment(const LaunchConfig &c, const LaunchPaths &paths)
 {
     std::vector<std::string> env = {
+#if defined(_WIN32)
+        // Windows has no HOME, TMPDIR or DYLD_LIBRARY_PATH: the profile and temp folders are USERPROFILE and
+        // TEMP/TMP, and DLLs are found next to the executable and the bridge. The launcher adds the system
+        // variables a clean environment must keep (SystemRoot, windir, LOCALAPPDATA, ...) when it builds the
+        // child's environment block (src/app/fukami_app_win.cpp).
+        "USERPROFILE=" + paths.home,
+        "PATH=" + paths.path,
+        "TEMP=" + paths.tmpdir,
+        "TMP=" + paths.tmpdir,
+#else
         "HOME=" + paths.home,
         "PATH=" + paths.path,
         "TMPDIR=" + paths.tmpdir,
-        "DYLD_LIBRARY_PATH=" + paths.libraries.string(),
-        "RRV_GATE3_BOUND_WORKLOAD=" + paths.boundWorkload.string(),
-        "RRV_GATE3_MC_ROOT=" + paths.memoryCard.string(),
+        "DYLD_LIBRARY_PATH=" + pathText(paths.libraries),
+#endif
+        "RRV_GATE3_BOUND_WORKLOAD=" + pathText(paths.boundWorkload),
+        "RRV_GATE3_MC_ROOT=" + pathText(paths.memoryCard),
         "RRV_GATE3_MC_PERSISTENT=1",
     };
     // The live pad is admitted through the pad recorder. With a session folder it also logs pad.jsonl; without
@@ -561,7 +672,7 @@ std::vector<std::string> environment(const LaunchConfig &c, const LaunchPaths &p
     if (paths.recordPad)
     {
         if (!paths.session.empty())
-            env.push_back("RRV_GATE3_RECORD_PAD=" + (paths.session / "pad.jsonl").string());
+            env.push_back("RRV_GATE3_RECORD_PAD=" + pathText(paths.session / "pad.jsonl"));
         else
             env.push_back("RRV_GATE3_LIVE_PAD=1");
     }
@@ -594,8 +705,12 @@ std::vector<std::string> environment(const LaunchConfig &c, const LaunchPaths &p
         env.push_back("RRV_PCSX2_GS_ANISO=" + std::to_string(c.aniso));
     if (c.textureFilter != "ps2")
         env.push_back("RRV_PCSX2_GS_TEXTURE_FILTER=" + c.textureFilter);
+    if (c.spriteFilter != "even")
+        env.push_back("RRV_PCSX2_GS_SPRITE_FILTER=" + c.spriteFilter);
     if (!c.mipmap)
         env.push_back("RRV_PCSX2_GS_FULL_HWMIPMAP=0");
+    if (c.backend != "auto")
+        env.push_back("RRV_PCSX2_GS_BACKEND=" + c.backend);
     if (!c.analog)
         env.push_back("RRV_PAD_ANALOG=0");
     if (!c.rumble)
@@ -608,6 +723,8 @@ std::vector<std::string> environment(const LaunchConfig &c, const LaunchPaths &p
         env.push_back("RRV_RR5_FAST_UNPACK=1");
     if (c.nativeCode)
         env.push_back("RRV_RR5_NATIVE_HOT=1");
+    if (c.carDepthFix)
+        env.push_back("RRV_RR5_CAR_ZTIE=16"); // Z units between the layers (src/product/patches.cpp)
     std::string aspect = c.aspect;
     if (!c.ratio.empty() && c.ratio != "4:3")
         env.push_back("RRV_RR5_WIDESCREEN=" + c.ratio);
@@ -634,10 +751,24 @@ std::vector<std::string> environment(const LaunchConfig &c, const LaunchPaths &p
         env.push_back("RRV_PCSX2_GS_INTEGER_SCALING=1");
     if (!c.presentPacing)
         env.push_back("RRV_PCSX2_GS_PRESENT_PACING=0");
+    if (c.refreshRate != "auto")
+        env.push_back("RRV_DISPLAY_REFRESH=" + c.refreshRate);
+    if (c.vrr != "auto")
+        env.push_back(std::string("RRV_PCSX2_GS_VRR=") + (c.vrr == "on" ? "1" : "0"));
+    // The display paces the game, and the audio is resampled to the rate the game then runs at. Windows with
+    // Direct3D 11 only: there the present waits for the display and holds the game back. Vulkan on Windows and the
+    // other platforms have no such wait on every display, and the game would run at the pacer's cap, 0.4 % fast.
+#if defined(_WIN32)
+    if (c.syncToDisplay && !c.unpaced && c.backend != "vulkan")
+    {
+        env.push_back("RRV_DISPLAY_LOCK=1");
+        env.push_back("RRV_AUDIO_RATE_CONTROL=1");
+    }
+#endif
     if (!paths.session.empty())
-        env.push_back("RRV_GATE4_START_CLOCK=" + (paths.session / "start-clock.txt").string());
+        env.push_back("RRV_GATE4_START_CLOCK=" + pathText(paths.session / "start-clock.txt"));
     if (!paths.menuIni.empty())
-        env.push_back("RRV_FUKAMI_INI=" + paths.menuIni.string());
+        env.push_back("RRV_FUKAMI_INI=" + pathText(paths.menuIni));
     for (const auto &[name, val] : c.extraEnv)
         env.push_back(name + "=" + val);
     return env;
@@ -660,7 +791,8 @@ int flagOverride(const std::vector<std::string> &argv, const size_t index, std::
         {"--no-aa1", "rendering", "aa1", "false"},        {"--fxaa", "rendering", "fxaa", "true"},
         {"--no-mipmap", "rendering", "mipmap", "false"},  {"--no-analog", "input", "analog", "false"},
         {"--no-rumble", "input", "rumble", "false"},      {"--no-fast-unpack", "game", "fast_unpack", "false"},
-        {"--no-native-code", "game", "native_code", "false"}, {"--fullscreen", "display", "fullscreen", "true"},
+        {"--no-native-code", "game", "native_code", "false"}, {"--car-depth-fix", "game", "car_depth_fix", "true"},
+        {"--fullscreen", "display", "fullscreen", "true"},
         {"--integer-scaling", "display", "integer_scaling", "true"},
         {"--no-present-pacing", "display", "present_pacing", "false"},
         {"--widescreen", "display", "ratio", "16:9"},     {"--stretched-hud", "display", "hud", "stretch"},
@@ -675,6 +807,7 @@ int flagOverride(const std::vector<std::string> &argv, const size_t index, std::
     static const Valued valued[] = {
         {"--cas", "rendering", "cas"},           {"--aniso", "rendering", "aniso"},
         {"--texture-filter", "rendering", "texture_filter"},
+        {"--sprite-filter", "rendering", "sprite_filter"},
         {"--car-lod", "game", "car_lod"},        {"--draw-distance", "game", "draw_distance"},
         {"--ratio", "display", "ratio"},         {"--hud", "display", "hud"},
         {"--aspect", "display", "aspect"},       {"--window", "display", "window"},
@@ -788,17 +921,17 @@ int launchEnvMain(int argc, char **argv, const std::filesystem::path &appDefault
     }
     auto doc = IniDocument::load(iniPath);
     if (!doc)
-        return fail(iniPath.string() + ": cannot be read");
+        return fail(pathText(iniPath) + ": cannot be read");
     const auto issues = check(*doc, true, developer);
     if (!issues.empty())
-        return fail(iniPath.string() + (issues.front().line > 0 ? ": line " + std::to_string(issues.front().line) : "") +
+        return fail(pathText(iniPath) + (issues.front().line > 0 ? ": line " + std::to_string(issues.front().line) : "") +
                     ": " + issues.front().message);
     if (!defaultsPath.empty())
     {
         // Keys INI does not have take the package defaults (the app launchers do the same).
         const auto defaults = IniDocument::load(defaultsPath);
         if (!defaults)
-            return fail(defaultsPath.string() + ": cannot be read");
+            return fail(pathText(defaultsPath) + ": cannot be read");
         *doc = withDefaults(std::move(*doc), *defaults);
     }
     std::string elfFlag;
@@ -835,7 +968,7 @@ int launchEnvMain(int argc, char **argv, const std::filesystem::path &appDefault
     // Folders and files given on the command line are relative to where it was typed (the runtime is a name).
     for (Override &o : overrides)
         if (o.section == "paths" && o.key != "runtime" && !o.value.empty())
-            o.value = std::filesystem::weakly_canonical(std::filesystem::absolute(o.value)).string();
+            o.value = pathText(std::filesystem::weakly_canonical(std::filesystem::absolute(o.value)));
     const auto problems = applyOverrides(*doc, overrides);
     if (!problems.empty())
         return fail(problems.front());
@@ -849,9 +982,15 @@ int launchEnvMain(int argc, char **argv, const std::filesystem::path &appDefault
     };
     if (wantEnv)
     {
+#if defined(_WIN32)
+        paths.home = getenvOr("USERPROFILE", "");
+        paths.path = getenvOr("PATH", "");
+        paths.tmpdir = getenvOr("TEMP", pathText(std::filesystem::temp_directory_path()).c_str());
+#else
         paths.home = getenvOr("HOME", "");
         paths.path = getenvOr("PATH", "");
         paths.tmpdir = getenvOr("TMPDIR", "/tmp");
+#endif
         if (menuIni)
             paths.menuIni = iniPath;
         for (const std::string &line : environment(config, paths))
@@ -860,9 +999,9 @@ int launchEnvMain(int argc, char **argv, const std::filesystem::path &appDefault
     }
     // Paths in the ini are relative to the repository root.
     const auto resolve = [&](const std::string &p) {
-        if (p.empty() || p.front() == '/' || root.empty())
+        if (p.empty() || std::filesystem::path(p).is_absolute() || root.empty())
             return p;
-        return (root / p).string();
+        return pathText(root / p);
     };
     std::printf("runtime=%s\nworkload=%s\nreplay=%s\nelf=%s\nheadless=%s\nunpaced=%s\ninline=%s\nfrom=%s\n"
                 "render_mode=%s\nscale=%d\ncar_lod=%s\ndraw_distance=%d\ndeveloper=%s\n",

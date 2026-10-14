@@ -1,7 +1,7 @@
 # Fukami
 
-**Fukami** is a native port of **Ridge Racer V** (PlayStation 2, USA, `SLUS-20002`) for macOS (Apple silicon) and
-Linux (Steam Deck) (Windows coming soon), made by static recompilation: the game's MIPS code is translated ahead of time into C++ and
+**Fukami** is a native port of **Ridge Racer V** (PlayStation 2, USA, `SLUS-20002`) for Windows, macOS (Apple silicon) and
+Linux (Steam Deck), made by static recompilation: the game's MIPS code is translated ahead of time into C++ and
 compiled into a normal application, with a PS2 hardware layer (the GS from [PCSX2](https://pcsx2.net/)) underneath.
 It is **not an emulator** and it cannot run any other game.
 
@@ -14,7 +14,7 @@ It is **not an emulator** and it cannot run any other game.
 - Native 60 fps progressive output; the game's logic still sees the exact PS2 timing.
 - Internal resolution up to 8x, PCSX2 anti-aliasing emulation, FXAA, CAS sharpening, anisotropic filtering, mipmaps.
 - **Real widescreen** (16:9, 16:10, 21:9): the game's camera renders a wider view, not a stretched picture. The
-  intro keeps its own letterboxed framing.
+  intro fills the wide screen in its own view.
 - Optional enhancements: more cars at full detail (car LOD), longer draw distance, faster loading.
 - Controller support (SDL game controllers, rumble) and keyboard; in-game settings menu (Esc / F1 / Guide button).
 - Saves to a real memory-card file, safe against power loss.
@@ -25,16 +25,17 @@ It is **not an emulator** and it cannot run any other game.
 
 | | |
 |---|---|
+| **Windows** | Windows 10 or 11, x86-64, a GPU with Direct3D 11 or Vulkan, and the Microsoft Visual C++ Redistributable (x64). |
 | **macOS** | Apple silicon (M1 or later); the minimum macOS version is in each release's notes. |
 | **Steam Deck / SteamOS** | SteamOS 3.7 or later. Other Linux x86-64 distributions are untested. |
 | **Game** | Ridge Racer V (USA) as a **CHD** file (or a `.cue`/`.bin` pair) made from your own disc. About 500 MB of free disk space. |
-
-Windows is planned; see the [roadmap](docs/ROADMAP.md).
 
 ## Install
 
 Download the latest build from the [Releases](https://github.com/danisandoval/fukami/releases) page (and only from there):
 
+- **Windows:** unzip `Fukami-<version>-windows-x86_64.zip` anywhere and run **Fukami.exe**. Settings and saves go to
+  `%LOCALAPPDATA%\Fukami`.
 - **macOS:** unzip `Fukami-<version>-macos-arm64.zip`, move **Fukami** to Applications, then right-click it and choose
   **Open** the first time (the app is not notarised yet).
 - **Steam Deck:** in Desktop Mode, extract `Fukami-<version>-linux-x86_64.tar.gz` and run `./install.sh`; it adds
@@ -57,6 +58,7 @@ game files and will not link to them.
 - Steam Deck: the first 10-15 seconds of a race (the start area) can dip below 60 fps, mostly with scenery draw distance above 0 (the default). The start sections draw many more course strips than the rest of the lap; this is the game's own data, not a setting you can fix.
 - No in-game controller remapping yet; the default layout is in the user guide.
 - Audio is verified by listening and by measured tests, not by a full hardware comparison.
+- Widescreen HUD (`hud=fixed` or `race`): on the RETIRE result screen the RETRY / QUIT GP menu is drawn about 80 px to the left for its first visible frame.
 
 More in the release notes and on the [issue tracker](https://github.com/danisandoval/fukami/issues).
 

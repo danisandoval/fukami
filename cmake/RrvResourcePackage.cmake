@@ -7,8 +7,11 @@ function(_rrv_rp_require_native)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux" AND
        CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "x86_64")
         # Gate 5: native Linux x86-64 (Steam Deck); same fixed-root contract.
+    elseif(WIN32 AND CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows" AND
+           CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64)$" AND CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64)$")
+        # Windows x86-64: the same fixed-root contract through the path-based backend of resource_package_fs.py.
     elseif(NOT APPLE OR NOT CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm64" OR NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" OR (CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_OSX_ARCHITECTURES STREQUAL "arm64"))
-        message(FATAL_ERROR "ADR-0006 resource package requires native macOS arm64 or Linux x86-64")
+        message(FATAL_ERROR "ADR-0006 resource package requires native macOS arm64, Linux x86-64 or Windows x86-64")
     endif()
     if(NOT CMAKE_GENERATOR STREQUAL "Ninja" OR CMAKE_CONFIGURATION_TYPES OR NOT CMAKE_BUILD_TYPE STREQUAL "Release")
         message(FATAL_ERROR "ADR-0006 resource package requires single-config Ninja Release")
@@ -98,7 +101,11 @@ function(rrv_select_gs_resource_package)
     file(WRITE "${_entrypoint}" "import pathlib, sys\nsys.path.insert(0, ${_scripts_literal})\nimport resource_package\nresource_package.ensure_configured(pathlib.Path(__file__).resolve().parents[2], '${_spec_sha256}')\n")
 
     if(NOT TARGET rrv-resource-package-reader)
-        add_library(rrv-resource-package-reader STATIC "${_RRV_RP_SOURCE_ROOT}/src/host/rrv_resource_package.cpp")
+        if(WIN32)
+            add_library(rrv-resource-package-reader STATIC "${_RRV_RP_SOURCE_ROOT}/src/host/rrv_resource_package_win.cpp")
+        else()
+            add_library(rrv-resource-package-reader STATIC "${_RRV_RP_SOURCE_ROOT}/src/host/rrv_resource_package.cpp")
+        endif()
         target_include_directories(rrv-resource-package-reader PUBLIC "${_RRV_RP_SOURCE_ROOT}/src/host")
         target_compile_features(rrv-resource-package-reader PUBLIC cxx_std_17)
         add_library(rrv-resource-package-binding STATIC "${_binding}")

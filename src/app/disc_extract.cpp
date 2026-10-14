@@ -8,8 +8,16 @@
 #if defined(__APPLE__)
 #include <CommonCrypto/CommonDigest.h>
 #endif
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#include <sys/stat.h>
+#else
 #include <fcntl.h>
 #include <unistd.h>
+#endif
+
+#include "../host/rrv_platform.h"
 
 #include <algorithm>
 #include <array>
@@ -83,7 +91,16 @@ public:
 
     Result open(const std::filesystem::path& path)
     {
+#if defined(_WIN32)
+        // libchdr opens a narrow name with fopen (the ANSI code page); hand it a FILE* opened from the wide path so
+        // any Unicode folder name works. chd_open_file takes ownership of the FILE* on success.
+        FILE* file = _wfopen(path.c_str(), L"rb");
+        chd_error e = file ? chd_open_file(file, CHD_OPEN_READ, nullptr, &chd_) : CHDERR_FILE_NOT_FOUND;
+        if (e != CHDERR_NONE && file)
+            std::fclose(file);
+#else
         chd_error e = chd_open(path.c_str(), CHD_OPEN_READ, nullptr, &chd_);
+#endif
         if (e != CHDERR_NONE) {
             chd_ = nullptr;
             if (e == CHDERR_REQUIRES_PARENT)
@@ -214,6 +231,36 @@ private:
     std::vector<std::filesystem::path> paths_;
 };
 
+// Narrow POSIX descriptors on every platform: _wopen/_write/_close on Windows (wide paths, no code-page dependence).
+int openForWrite(const std::filesystem::path& path)
+{
+#if defined(_WIN32)
+    return _wopen(path.c_str(), _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY, _S_IREAD | _S_IWRITE);
+#else
+    return ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+#endif
+}
+
+int closeFd(int fd)
+{
+#if defined(_WIN32)
+    return _close(fd);
+#else
+    return ::close(fd);
+#endif
+}
+
+// One write of at most 1 GiB; returns the byte count or -1 (errno set).
+long long writeSome(int fd, const uint8_t* p, size_t n)
+{
+    n = std::min<size_t>(n, size_t{1} << 30);
+#if defined(_WIN32)
+    return _write(fd, p, static_cast<unsigned>(n));
+#else
+    return ::write(fd, p, n);
+#endif
+}
+
 class Fd {
 public:
     explicit Fd(int fd) : fd_(fd) {}
@@ -226,7 +273,7 @@ public:
     {
         if (fd_ < 0)
             return true;
-        const bool good = ::close(fd_) == 0;
+        const bool good = closeFd(fd_) == 0;
         fd_ = -1;
         return good;
     }
@@ -234,7 +281,15 @@ private:
     int fd_;
 };
 
-Status writeStatus(int err) { return (err == ENOSPC || err == EDQUOT) ? Status::noSpace : Status::writeFailed; }
+Status writeStatus(int err)
+{
+#if defined(EDQUOT)
+    if (err == EDQUOT)
+        return Status::noSpace;
+#endif
+    // The Windows CRT maps ERROR_DISK_FULL and ERROR_HANDLE_DISK_FULL to ENOSPC.
+    return err == ENOSPC ? Status::noSpace : Status::writeFailed;
+}
 
 Result writeError(int err)
 {
@@ -246,7 +301,7 @@ Result writeError(int err)
 bool writeAll(int fd, const uint8_t* p, size_t n, int& err)
 {
     while (n) {
-        const ssize_t w = ::write(fd, p, n);
+        const long long w = writeSome(fd, p, n);
         if (w < 0) {
             if (errno == EINTR)
                 continue;
@@ -520,7 +575,7 @@ Result extractSource(SectorSource& src, const Profile& profile, const std::files
         prog.currentFile = std::string(want.name);
         const fs::path tmp = destDir / (".fukami-" + std::string(want.name) + ".part");
         temps.add(tmp);
-        Fd fd(::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644));
+        Fd fd(openForWrite(tmp));
         if (!fd.valid())
             return writeError(errno);
         if (!report())
@@ -547,7 +602,7 @@ Result extractSource(SectorSource& src, const Profile& profile, const std::files
         }
         if (sha.finishHex() != want.sha256)
             return {Status::damaged, prog.currentFile + " does not match the expected checksum. The disc image is damaged or modified."};
-        if (::fsync(fd.get()) != 0 || !fd.close())
+        if (rrv::platform::FsyncFd(fd.get()) != 0 || !fd.close())
             return writeError(errno);
     }
 
@@ -600,7 +655,11 @@ public:
     Result open(const std::filesystem::path& file, uint32_t stride, uint32_t dataOffset, uint64_t startSector,
                 uint64_t endSector)
     {
+#if defined(_WIN32)
+        f_ = _wfopen(file.c_str(), L"rb"); // the wide name: any character, whatever the code page
+#else
         f_ = std::fopen(file.string().c_str(), "rb");
+#endif
         if (!f_)
             return {Status::cannotOpen, "The disc image cannot be opened."};
         std::error_code ec;
@@ -626,7 +685,14 @@ public:
         if (lba >= sectors_)
             return false;
         const uint64_t at = (start_ + lba) * stride_ + dataOffset_;
-        return fseeko(f_, off_t(at), SEEK_SET) == 0 && std::fread(out, 1, kSectorSize, f_) == kSectorSize;
+#if defined(_WIN32)
+        if (_fseeki64(f_, static_cast<long long>(at), SEEK_SET) != 0) // 64-bit offsets: a disc image passes 2 GiB
+            return false;
+#else
+        if (fseeko(f_, off_t(at), SEEK_SET) != 0)
+            return false;
+#endif
+        return std::fread(out, 1, kSectorSize, f_) == kSectorSize;
     }
 
 private:

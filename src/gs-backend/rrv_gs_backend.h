@@ -27,7 +27,8 @@ namespace rrv::gsbackend
         Software = 1u,
         Metal = 2u,
         Auto = 3u,
-        Vulkan = 4u, // Gate 5 (Linux/Steam Deck)
+        Vulkan = 4u, // Gate 5 (Linux/Steam Deck), Windows
+        Direct3D11 = 5u, // Windows only (rendering.backend = d3d11)
     };
 
     enum class PresentationMode : uint32_t
@@ -43,6 +44,8 @@ namespace rrv::gsbackend
         // Gate 5 (Linux/Steam Deck); same values as the bridge ABI.
         LinuxX11 = 2u,
         LinuxWayland = 3u,
+        // Windows: nativeView = HWND, nativeLayer = HINSTANCE (SDL_SYSWM_WINDOWS).
+        Win32 = 4u,
     };
 
     // Portable native-surface description. Handles are opaque and borrowed:

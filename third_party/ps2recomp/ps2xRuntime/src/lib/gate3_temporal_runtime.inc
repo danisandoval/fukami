@@ -1,7 +1,9 @@
 #include <chrono>
 #include <sstream>
 #include <thread>
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <sys/resource.h>
 #endif
 namespace ps2_syscalls {
@@ -77,8 +79,18 @@ struct Gate4StartClockV1 {
     uint64_t configureNs=0,cutNs=0,dropped=0; bool enabled=false,written=false;
     static uint64_t Now(){return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());}
-    static uint64_t ThreadCpuNow(){timespec t{};
-        return clock_gettime(CLOCK_THREAD_CPUTIME_ID,&t)==0 ? uint64_t(t.tv_sec)*1000000000ull+uint64_t(t.tv_nsec) : 0;}
+    static uint64_t ThreadCpuNow(){
+#if defined(_WIN32)
+        // GetThreadTimes: kernel + user time of this thread, in 100 ns units.
+        FILETIME created,exited,kernel,user;
+        if(!GetThreadTimes(GetCurrentThread(),&created,&exited,&kernel,&user))return 0;
+        const auto units=[](const FILETIME& f){return (uint64_t(f.dwHighDateTime)<<32)|f.dwLowDateTime;};
+        return (units(kernel)+units(user))*100ull;
+#else
+        timespec t{};
+        return clock_gettime(CLOCK_THREAD_CPUTIME_ID,&t)==0 ? uint64_t(t.tv_sec)*1000000000ull+uint64_t(t.tv_nsec) : 0;
+#endif
+    }
     static uint64_t ProcessCpuNow(){
 #if !defined(_WIN32)
         rusage u{};
@@ -86,7 +98,11 @@ struct Gate4StartClockV1 {
         return (uint64_t(u.ru_utime.tv_sec)+uint64_t(u.ru_stime.tv_sec))*1000000000ull+
                (uint64_t(u.ru_utime.tv_usec)+uint64_t(u.ru_stime.tv_usec))*1000ull;
 #else
-        return 0;
+        // GetProcessTimes: kernel + user time of every thread of the process, in 100 ns units.
+        FILETIME created,exited,kernel,user;
+        if(!GetProcessTimes(GetCurrentProcess(),&created,&exited,&kernel,&user))return 0;
+        const auto units=[](const FILETIME& f){return (uint64_t(f.dwHighDateTime)<<32)|f.dwLowDateTime;};
+        return (units(kernel)+units(user))*100ull;
 #endif
     }
     void Record(uint64_t ordinal){if(!enabled)return; const uint64_t t=Now();
@@ -145,11 +161,62 @@ Gate4StartClockV1& gate4StartClockV1(){static Gate4StartClockV1 c;return c;}
 // lets the Deck's CPU clock down from 3.5 to 2.4 GHz, and the same guest work
 // then costs 30-45% more CPU (docs/evidence/GATE5_STEAMDECK_PROFILE_2026-10-02.md).
 // Host-only like the sleep it replaces: the wait ends at the same deadline.
+// Windows: std::this_thread::sleep_until ends on a tick of the system timer, up
+// to a millisecond or more after the deadline (docs/TESTING.md "Windows
+// presentation sync": start intervals jitter by about 1.3 ms), and that error
+// is the jitter of every frame that follows. There the wait is a high-resolution
+// waitable timer to 0.8 ms before the deadline and a busy-wait for the rest, as
+// PCSX2, DuckStation and Dolphin do. RRV_GATE3_REALTIME_PRECISE=0 restores
+// sleep_until (A/B). The deadline is the same either way.
+// Display lock (`[display] sync_to_display`, RRV_DISPLAY_LOCK=1; Windows with
+// Direct3D 11, on by default there, owner 2026-10-13):
+// the game's 60000/1001 starts per second never match a display's 60.00, so on a
+// fixed 60, 120 or 240 Hz display one frame in about a thousand has to stay up a
+// refresh longer, and for seconds around it the frames arrive on the refresh edge
+// (docs/TESTING.md T-WIN-PACING-2). With the lock the display is the clock, as in
+// PCSX2's and DuckStation's "sync to host refresh rate": the pacer's period is
+// 0.4 % shorter (a cap of 60.18 starts per second), the present waits for the
+// display (the bridge keeps display sync and one queued frame), and that wait
+// holds the GS thread, rrv-vu1 and this thread back, so the game runs at the
+// display's rate with a frame always queued. A start may be up to three periods
+// behind its deadline and keep the schedule; what it is late beyond that moves
+// the schedule. So while the display holds the game back the pacer never waits
+// and a frame lost to a slow field is made up at once (measured without that
+// allowance: at 240 Hz the queue stayed empty for seconds after one slow frame,
+// 50 frames on the refresh edge). Three, and the schedule starts three periods
+// behind, because the display only holds the game once the swap chain, the GS
+// thread and rrv-vu1 each have a frame: at 0.4 % that took over 500 starts, and
+// the pacer, judging after 240, let go of a 240 Hz and a 120 Hz display that
+// would have held it. A re-anchor (the boot has hitches of over 100 ms) starts
+// the schedule three periods behind again and the judging anew, and it takes two
+// windows in a row without late starts to let go. Where nothing holds the game back (a
+// variable-refresh display, which shows every frame when it comes; a rate that is
+// no multiple of 60) the pacer must not leave it at the cap: measured on a
+// FreeSync panel, 60.19 starts per second and 15 % of the frames more than 1 ms
+// off the period, against 6 % at the game's own rate. The pacer sees which case
+// it is in by its own waits: held by the display, three starts in four come after
+// their deadline; not held, almost none do. So when fewer than one start in
+// twenty of the last 240 was late it goes back to 60000/1001, and stays there
+// until a re-anchor (a pause, a mode change, a window moved to another display),
+// after which it tries the cap again. The guest sees the same fields
+// and cycle counts; only the host time at which starts are released changes, and
+// the audio follows (RRV_AUDIO_RATE_CONTROL, src/audio/rrv_audio_rate_control.h).
 struct Gate3RealtimePacerV1;
 Gate3RealtimePacerV1& gate3RealtimePacerV1();
 struct Gate3RealtimePacerV1 {
     using Clock=std::chrono::steady_clock;
     static constexpr uint64_t kPeriodNum=1001000000000ull, kPeriodDen=60000ull; // ns = n*num/den
+    static constexpr uint64_t kLockPeriodNum=kPeriodNum/1000*996; // the cap: 0.4 % less
+    static constexpr uint64_t kLockWindow=240; // starts over which "held by the display" is judged
+    static constexpr uint64_t kLockLead=3; // periods a start may be behind its deadline: the frames the pipeline holds
+    uint64_t periodNum=kPeriodNum;
+    bool lock=false,held=false; // held: the cap is in use (the display is taken to hold the game back)
+    uint64_t windowStarts=0,windowLate=0,quietWindows=0,releases=0,tries=0;
+    // Display lock: use the cap (the display holds the game) or the game's own period, from this start on.
+    void Hold(bool on,Clock::time_point now){
+        held=on; periodNum=on?kLockPeriodNum:kPeriodNum; anchor=now; n=0; windowStarts=windowLate=quietWindows=0;
+        if(on){++tries;anchor-=Lead();} else ++releases;
+    }
     bool enabled=false,anchored=false;
     Clock::time_point anchor{};
     Clock::duration catchup{},spin{};
@@ -157,6 +224,24 @@ struct Gate3RealtimePacerV1 {
     // RRV_GATE3_FAST_FORWARD=N: the first N starts run unpaced, then pacing
     // anchors (replay debugging: reach a scene fast, then watch it live).
     uint64_t fastForward=0,starts=0;
+    bool precise=true;
+    void SleepUntil(Clock::time_point due){
+#if defined(_WIN32)
+        // CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (Windows 10 1803); without it, sleep_until.
+        static const HANDLE timer=CreateWaitableTimerExW(nullptr,nullptr,0x00000002,TIMER_ALL_ACCESS);
+        if(precise&&timer){
+            const auto early=std::chrono::microseconds(800);
+            for(auto now=Clock::now();due-now>early;now=Clock::now()){
+                LARGE_INTEGER wait; // relative, in 100 ns units
+                wait.QuadPart=-std::max<long long>(1,std::chrono::duration_cast<std::chrono::nanoseconds>(due-now-early).count()/100);
+                if(!SetWaitableTimer(timer,&wait,0,nullptr,nullptr,FALSE)||WaitForSingleObject(timer,INFINITE)!=WAIT_OBJECT_0)break;
+            }
+            while(Clock::now()<due)_mm_pause();
+            return;
+        }
+#endif
+        std::this_thread::sleep_until(due);
+    }
     void Configure(){
         const char* v=std::getenv("RRV_GATE3_REALTIME");
         *this=Gate3RealtimePacerV1{}; enabled=v&&std::strcmp(v,"1")==0;
@@ -177,17 +262,24 @@ struct Gate3RealtimePacerV1 {
             if(end==c||*end||spinMs<0||spinMs>17)throw std::runtime_error("RRV_GATE3_REALTIME_SPIN_MS must be 0..17");
         }
         spin=std::chrono::milliseconds(spinMs);
+        if(const char* c=std::getenv("RRV_GATE3_REALTIME_PRECISE");c&&c[0]=='0'&&!c[1])precise=false;
+        if(const char* c=std::getenv("RRV_DISPLAY_LOCK");c&&c[0]=='1'&&!c[1]){lock=true;held=true;tries=1;periodNum=kLockPeriodNum;}
         if(!enabled)return;
         std::fprintf(stderr,"[gate3] real-time pacing: 60000/1001 effective starts per host second, catch-up %lld ms, spin %ld ms\n",
             (long long)std::chrono::duration_cast<std::chrono::milliseconds>(catchup).count(),spinMs);
+        if(lock)std::fprintf(stderr,"[gate3] display lock: the pacer caps the game at %.2f starts per host second; the display's sync paces it\n",
+            double(kPeriodDen)*1e9/double(kLockPeriodNum));
         if(fastForward)std::fprintf(stderr,"[gate3] fast-forward: unpaced until start %llu\n",(unsigned long long)fastForward);
         static const bool atExit=[]{std::atexit([]{const auto& p=gate3RealtimePacerV1();
             if(p.enabled)std::fprintf(stderr,"[gate3] pacer waits=%llu late=%llu reanchors=%llu\n",
-                (unsigned long long)p.waits,(unsigned long long)p.late,(unsigned long long)p.reanchors);});return true;}();
+                (unsigned long long)p.waits,(unsigned long long)p.late,(unsigned long long)p.reanchors);
+            if(p.enabled&&p.lock)std::fprintf(stderr,"[gate3] display lock: tried %llu, released %llu (nothing held the game), %s at exit\n",
+                (unsigned long long)p.tries,(unsigned long long)p.releases,p.held?"held by the display":"at the game's own rate");});return true;}();
         (void)atExit;
     }
+    Clock::duration Lead()const{return std::chrono::nanoseconds(static_cast<int64_t>(kLockLead*kLockPeriodNum/kPeriodDen));}
     Clock::time_point Deadline(uint64_t k)const{
-        return anchor+std::chrono::nanoseconds(static_cast<int64_t>(k*kPeriodNum/kPeriodDen));}
+        return anchor+std::chrono::nanoseconds(static_cast<int64_t>(k*periodNum/kPeriodDen));}
     void AtStart(){
         if(!enabled)return;
         if(++starts<=fastForward){
@@ -196,18 +288,33 @@ struct Gate3RealtimePacerV1 {
             return;
         }
         const auto now=Clock::now();
-        if(!anchored){anchored=true;anchor=now;n=0;return;}
+        if(!anchored){anchored=true;anchor=now;n=0;if(held)anchor-=Lead();return;}
         const auto due=Deadline(++n);
         if(now<due){
             ++waits;
-            if(spin==Clock::duration::zero())std::this_thread::sleep_until(due);
+            if(spin==Clock::duration::zero())SleepUntil(due);
             else{
-                if(due-now>spin)std::this_thread::sleep_until(due-spin);
+                if(due-now>spin)SleepUntil(due-spin);
                 while(Clock::now()<due)_mm_pause();
             }
         }
-        else if(now-due>catchup){++reanchors;anchor=now;n=0;}
-        else ++late;
+        else if(now-due>catchup){
+            ++reanchors;anchor=now;n=0;
+            if(lock){if(held){anchor-=Lead();windowStarts=windowLate=quietWindows=0;}else Hold(true,now);}
+        }
+        else{
+            ++late;
+            if(held){
+                ++windowLate;
+                // kLockLead periods of catch-up at most.
+                if(now-due>Lead())anchor+=(now-due)-Lead();
+            }
+        }
+        if(held&&++windowStarts>=kLockWindow){
+            quietWindows=windowLate*20<windowStarts?quietWindows+1:0;
+            windowStarts=windowLate=0;
+            if(quietWindows>=2)Hold(false,Clock::now());
+        }
     }
 };
 Gate3RealtimePacerV1& gate3RealtimePacerV1(){static Gate3RealtimePacerV1 p;return p;}

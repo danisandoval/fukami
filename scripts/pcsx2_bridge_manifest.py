@@ -22,6 +22,11 @@ BRIDGE_SOURCE = ROOT / "tools" / "pcsx2-gs-bridge"
 # Linux (Gate 5): the Vulkan bridge applies one extra patch on top of the locked
 # target patch and has no Metal resources. macOS manifests are unchanged.
 LINUX_BRIDGE = sys.platform.startswith("linux")
+# Windows: the Vulkan bridge applies the Windows stack of the lock ([[pcsx2_bridge_windows_patches]], in order) on top
+# of the locked target patch, has no Metal resources, and is a DLL with the dependency DLLs staged beside it.
+WINDOWS_BRIDGE = sys.platform == "win32"
+HOST_PLATFORM = "windows" if WINDOWS_BRIDGE else "linux" if LINUX_BRIDGE else "macos"
+BRIDGE_LIBRARY_SUFFIX = {"windows": ".dll", "linux": ".so", "macos": ".dylib"}
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -218,6 +223,8 @@ def validate_build_cache(build_dir: pathlib.Path, source: pathlib.Path,
 
 
 def create(args: argparse.Namespace) -> int:
+    if WINDOWS_BRIDGE:
+        return create_windows(args)
     if LINUX_BRIDGE:
         return create_linux(args)
     if args.metal_resource_dir is None or args.metal_verifier_manifest is None:
@@ -399,6 +406,114 @@ def create_linux(args: argparse.Namespace) -> int:
     return 0
 
 
+def parse_patch_pin(value: str) -> tuple[pathlib.Path, str]:
+    path, separator, digest = value.rpartition("=")
+    if not separator or len(digest) != 64:
+        raise RuntimeError(f"expected PATH=SHA256, got: {value}")
+    return pathlib.Path(path).resolve(), digest
+
+
+def library_inventory(directory: pathlib.Path, bridge: pathlib.Path) -> list[dict[str, object]]:
+    """The other DLLs staged beside the bridge: they are loaded into the process with it, so they are identity too."""
+    libraries = [path for path in sorted(directory.glob("*.dll")) if path != bridge]
+    if not libraries:
+        raise RuntimeError(f"no dependency DLLs are staged beside the bridge: {directory}")
+    return [{"path": path.name, "size": path.stat().st_size, "sha256": sha256(path)} for path in libraries]
+
+
+def create_windows(args: argparse.Namespace) -> int:
+    """Windows/Vulkan bridge manifest: schema 2 like Linux, with the ordered Windows patch stack and the inventory of
+    the dependency DLLs beside the bridge DLL. No Metal resources (Vulkan compiles its GLSL from the staged
+    `resources/shaders/vulkan` at run time)."""
+    if args.metal_resource_dir is not None or args.metal_verifier_manifest is not None:
+        raise RuntimeError("Metal resources are not part of a Windows bridge manifest")
+    stack = [parse_patch_pin(value) for value in (args.windows_bridge_patch or [])]
+    library = args.library.resolve()
+    pcsx2_source = args.pcsx2_source.resolve()
+    build_dir = args.build_dir.resolve()
+    runtime_resource_dir = library.parent / "resources"
+    patch = args.bridge_patch.resolve()
+    for required in (library, patch, *(path for path, _ in stack)):
+        if not required.is_file():
+            raise RuntimeError(f"required bridge provenance input is missing: {required}")
+    if git("status", "--porcelain=v1"):
+        raise RuntimeError("RRV source must be clean before creating a bridge manifest")
+    patch_hash = sha256(patch)
+    if patch_hash != args.bridge_patch_sha256:
+        raise RuntimeError("bridge patch does not match its locked SHA-256")
+    for path, expected in stack:
+        if sha256(path) != expected:
+            raise RuntimeError(f"{path.name} does not match its expected SHA-256")
+    source_state = pcsx2_source_state(pcsx2_source, args.pcsx2_commit, patch, [path for path, _ in stack])
+    build = validate_build_cache(build_dir, pcsx2_source, None)
+    runtime_resources = inventory(runtime_resource_dir)
+    runtime_libraries = library_inventory(library.parent, library)
+    sources = [
+        {"path": path.relative_to(ROOT).as_posix(), "sha256": sha256(path)}
+        for path in bridge_source_files()
+    ]
+    library_data = {
+        "path": portable_path(library),
+        "size": library.stat().st_size,
+        "sha256": sha256(library),
+    }
+    patches = [{"path": path.relative_to(ROOT).as_posix(), "sha256": digest} for path, digest in stack]
+    receipt = {
+        "schema": 1,
+        "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "architecture": platform.machine(),
+        "platform": "windows",
+        "rrv_commit": git("rev-parse", "HEAD"),
+        "pcsx2_source": source_state,
+        "bridge_patch_sha256": patch_hash,
+        "windows_bridge_patches": patches,
+        "bridge_source_inventory_sha256": inventory_fingerprint(sources),
+        "build": build,
+        "library": library_data,
+    }
+    stamp_path = build_dir / "RRV_BRIDGE_STAMP.json"
+    stamp_path.write_bytes((json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+    data = {
+        "schema": 2,
+        "platform": "windows",
+        "created_utc": receipt["created_utc"],
+        "architecture": platform.machine(),
+        "rrv_commit": receipt["rrv_commit"],
+        "rrv_source_clean": True,
+        "pcsx2_commit": args.pcsx2_commit,
+        "pcsx2_source": source_state,
+        "bridge_patch": {
+            "path": patch.relative_to(ROOT).as_posix(),
+            "sha256": patch_hash,
+        },
+        "windows_bridge_patches": patches,
+        "bridge_source": {
+            "inventory_sha256": receipt["bridge_source_inventory_sha256"],
+            "files": sources,
+        },
+        "build_receipt": {
+            "path": portable_path(stamp_path),
+            "sha256": sha256(stamp_path),
+            "data": receipt,
+        },
+        "runtime_resources": {
+            "directory": portable_path(runtime_resource_dir),
+            "file_count": len(runtime_resources),
+            "files": runtime_resources,
+        },
+        "runtime_libraries": {
+            "directory": portable_path(library.parent),
+            "file_count": len(runtime_libraries),
+            "files": runtime_libraries,
+        },
+        "library": library_data,
+    }
+    args.output.resolve().write_bytes(
+        (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+    print(f"bridge manifest: {args.output.resolve()}")
+    return 0
+
+
 def verify(args: argparse.Namespace) -> int:
     manifest = args.manifest.resolve()
     data = json.loads(manifest.read_text(encoding="utf-8"))
@@ -416,10 +531,21 @@ def verify(args: argparse.Namespace) -> int:
     if (patch.get("sha256") != args.expected_bridge_patch_sha256 or
             not patch_path.is_file() or sha256(patch_path) != patch.get("sha256")):
         problems.append("bridge patch identity mismatch")
-    linux_manifest = data.get("platform") == "linux"
-    if linux_manifest != LINUX_BRIDGE:
+    manifest_platform = data.get("platform", "macos")
+    linux_manifest = manifest_platform == "linux"
+    windows_manifest = manifest_platform == "windows"
+    if manifest_platform != HOST_PLATFORM:
         problems.append("bridge manifest platform mismatch")
     extra_patches: Optional[list[pathlib.Path]] = None
+    if windows_manifest:
+        recorded = data.get("windows_bridge_patches", [])
+        recorded_paths = [ROOT / entry.get("path", "") for entry in recorded]
+        expected_pins = args.expected_windows_bridge_patch_sha256
+        if (not recorded or any(not path.is_file() or sha256(path) != entry.get("sha256")
+                                for path, entry in zip(recorded_paths, recorded)) or
+                (expected_pins is not None and [entry.get("sha256") for entry in recorded] != expected_pins)):
+            problems.append("Windows bridge patch identity mismatch")
+        extra_patches = recorded_paths
     if linux_manifest:
         linux_patch = data.get("linux_bridge_patch", {})
         linux_patch_path = ROOT / linux_patch.get("path", "")
@@ -454,9 +580,9 @@ def verify(args: argparse.Namespace) -> int:
             data.get("bridge_source", {}).get("inventory_sha256")):
         problems.append("bridge source inventory mismatch")
     resource_dir: Optional[pathlib.Path] = None
-    if linux_manifest:
+    if linux_manifest or windows_manifest:
         if "metal_resources" in data:
-            problems.append("Linux bridge manifest unexpectedly names Metal resources")
+            problems.append("Linux/Windows bridge manifest unexpectedly names Metal resources")
     else:
         metal = data.get("metal_resources", {})
         resource_dir = manifest_path(metal.get("directory", ""))
@@ -490,6 +616,20 @@ def verify(args: argparse.Namespace) -> int:
             if (path.stat().st_size != entry.get("size") or
                     sha256(path) != entry.get("sha256")):
                 problems.append(f"bridge runtime resource mismatch: {path}")
+    if windows_manifest:
+        libraries = data.get("runtime_libraries", {})
+        library_dir = manifest_path(libraries.get("directory", ""))
+        library_entries = libraries.get("files", [])
+        actual_libraries = ({path.name for path in library_dir.glob("*.dll") if path != library_path}
+                            if library_dir.is_dir() else set())
+        if (actual_libraries != {entry.get("path") for entry in library_entries} or
+                len(library_entries) != libraries.get("file_count")):
+            problems.append("bridge dependency DLL inventory mismatch")
+        else:
+            for entry in library_entries:
+                path = library_dir / entry["path"]
+                if path.stat().st_size != entry.get("size") or sha256(path) != entry.get("sha256"):
+                    problems.append(f"bridge dependency DLL mismatch: {path}")
     receipt_wrapper = data.get("build_receipt", {})
     receipt_path = manifest_path(receipt_wrapper.get("path", ""))
     receipt_data = receipt_wrapper.get("data", {})
@@ -514,7 +654,9 @@ def verify(args: argparse.Namespace) -> int:
             receipt_data.get("bridge_source_inventory_sha256") !=
             data.get("bridge_source", {}).get("inventory_sha256") or
             (linux_manifest and receipt_data.get("linux_bridge_patch_sha256") !=
-             data.get("linux_bridge_patch", {}).get("sha256"))):
+             data.get("linux_bridge_patch", {}).get("sha256")) or
+            (windows_manifest and receipt_data.get("windows_bridge_patches") !=
+             data.get("windows_bridge_patches"))):
         problems.append("bridge build receipt does not bind manifest inputs")
     if problems:
         print(*dict.fromkeys(problems), sep="\n", file=sys.stderr)
@@ -537,6 +679,8 @@ def parse_args() -> argparse.Namespace:
     # Linux only: tools/patches/pcsx2-gs-bridge-linux.patch, stacked after the target patch.
     create_parser.add_argument("--linux-bridge-patch", type=pathlib.Path)
     create_parser.add_argument("--linux-bridge-patch-sha256")
+    # Windows only: the ordered stack after the target patch, one PATH=SHA256 per --windows-bridge-patch.
+    create_parser.add_argument("--windows-bridge-patch", action="append")
     create_parser.add_argument("--bridge-patch", type=pathlib.Path, required=True)
     create_parser.add_argument("--bridge-patch-sha256", required=True)
     create_parser.add_argument("--pcsx2-commit", required=True)
@@ -547,6 +691,7 @@ def parse_args() -> argparse.Namespace:
     verify_parser.add_argument("--expected-pcsx2-commit", required=True)
     verify_parser.add_argument("--expected-bridge-patch-sha256", required=True)
     verify_parser.add_argument("--expected-linux-bridge-patch-sha256")
+    verify_parser.add_argument("--expected-windows-bridge-patch-sha256", action="append")
     return parser.parse_args()
 
 

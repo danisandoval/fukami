@@ -21,6 +21,8 @@ import sys
 import tempfile
 import unittest
 
+from cxx_compiler import compile_cpp
+
 ROOT = Path(__file__).resolve().parents[1]
 VU1 = ROOT / "third_party/ps2recomp/ps2xRuntime/src/lib/ps2_vu1.cpp"
 
@@ -91,14 +93,10 @@ static float vuFlushDenorm(float f) { return f; }
 
 class VuEatanTests(unittest.TestCase):
     def build(self, directory: str) -> Path:
-        compiler = shutil.which("c++")
-        self.assertIsNotNone(compiler, "a C++ compiler is required")
         cpp = Path(directory) / "t.cpp"
         exe = Path(directory) / "t"
         cpp.write_text(PRELUDE + helpers() + MAIN)
-        subprocess.run([compiler, "-std=c++20", "-O2", "-ffp-contract=off", str(cpp), "-o", str(exe)],
-                       check=True)
-        return exe
+        return compile_cpp(cpp, exe, fp_contract_off=True)
 
     def test_helpers_match_microvu_bit_for_bit(self):
         with tempfile.TemporaryDirectory(prefix="rrv-vu-eatan-") as directory:

@@ -1,5 +1,7 @@
 #include "rrv_sdl_presentation.h"
 #include "rrv_cursor_idle.h"
+#include "rrv_display_refresh.h"
+#include "rrv_pad_slots.h"
 
 #if defined(RRV_M2P_PAD_OBSERVER)
 #include "rrv_m2p_pad_observer.h"
@@ -25,14 +27,20 @@
 #undef False
 #endif
 
+#if defined(_WIN32)
+#include <psapi.h> // EnumProcessModules
+#include <windows.h>
+#else
 #include <dlfcn.h>
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #else
 #include <link.h> // dl_iterate_phdr (Linux, Gate 5)
 #endif
+#endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -112,6 +120,8 @@ std::optional<M2PInputFixture> m2pInputFixtureFromEnvironment()
     return M2PInputFixture{pressedButtons, std::chrono::milliseconds(delay),
                            std::chrono::milliseconds(hold)};
 }
+
+namespace padslots = rrv::host::padslots;
 
 #if defined(RRV_M2P_PAD_OBSERVER)
 bool isPadKeyboardScancode(SDL_Scancode scancode)
@@ -200,6 +210,28 @@ bool observerEvent(const SDL_Event &event, bool hasSelectedController,
 
 class SdlHostPadBackend final : public HostPadBackend
 {
+    // Everything one PS2 port keeps of its controller (rrv_pad_slots.h).
+    struct Slot
+    {
+        SDL_GameController *controller = nullptr;
+        uint64_t id = 0u; // SDL instance id, the guest-visible deviceId
+        HostPadState cachedState{};
+        HostPadCapabilities cachedCapabilities{};
+        Uint16 rumbleLow = 0u;  // large motor
+        Uint16 rumbleHigh = 0u; // small motor
+        bool rumbleDirty = false;
+        bool rumbleMuted = false;
+        std::chrono::steady_clock::time_point rumbleArmed{};
+        bool emitDisconnectNeutral = false;
+#if defined(RRV_M2P_PAD_OBSERVER)
+        uint64_t disconnectNeutralSampleId = 0u;
+#endif
+        // In-game menu gate (menuGateLocked).
+        bool menuHeld = false;
+        uint32_t menuSuppressedButtons = 0u;
+        bool menuSuppressAxes = false;
+    };
+
 public:
     explicit SdlHostPadBackend(SDL_Window *window,
                                std::shared_ptr<const fukami::menu::Menu> menu = nullptr) :
@@ -238,7 +270,8 @@ public:
     ~SdlHostPadBackend() override
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        closeControllerLocked();
+        for (Slot &slot : m_slots)
+            closeControllerLocked(slot);
 #if defined(RRV_M2P_PAD_OBSERVER)
         // SdlPresentation outlives the scoped PS2Runtime in rrv-product, so
         // no guest reader can still be writing the diagnostic rings here.
@@ -251,7 +284,8 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
 #if defined(RRV_M2P_PAD_OBSERVER)
         uint32_t diagnosticEvent = 0u;
-        if (observerEvent(event, m_controller != nullptr, m_controllerId, &diagnosticEvent))
+        // The observer follows port 0 only (the recorded M2P workload has one pad).
+        if (observerEvent(event, m_slots[0].controller != nullptr, m_slots[0].id, &diagnosticEvent))
         {
             ++m_eventOrdinal;
             m_lastEventType = diagnosticEvent;
@@ -260,25 +294,38 @@ public:
         switch (event.type)
         {
         case SDL_CONTROLLERDEVICEADDED:
+            m_openFailedCount = 0u; // the device set changed: failed opens get one new attempt
             maybeOpenControllerLocked(event.cdevice.which);
             break;
         case SDL_CONTROLLERDEVICEREMOVED:
-            if (m_controller && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(m_controller)) ==
-                                    event.cdevice.which)
+        {
+            m_openFailedCount = 0u;
+            // The slot frees; the other slot keeps its pad (slots do not shift
+            // while a third controller is waiting), except that a lone slot-1
+            // controller is promoted to port 0 by the next refresh()
+            // (promoteLoneControllerLocked, after its rescan has had the chance
+            // to open another controller into the empty slot).
+            const int port = padslots::release(m_slotIds, event.cdevice.which);
+            if (port >= 0)
             {
-                closeControllerLocked();
-                m_emitDisconnectNeutral = true;
+                Slot &slot = m_slots[static_cast<unsigned>(port)];
+                closeControllerLocked(slot);
+                slot.emitDisconnectNeutral = true;
 #if defined(RRV_M2P_PAD_OBSERVER)
-                // Do not mutate m_cachedState. The one-shot neutral response
+                // Do not mutate the cached state. The one-shot neutral response
                 // needs its own receipt while a later pre-refresh snapshot
                 // must still expose the accurately labelled old cache.
-                m_disconnectNeutralSampleId = ++m_sampleId;
-                rrv::m2ppad::hostSample(m_disconnectNeutralSampleId, m_eventOrdinal,
-                                         m_lastEventType, 0u, 0u,
-                                         rrv::m2ppad::SelectedSource::None, 0u, false);
+                if (port == 0)
+                {
+                    slot.disconnectNeutralSampleId = ++m_sampleId;
+                    rrv::m2ppad::hostSample(slot.disconnectNeutralSampleId, m_eventOrdinal,
+                                             m_lastEventType, 0u, 0u,
+                                             rrv::m2ppad::SelectedSource::None, 0u, false);
+                }
 #endif
             }
             break;
+        }
         default:
             break;
         }
@@ -304,34 +351,50 @@ public:
             publishSampleLocked(fixture, {true, false, false}, 0u, 0u,
                                 rrv::m2ppad::SelectedSource::Fixture);
 #else
-            m_cachedState = fixture;
-            m_cachedCapabilities = {true, false, false};
+            m_slots[0].cachedState = fixture;
+            m_slots[0].cachedCapabilities = {true, false, false};
 #endif
             return;
         }
-        if (!m_controller)
+        expireOpenFailedLocked();
+        if (padslots::anyEmpty(m_slotIds))
         {
             const int count = SDL_NumJoysticks();
-            for (int index = 0; index < count && !m_controller; ++index)
+            for (int index = 0; index < count && padslots::anyEmpty(m_slotIds); ++index)
                 maybeOpenControllerLocked(index);
         }
-        applyRumbleLocked();
+        promoteLoneControllerLocked();
+        for (Slot &slot : m_slots)
+            applyRumbleLocked(slot);
+
+        // Port 1 is a controller or disconnected: the keyboard never feeds it.
+        Slot &second = m_slots[1];
+        second.cachedState = second.controller
+                                 ? menuGateLocked(second, controllerStateLocked(second))
+                                 : HostPadState{};
+        second.cachedCapabilities = second.controller ? controllerCapabilitiesLocked(second)
+                                                      : HostPadCapabilities{};
+
+        // Port 0: its controller, else the keyboard.
+        Slot &first = m_slots[0];
 
         const Uint8 *keys = SDL_GetKeyboardState(nullptr);
         m_keyboardButtons = 0u;
         if (!keys || !m_window)
         {
 #if defined(RRV_M2P_PAD_OBSERVER)
-            const HostPadState controller = m_controller ? controllerStateLocked() : HostPadState{};
-            publishSampleLocked(menuGateLocked(controller), m_controller ? controllerCapabilitiesLocked()
+            const HostPadState controller = first.controller ? controllerStateLocked(first) : HostPadState{};
+            publishSampleLocked(menuGateLocked(first, controller), first.controller
+                                                          ? controllerCapabilitiesLocked(first)
                                                           : HostPadCapabilities{}, 0u,
                                 controller.pressedButtons,
-                                m_controller ? rrv::m2ppad::SelectedSource::Controller
-                                             : rrv::m2ppad::SelectedSource::None);
+                                first.controller ? rrv::m2ppad::SelectedSource::Controller
+                                                 : rrv::m2ppad::SelectedSource::None);
 #else
-            m_cachedState = menuGateLocked(m_controller ? controllerStateLocked() : HostPadState{});
-            m_cachedCapabilities = m_controller ? controllerCapabilitiesLocked()
-                                             : HostPadCapabilities{};
+            first.cachedState = menuGateLocked(first, first.controller ? controllerStateLocked(first)
+                                                                       : HostPadState{});
+            first.cachedCapabilities = first.controller ? controllerCapabilitiesLocked(first)
+                                                        : HostPadCapabilities{};
 #endif
             return;
         }
@@ -359,16 +422,16 @@ public:
         set(HostPadButtonStart, SDL_SCANCODE_RETURN);
         set(HostPadButtonSelect, SDL_SCANCODE_TAB);
 
-        if (m_controller)
+        if (first.controller)
         {
 #if defined(RRV_M2P_PAD_OBSERVER)
-            const HostPadState controller = controllerStateLocked();
-            publishSampleLocked(menuGateLocked(controller), controllerCapabilitiesLocked(), m_keyboardButtons,
-                                controller.pressedButtons,
+            const HostPadState controller = controllerStateLocked(first);
+            publishSampleLocked(menuGateLocked(first, controller), controllerCapabilitiesLocked(first),
+                                m_keyboardButtons, controller.pressedButtons,
                                 rrv::m2ppad::SelectedSource::Controller);
 #else
-            m_cachedState = menuGateLocked(controllerStateLocked());
-            m_cachedCapabilities = controllerCapabilitiesLocked();
+            first.cachedState = menuGateLocked(first, controllerStateLocked(first));
+            first.cachedCapabilities = controllerCapabilitiesLocked(first);
 #endif
             return;
         }
@@ -379,38 +442,39 @@ public:
         keyboard.leftTrigger = (m_keyboardButtons & HostPadButtonL2) ? 1.0f : 0.0f;
         keyboard.rightTrigger = (m_keyboardButtons & HostPadButtonR2) ? 1.0f : 0.0f;
 #if defined(RRV_M2P_PAD_OBSERVER)
-        publishSampleLocked(menuGateLocked(keyboard), {m_analog, false, false}, m_keyboardButtons, 0u,
+        publishSampleLocked(menuGateLocked(first, keyboard), {m_analog, false, false}, m_keyboardButtons, 0u,
                             rrv::m2ppad::SelectedSource::Keyboard);
 #else
-        m_cachedState = menuGateLocked(keyboard);
-        m_cachedCapabilities = {m_analog, false, false};
+        first.cachedState = menuGateLocked(first, keyboard);
+        first.cachedCapabilities = {m_analog, false, false};
 #endif
     }
 
     HostPadState snapshot(unsigned port) override
     {
-        if (port != 0u)
+        if (port >= padslots::kPorts)
             return {};
         std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_emitDisconnectNeutral)
+        Slot &slot = m_slots[port];
+        if (slot.emitDisconnectNeutral)
         {
-            m_emitDisconnectNeutral = false;
+            slot.emitDisconnectNeutral = false;
             HostPadState neutral{};
 #if defined(RRV_M2P_PAD_OBSERVER)
-            neutral.diagnosticSampleId = m_disconnectNeutralSampleId;
-            m_disconnectNeutralSampleId = 0u;
+            neutral.diagnosticSampleId = slot.disconnectNeutralSampleId;
+            slot.disconnectNeutralSampleId = 0u;
 #endif
             return neutral;
         }
-        return m_cachedState;
+        return slot.cachedState;
     }
 
     HostPadCapabilities capabilities(unsigned port) const override
     {
-        if (port != 0u)
+        if (port >= padslots::kPorts)
             return {};
         std::lock_guard<std::mutex> lock(m_mutex);
-        return m_cachedCapabilities;
+        return m_slots[port].cachedCapabilities;
     }
 
     // Called from the guest pad thread (libpad scePadSetActDirect via
@@ -418,20 +482,21 @@ public:
     // request is cached and refresh() applies it.
     void setRumble(unsigned port, HostPadRumble rumble) override
     {
-        if (port != 0u || !m_rumble)
+        if (port >= padslots::kPorts || !m_rumble)
             return;
         std::lock_guard<std::mutex> lock(m_mutex);
+        Slot &slot = m_slots[port];
         const auto level = [](float value) {
             return static_cast<Uint16>(std::lround(std::clamp(value, 0.0f, 1.0f) * 65535.0f));
         };
         const Uint16 low = level(rumble.lowFrequency);
         const Uint16 high = level(rumble.highFrequency);
-        if (low != m_rumbleLow || high != m_rumbleHigh)
+        if (low != slot.rumbleLow || high != slot.rumbleHigh)
         {
-            logRumble("guest", low, high);
-            m_rumbleLow = low;
-            m_rumbleHigh = high;
-            m_rumbleDirty = true;
+            logRumble(port, "guest", low, high);
+            slot.rumbleLow = low;
+            slot.rumbleHigh = high;
+            slot.rumbleDirty = true;
         }
     }
 
@@ -439,6 +504,7 @@ public:
 
 private:
 #if defined(RRV_M2P_PAD_OBSERVER)
+    // The observer records port 0 only (see handleEvent); port 1 is not sampled.
     void publishSampleLocked(HostPadState state, HostPadCapabilities capabilities,
                              uint32_t keyboardButtons, uint32_t controllerButtons,
                              rrv::m2ppad::SelectedSource selected)
@@ -469,8 +535,8 @@ private:
         // Presentation polls continue to refresh axes and capabilities on
         // every iteration. Only the receipt ID is transition-driven.
         state.diagnosticSampleId = m_sampleId;
-        m_cachedState = state;
-        m_cachedCapabilities = capabilities;
+        m_slots[0].cachedState = state;
+        m_slots[0].cachedCapabilities = capabilities;
     }
 #endif
 
@@ -482,38 +548,152 @@ private:
         return name && lower(name).find(m_deviceFilter) != std::string::npos;
     }
 
+    // Called from refresh() after the rescan (owner, 2026-10-11). If port 0 is empty,
+    // port 1 holds a controller and no unassigned game controller (one that passes
+    // SDL_IsGameController and the RRV_PAD_DEVICE filter) is enumerated, that
+    // controller becomes port 0: a lone pad is always player 1, e.g. one physical
+    // pad seen as a Bluetooth and a USB device. A device whose open failed (the
+    // failed list) does not count as "another controller": the rescan just tried
+    // it and cannot use it, so waiting for it would leave the only working pad on
+    // port 1 (the first version ran this on the removal event, after the failed
+    // list had been cleared, so such a device always blocked the promotion, and
+    // the promotion never ran again). Otherwise the rescan has already opened the
+    // other controller into the empty slot 0 and port 1 keeps its pad. Port 0 has
+    // queued its one-shot disconnect neutral sample at the removal (it reports
+    // that first, then the promoted controller); port 1 now reports one neutral
+    // disconnected sample and then {}. Rumble levels belong to the PS2 port (the
+    // guest sets them per port), so port 1's level is not carried over: the
+    // motors of the moved controller stop and port 0's own level re-arms. The
+    // in-game-menu gate state (menuHeld, suppressed buttons and axes) belongs to
+    // the physical controller and moves with it: a button still held from closing
+    // the menu must not become a press on port 0.
+    void promoteLoneControllerLocked()
+    {
+        if (m_slotIds[0] != padslots::kEmpty || m_slotIds[1] == padslots::kEmpty)
+            return;
+        const int count = SDL_NumJoysticks();
+        for (int index = 0; index < count; ++index)
+        {
+            const std::int64_t instanceId = SDL_JoystickGetDeviceInstanceID(index);
+            if (padslots::slotOf(m_slotIds, instanceId) >= 0 || openFailedLocked(instanceId))
+                continue;
+            if (SDL_IsGameController(index) && matchesDeviceFilterLocked(index))
+                return; // another controller will take port 0
+        }
+        if (!padslots::promote(m_slotIds))
+            return;
+        Slot &to = m_slots[0];
+        Slot &from = m_slots[1];
+        if (from.controller && (from.rumbleLow != 0u || from.rumbleHigh != 0u))
+            SDL_GameControllerRumble(from.controller, 0u, 0u, 0u);
+        to.controller = from.controller;
+        to.id = from.id;
+        to.rumbleMuted = false;
+        to.rumbleDirty = to.rumbleLow != 0u || to.rumbleHigh != 0u; // port 0's level re-arms
+        to.menuHeld = from.menuHeld;
+        to.menuSuppressedButtons = from.menuSuppressedButtons;
+        to.menuSuppressAxes = from.menuSuppressAxes;
+        from.controller = nullptr;
+        from.id = 0u;
+        from.rumbleDirty = from.rumbleLow != 0u || from.rumbleHigh != 0u;
+        from.menuHeld = false;
+        from.menuSuppressedButtons = 0u;
+        from.menuSuppressAxes = false;
+        from.emitDisconnectNeutral = true;
+        const char *name = to.controller ? SDL_GameControllerName(to.controller) : nullptr;
+        std::fprintf(stderr, "[sdl-pad] port=0 controller=%s (was port 1) analog=%d rumble=%d\n",
+                     name ? name : "<unnamed>", m_analog ? 1 : 0,
+                     controllerCapabilitiesLocked(to).rumble ? 1 : 0);
+    }
+
+    // A failed open is forgotten kOpenRetryPeriod after it happened (steady clock,
+    // checked in refresh()), so a transient SDL_GameControllerOpen failure at
+    // hot-plug does not leave the pad dead until another add/remove event. The
+    // retry, and its "cannot open" log line, happen at most once per period per
+    // device.
+    void expireOpenFailedLocked()
+    {
+        if (m_openFailedCount == 0u)
+            return;
+        const auto now = std::chrono::steady_clock::now();
+        unsigned kept = 0u;
+        for (unsigned i = 0; i < m_openFailedCount; ++i)
+        {
+            if (now - m_openFailedAt[i] >= kOpenRetryPeriod)
+                continue;
+            m_openFailed[kept] = m_openFailed[i];
+            m_openFailedAt[kept] = m_openFailedAt[i];
+            ++kept;
+        }
+        m_openFailedCount = kept;
+    }
+
+    bool openFailedLocked(std::int64_t instanceId) const
+    {
+        for (unsigned i = 0; i < m_openFailedCount; ++i)
+            if (m_openFailed[i] == instanceId)
+                return true;
+        return false;
+    }
+
     void maybeOpenControllerLocked(int deviceIndex)
     {
-        if (m_controller || !SDL_IsGameController(deviceIndex) ||
+        if (!padslots::anyEmpty(m_slotIds) || !SDL_IsGameController(deviceIndex) ||
             !matchesDeviceFilterLocked(deviceIndex))
             return;
-        m_controller = SDL_GameControllerOpen(deviceIndex);
-        if (!m_controller)
+        // A device already in a slot is skipped (the rescan visits every device).
+        const std::int64_t instanceId = SDL_JoystickGetDeviceInstanceID(deviceIndex);
+        if (padslots::slotOf(m_slotIds, instanceId) >= 0)
+            return;
+        // A device whose open failed is not retried until a controller is added
+        // or removed, or kOpenRetryPeriod has passed (expireOpenFailedLocked).
+        // refresh() rescans on every call while a slot is empty, so without
+        // this a controller that SDL lists but cannot open logged "cannot open"
+        // on every refresh. One attempt per event or period is enough: a
+        // permanent failure only logs once per period, a transient one (seen at
+        // hot-plug) is retried.
+        if (openFailedLocked(instanceId))
+            return;
+        SDL_GameController *controller = SDL_GameControllerOpen(deviceIndex);
+        if (!controller)
         {
             std::fprintf(stderr, "[sdl-pad] cannot open controller %d: %s\n", deviceIndex,
                          SDL_GetError());
+            if (m_openFailedCount < m_openFailed.size())
+            {
+                m_openFailed[m_openFailedCount] = instanceId;
+                m_openFailedAt[m_openFailedCount++] = std::chrono::steady_clock::now();
+            }
             return;
         }
-        m_controllerId = static_cast<uint64_t>(
-            SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(m_controller)));
+        const std::int64_t openedId = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller));
+        const int port = padslots::assign(m_slotIds, openedId);
+        if (port < 0)
         {
-            const char *name = SDL_GameControllerName(m_controller);
-            std::fprintf(stderr, "[sdl-pad] controller=%s analog=%d rumble=%d\n", name ? name : "<unnamed>",
-                         m_analog ? 1 : 0, controllerCapabilitiesLocked().rumble ? 1 : 0);
+            SDL_GameControllerClose(controller);
+            return;
+        }
+        Slot &slot = m_slots[static_cast<unsigned>(port)];
+        slot.controller = controller;
+        slot.id = static_cast<uint64_t>(openedId);
+        {
+            const char *name = SDL_GameControllerName(slot.controller);
+            std::fprintf(stderr, "[sdl-pad] port=%d controller=%s analog=%d rumble=%d\n", port,
+                         name ? name : "<unnamed>", m_analog ? 1 : 0,
+                         controllerCapabilitiesLocked(slot).rumble ? 1 : 0);
         }
         if (diagnosticsEnabled())
         {
-            const char *name = SDL_GameControllerName(m_controller);
-            std::fprintf(stderr, "[sdl-pad] selected id=%llu name=%s\n",
-                         static_cast<unsigned long long>(m_controllerId),
-                         name ? name : "<unnamed>");
+            const char *name = SDL_GameControllerName(slot.controller);
+            std::fprintf(stderr, "[sdl-pad] selected port=%d id=%llu name=%s\n", port,
+                         static_cast<unsigned long long>(slot.id), name ? name : "<unnamed>");
         }
     }
 
-    HostPadCapabilities controllerCapabilitiesLocked() const
+    HostPadCapabilities controllerCapabilitiesLocked(const Slot &slot) const
     {
         return {m_analog, m_analog,
-                m_rumble && m_controller && SDL_GameControllerHasRumble(m_controller) == SDL_TRUE};
+                m_rumble && slot.controller && SDL_GameControllerHasRumble(slot.controller) == SDL_TRUE};
     }
 
     // The guest holds a motor level until it writes a new one; SDL rumble
@@ -521,37 +701,38 @@ private:
     // PCSX2 (SDLInputSource::SendRumbleUpdate): the longest SDL duration and a
     // new call only on a change or near expiry. Re-sending the same level every
     // 500 ms restarted the effect on the Steam Deck, so one event pulsed.
-    void applyRumbleLocked()
+    void applyRumbleLocked(Slot &slot)
     {
-        if (!m_controller || !m_rumble)
+        if (!slot.controller || !m_rumble)
             return;
         // Motors stop while the in-game menu is open and resume on close.
         if (m_menu && m_menu->isOpen())
         {
-            if (!m_rumbleMuted)
-                SDL_GameControllerRumble(m_controller, 0u, 0u, 0u);
-            m_rumbleMuted = true;
+            if (!slot.rumbleMuted)
+                SDL_GameControllerRumble(slot.controller, 0u, 0u, 0u);
+            slot.rumbleMuted = true;
             return;
         }
-        if (m_rumbleMuted)
+        if (slot.rumbleMuted)
         {
-            m_rumbleMuted = false;
-            m_rumbleDirty = true;
+            slot.rumbleMuted = false;
+            slot.rumbleDirty = true;
         }
         const auto now = std::chrono::steady_clock::now();
-        const bool running = m_rumbleLow != 0u || m_rumbleHigh != 0u;
+        const bool running = slot.rumbleLow != 0u || slot.rumbleHigh != 0u;
         constexpr Uint32 kRumbleDurationMs = 65535u; // SDL_MAX_RUMBLE_DURATION_MS
-        if (!m_rumbleDirty && !(running && now - m_rumbleArmed >= std::chrono::milliseconds(60000)))
+        if (!slot.rumbleDirty && !(running && now - slot.rumbleArmed >= std::chrono::milliseconds(60000)))
             return;
-        logRumble(m_rumbleDirty ? "sdl" : "sdl-rearm", m_rumbleLow, m_rumbleHigh);
-        SDL_GameControllerRumble(m_controller, m_rumbleLow, m_rumbleHigh, running ? kRumbleDurationMs : 0u);
-        m_rumbleArmed = now;
-        m_rumbleDirty = false;
+        logRumble(static_cast<unsigned>(&slot - m_slots.data()), slot.rumbleDirty ? "sdl" : "sdl-rearm",
+                  slot.rumbleLow, slot.rumbleHigh);
+        SDL_GameControllerRumble(slot.controller, slot.rumbleLow, slot.rumbleHigh, running ? kRumbleDurationMs : 0u);
+        slot.rumbleArmed = now;
+        slot.rumbleDirty = false;
     }
 
     // Rumble changes are rare, so each one is logged (capped): the steady-clock
     // nanoseconds match start-clock.txt, which maps a rumble to its start.
-    static void logRumble(const char *what, Uint16 low, Uint16 high)
+    static void logRumble(unsigned port, const char *what, Uint16 low, Uint16 high)
     {
         static unsigned logged = 0;
         if (logged >= 4000u)
@@ -559,28 +740,29 @@ private:
         ++logged;
         const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        std::fprintf(stderr, "[rumble] %s ns=%lld large=%u small=%u\n", what, static_cast<long long>(ns),
-                     static_cast<unsigned>(low), static_cast<unsigned>(high));
+        // Port 0 keeps the line it always had; port 1 adds a suffix.
+        std::fprintf(stderr, "[rumble] %s ns=%lld large=%u small=%u%s\n", what, static_cast<long long>(ns),
+                     static_cast<unsigned>(low), static_cast<unsigned>(high), port != 0u ? " port=1" : "");
     }
 
-    void closeControllerLocked()
+    void closeControllerLocked(Slot &slot)
     {
-        if (m_controller && (m_rumbleLow != 0u || m_rumbleHigh != 0u))
-            SDL_GameControllerRumble(m_controller, 0u, 0u, 0u);
-        m_rumbleDirty = m_rumbleLow != 0u || m_rumbleHigh != 0u; // re-arm on a new controller
-        if (m_controller)
-            SDL_GameControllerClose(m_controller);
-        m_controller = nullptr;
-        m_controllerId = 0u;
+        if (slot.controller && (slot.rumbleLow != 0u || slot.rumbleHigh != 0u))
+            SDL_GameControllerRumble(slot.controller, 0u, 0u, 0u);
+        slot.rumbleDirty = slot.rumbleLow != 0u || slot.rumbleHigh != 0u; // re-arm on a new controller
+        if (slot.controller)
+            SDL_GameControllerClose(slot.controller);
+        slot.controller = nullptr;
+        slot.id = 0u;
     }
 
-    HostPadState controllerStateLocked() const
+    HostPadState controllerStateLocked(const Slot &slot) const
     {
         HostPadState state{};
         state.connected = true;
-        state.deviceId = m_controllerId;
+        state.deviceId = slot.id;
         const auto pressed = [&](HostPadButton host, SDL_GameControllerButton button) {
-            if (SDL_GameControllerGetButton(m_controller, button) != 0)
+            if (SDL_GameControllerGetButton(slot.controller, button) != 0)
                 state.pressedButtons |= static_cast<uint32_t>(host);
         };
         pressed(HostPadButtonUp, SDL_CONTROLLER_BUTTON_DPAD_UP);
@@ -598,7 +780,7 @@ private:
         pressed(HostPadButtonL3, SDL_CONTROLLER_BUTTON_LEFTSTICK);
         pressed(HostPadButtonR3, SDL_CONTROLLER_BUTTON_RIGHTSTICK);
         const auto axis = [&](SDL_GameControllerAxis value) {
-            return std::clamp(static_cast<float>(SDL_GameControllerGetAxis(m_controller, value)) / 32767.0f,
+            return std::clamp(static_cast<float>(SDL_GameControllerGetAxis(slot.controller, value)) / 32767.0f,
                               -1.0f, 1.0f);
         };
         state.leftX = axis(SDL_CONTROLLER_AXIS_LEFTX);
@@ -617,35 +799,35 @@ private:
     // still held from the menu (Esc, A/Cross, a pushed stick) stay hidden
     // until released, so closing the menu never presses a game button. With
     // the menu never opened this returns `state` unchanged.
-    HostPadState menuGateLocked(HostPadState state)
+    HostPadState menuGateLocked(Slot &slot, HostPadState state)
     {
         if (m_menu && m_menu->isOpen())
         {
-            m_menuHeld = true;
+            slot.menuHeld = true;
             HostPadState neutral{};
             neutral.connected = state.connected;
             neutral.deviceId = state.deviceId;
             return neutral;
         }
-        if (m_menuHeld)
+        if (slot.menuHeld)
         {
-            m_menuHeld = false;
-            m_menuSuppressedButtons = state.pressedButtons;
-            m_menuSuppressAxes = true;
+            slot.menuHeld = false;
+            slot.menuSuppressedButtons = state.pressedButtons;
+            slot.menuSuppressAxes = true;
         }
-        if (m_menuSuppressedButtons != 0u)
+        if (slot.menuSuppressedButtons != 0u)
         {
-            m_menuSuppressedButtons &= state.pressedButtons;
-            state.pressedButtons &= ~m_menuSuppressedButtons;
+            slot.menuSuppressedButtons &= state.pressedButtons;
+            state.pressedButtons &= ~slot.menuSuppressedButtons;
         }
-        if (m_menuSuppressAxes)
+        if (slot.menuSuppressAxes)
         {
             constexpr float kRest = 0.25f;
             const bool atRest = std::fabs(state.leftX) < kRest && std::fabs(state.leftY) < kRest &&
                                 std::fabs(state.rightX) < kRest && std::fabs(state.rightY) < kRest &&
                                 state.leftTrigger < kRest && state.rightTrigger < kRest;
             if (atRest)
-                m_menuSuppressAxes = false;
+                slot.menuSuppressAxes = false;
             else
             {
                 state.leftX = state.leftY = state.rightX = state.rightY = 0.0f;
@@ -657,19 +839,22 @@ private:
 
     SDL_Window *m_window = nullptr; // owned by SdlPresentation
     const std::shared_ptr<const fukami::menu::Menu> m_menu;
-    bool m_menuHeld = false;
-    uint32_t m_menuSuppressedButtons = 0u;
-    bool m_menuSuppressAxes = false;
-    bool m_rumbleMuted = false;
     mutable std::mutex m_mutex;
-    SDL_GameController *m_controller = nullptr;
-    uint64_t m_controllerId = 0u;
+    // Port 0 and port 1: m_slotIds (rrv_pad_slots.h) says which controller holds which.
+    std::array<Slot, padslots::kPorts> m_slots{};
+    padslots::SlotIds m_slotIds = padslots::emptySlots();
+    // SDL instance ids whose SDL_GameControllerOpen failed (cleared on every
+    // controller add/remove event, and each entry after kOpenRetryPeriod; a full
+    // list just retries the extra ones).
+    static constexpr std::chrono::seconds kOpenRetryPeriod{5};
+    std::array<std::int64_t, 8> m_openFailed{};
+    std::array<std::chrono::steady_clock::time_point, 8> m_openFailedAt{};
+    unsigned m_openFailedCount = 0u;
     uint32_t m_keyboardButtons = 0u;
 #if defined(RRV_M2P_PAD_OBSERVER)
     uint64_t m_sampleId = 0u;
     uint64_t m_eventOrdinal = 0u;
     uint32_t m_lastEventType = 0u;
-    uint64_t m_disconnectNeutralSampleId = 0u;
     bool m_hasRecordedHostState = false;
     uint64_t m_lastRecordedEventOrdinal = 0u;
     uint32_t m_lastRecordedEventType = 0u;
@@ -679,15 +864,8 @@ private:
     uint32_t m_lastRecordedMergedButtons = 0u;
     bool m_lastRecordedConnected = false;
 #endif
-    HostPadState m_cachedState{};
-    HostPadCapabilities m_cachedCapabilities{};
     bool m_analog = true;
     bool m_rumble = true;
-    Uint16 m_rumbleLow = 0u;  // large motor
-    Uint16 m_rumbleHigh = 0u; // small motor
-    bool m_rumbleDirty = false;
-    std::chrono::steady_clock::time_point m_rumbleArmed{};
-    bool m_emitDisconnectNeutral = false;
     std::string m_deviceFilter;
     const std::optional<M2PInputFixture> m_inputFixture;
     const std::chrono::steady_clock::time_point m_inputFixtureStart;
@@ -718,12 +896,28 @@ public:
     void (*setOverlay)(RrvPcsx2GsBridgeOverlayFrame, void *) = nullptr;
     bool overlayUnavailable = false;
     unsigned overlayProbe = 0u;
-    bool stickLeft = false, stickRight = false, stickUp = false, stickDown = false;
+    // Left-stick-as-d-pad hysteresis of the in-game menu, per controller: with
+    // two pads open, a resting pad's axis event must not release the direction
+    // the other pad holds (that made the menu step repeatedly). At most two
+    // controllers (the two PS2 ports) are tracked; state is dropped on removal.
+    struct StickHold
+    {
+        SDL_JoystickID id = -1;
+        bool left = false, right = false, up = false, down = false;
+    };
+    std::array<StickHold, 2> sticks{};
+    StickHold *stickFor(SDL_JoystickID id);
+    void releaseSticks(StickHold &hold);
     bool lastFullscreen = false;
     bool restartAfterClose = false;
     // The pointer is hidden in full screen while the mouse is still (rrv_cursor_idle.h).
     rrv::host::CursorIdle cursorIdle;
     bool cursorHidden = false;
+    // Windows: the display the full-screen window switched to a multiple of 60 Hz (rrv_display_refresh.h); empty
+    // when it did not. Main thread.
+    std::wstring refreshDevice;
+    void applyDisplayRefresh(bool fullscreen, void *monitorHandle = nullptr);
+    void requestFullscreen(bool fullscreen);
 
     // Main thread (pumpEvents).
     void routeMenuEvent(const SDL_Event &event);
@@ -822,6 +1016,7 @@ const ObjcFullscreen &objcFullscreen()
 {
     static const ObjcFullscreen runtime = [] {
         ObjcFullscreen value;
+#if defined(__APPLE__)
         // libobjc is always loaded under SDL's Cocoa video backend.
         value.msgSend = dlsym(RTLD_DEFAULT, "objc_msgSend");
         const auto registerSel = reinterpret_cast<ObjcSelRegister>(dlsym(RTLD_DEFAULT, "sel_registerName"));
@@ -830,6 +1025,7 @@ const ObjcFullscreen &objcFullscreen()
             value.styleMask = registerSel("styleMask");
             value.toggleFullScreen = registerSel("toggleFullScreen:");
         }
+#endif
         return value;
     }();
     return runtime;
@@ -893,6 +1089,8 @@ void setWindowFullscreen(SDL_Window *window, bool fullscreen)
 // Returns 1 (found), 0 (bridge not loaded yet) or -1 (bridge without overlay).
 #if defined(__APPLE__)
 constexpr std::string_view kBridgeImageSuffix = "/librrv-pcsx2-gs-bridge.dylib";
+#elif defined(_WIN32)
+constexpr std::string_view kBridgeImageSuffix = "\\rrv-pcsx2-gs-bridge.dll";
 #else
 constexpr std::string_view kBridgeImageSuffix = "/librrv-pcsx2-gs-bridge.so";
 #endif
@@ -902,7 +1100,27 @@ constexpr std::string_view kBridgeImageSuffix = "/librrv-pcsx2-gs-bridge.so";
 std::vector<std::string> loadedImageNames()
 {
     std::vector<std::string> names;
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    HMODULE modules[1024];
+    DWORD needed = 0;
+    if (EnumProcessModules(GetCurrentProcess(), modules, sizeof modules, &needed))
+    {
+        const size_t count = std::min<size_t>(needed / sizeof(HMODULE), sizeof modules / sizeof(HMODULE));
+        for (size_t index = 0; index < count; ++index)
+        {
+            wchar_t path[32768];
+            const DWORD length = GetModuleFileNameW(modules[index], path, static_cast<DWORD>(sizeof path / sizeof(wchar_t)));
+            if (length == 0 || length >= sizeof path / sizeof(wchar_t))
+                continue;
+            const int bytes = WideCharToMultiByte(CP_UTF8, 0, path, static_cast<int>(length), nullptr, 0, nullptr, nullptr);
+            if (bytes <= 0)
+                continue;
+            std::string utf8(static_cast<size_t>(bytes), '\0');
+            WideCharToMultiByte(CP_UTF8, 0, path, static_cast<int>(length), utf8.data(), bytes, nullptr, nullptr);
+            names.push_back(std::move(utf8));
+        }
+    }
+#elif defined(__APPLE__)
     for (uint32_t index = 0, count = _dyld_image_count(); index < count; ++index)
         if (const char *name = _dyld_get_image_name(index))
             names.emplace_back(name);
@@ -917,6 +1135,62 @@ std::vector<std::string> loadedImageNames()
 #endif
     return names;
 }
+
+#if defined(_WIN32)
+std::wstring widenUtf8(const std::string &text)
+{
+    const int count = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    std::wstring out(static_cast<size_t>(std::max(count, 0)), L'\0');
+    if (count > 0)
+        MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), out.data(), count);
+    return out;
+}
+
+bool endsWithNoCase(const std::string &path, std::string_view suffix)
+{
+    if (path.size() < suffix.size())
+        return false;
+    for (size_t i = 0; i < suffix.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(path[path.size() - suffix.size() + i])) !=
+            std::tolower(static_cast<unsigned char>(suffix[i])))
+            return false;
+    return true;
+}
+
+// Windows: GetModuleHandleExW without UNCHANGED_REFCOUNT takes our own reference to an already loaded module (the
+// RTLD_NOLOAD equivalent: it never loads anything); the owner of the entry point, by address, must be that module.
+int findBridgeOverlay(void **image, void **symbol)
+{
+    for (const std::string &loaded : loadedImageNames())
+    {
+        if (!endsWithNoCase(loaded, kBridgeImageSuffix))
+            continue;
+        const std::wstring name = widenUtf8(loaded);
+        HMODULE handle = nullptr;
+        if (!GetModuleHandleExW(0, name.c_str(), &handle) || !handle)
+            continue;
+        void *entry = reinterpret_cast<void *>(GetProcAddress(handle, "rrv_pcsx2_gs_bridge_set_overlay"));
+        HMODULE owner = nullptr;
+        wchar_t observed[32768] = {};
+        if (!entry ||
+            !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                static_cast<LPCWSTR>(entry), &owner) ||
+            owner != handle || GetModuleFileNameW(owner, observed, static_cast<DWORD>(sizeof observed / sizeof(wchar_t))) == 0 ||
+            _wcsicmp(observed, name.c_str()) != 0)
+        {
+            FreeLibrary(handle);
+            return -1;
+        }
+        *image = handle;
+        *symbol = entry;
+        return 1;
+    }
+    return 0;
+}
+
+void closeBridgeImage(void *image) { FreeLibrary(static_cast<HMODULE>(image)); }
+#else
+void closeBridgeImage(void *image) { dlclose(image); }
 
 int findBridgeOverlay(void **image, void **symbol)
 {
@@ -946,6 +1220,7 @@ int findBridgeOverlay(void **image, void **symbol)
     }
     return 0;
 }
+#endif
 
 uint32_t menuKeyForScancode(SDL_Scancode scancode)
 {
@@ -1005,6 +1280,89 @@ fukami::menu::Input menuKey(uint32_t key, bool down)
 }
 } // namespace
 
+// Full screen on Windows: switch the window's display to a multiple of 60 Hz it offers at its current resolution
+// (rrv_display_refresh.h, `[display] refresh_rate` as RRV_DISPLAY_REFRESH), and put the display back on leaving
+// full screen. CDS_FULLSCREEN makes the mode temporary: Windows restores the display if the process ends first.
+// A no-op on the other platforms. Main thread only.
+// The switch is made BEFORE the window covers the display (create() with the display the window will open on as
+// `monitorHandle`, requestFullscreen() for F11 and the menu): the shell puts the taskbar back above everything when
+// the display mode changes and only lowers it again when a window becomes full screen after that (owner report,
+// 2026-10-12: started full screen on a display that is not at a multiple of 60 Hz, the taskbar stayed over the
+// picture). The call from pumpEvents() covers a full screen entered some other way.
+void SdlPresentation::Impl::applyDisplayRefresh(bool fullscreen, void *monitorHandle)
+{
+#if defined(_WIN32)
+    if (!refreshDevice.empty())
+    {
+        if (fullscreen)
+            return;
+        const LONG result = ChangeDisplaySettingsExW(refreshDevice.c_str(), nullptr, nullptr, 0, nullptr);
+        std::fprintf(stderr, "[sdl] display refresh restored (%ld)\n", static_cast<long>(result));
+        refreshDevice.clear();
+        return;
+    }
+    if (!fullscreen || (!window && !monitorHandle))
+        return;
+    // `[display] vrr = on`: each picture is shown at its own time, whatever the display's rate.
+    if (const char *vrr = std::getenv("RRV_PCSX2_GS_VRR"); vrr && std::strcmp(vrr, "1") == 0)
+        return;
+    const char *setting = std::getenv("RRV_DISPLAY_REFRESH");
+    HMONITOR handle = static_cast<HMONITOR>(monitorHandle);
+    if (!handle)
+    {
+        SDL_SysWMinfo info;
+        SDL_VERSION(&info.version);
+        if (!SDL_GetWindowWMInfo(window, &info) || info.subsystem != SDL_SYSWM_WINDOWS)
+            return;
+        handle = MonitorFromWindow(info.info.win.window, MONITOR_DEFAULTTONEAREST);
+    }
+    MONITORINFOEXW monitor{};
+    monitor.cbSize = sizeof(monitor);
+    DEVMODEW current{};
+    current.dmSize = sizeof(current);
+    if (!GetMonitorInfoW(handle, &monitor) || !EnumDisplaySettingsW(monitor.szDevice, ENUM_CURRENT_SETTINGS, &current))
+        return;
+    std::vector<int> rates;
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    for (DWORD index = 0; EnumDisplaySettingsW(monitor.szDevice, index, &mode); ++index)
+        if (mode.dmPelsWidth == current.dmPelsWidth && mode.dmPelsHeight == current.dmPelsHeight &&
+            mode.dmBitsPerPel == current.dmBitsPerPel)
+            rates.push_back(static_cast<int>(mode.dmDisplayFrequency));
+    const int wanted = rrv::host::displayrefresh::choose(setting && *setting ? setting : "auto", rates,
+                                                         static_cast<int>(current.dmDisplayFrequency));
+    if (!wanted)
+    {
+        std::fprintf(stderr, "[sdl] display refresh stays at %lu Hz (refresh_rate=%s)\n",
+                     static_cast<unsigned long>(current.dmDisplayFrequency), setting && *setting ? setting : "auto");
+        return;
+    }
+    DEVMODEW change = current;
+    change.dmDisplayFrequency = static_cast<DWORD>(wanted);
+    change.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
+    const LONG result = ChangeDisplaySettingsExW(monitor.szDevice, &change, nullptr, CDS_FULLSCREEN, nullptr);
+    std::fprintf(stderr, "[sdl] display refresh %lu -> %d Hz for full screen (%ld)\n",
+                 static_cast<unsigned long>(current.dmDisplayFrequency), wanted, static_cast<long>(result));
+    if (result == DISP_CHANGE_SUCCESSFUL)
+        refreshDevice = monitor.szDevice;
+#else
+    (void)fullscreen;
+    (void)monitorHandle;
+#endif
+}
+
+// F11 and the in-game menu. Entering: the display's rate first, then the window (see applyDisplayRefresh).
+void SdlPresentation::Impl::requestFullscreen(bool fullscreen)
+{
+    if (!window || windowFullscreen(window) == fullscreen)
+        return;
+    if (fullscreen)
+        applyDisplayRefresh(true);
+    setWindowFullscreen(window, fullscreen);
+    if (fullscreen && !windowFullscreen(window) && !lastFullscreen)
+        applyDisplayRefresh(false); // not entered (macOS enters later and has no rate to restore)
+}
+
 void SdlPresentation::Impl::toggleMenu()
 {
     if (menu->isOpen())
@@ -1015,7 +1373,8 @@ void SdlPresentation::Impl::toggleMenu()
     menu->open();
     if (!menu->isOpen())
         return; // no overlay yet
-    stickLeft = stickRight = stickUp = stickDown = false;
+    for (StickHold &hold : sticks)
+        hold.left = hold.right = hold.up = hold.down = false;
     int x = 0, y = 0;
     SDL_GetMouseState(&x, &y);
     fukami::menu::Input position;
@@ -1024,6 +1383,30 @@ void SdlPresentation::Impl::toggleMenu()
     position.x = static_cast<float>(x) * scale;
     position.y = static_cast<float>(y) * scale;
     menu->post(position);
+}
+
+SdlPresentation::Impl::StickHold *SdlPresentation::Impl::stickFor(SDL_JoystickID id)
+{
+    for (StickHold &hold : sticks)
+        if (hold.id == id)
+            return &hold;
+    for (StickHold &hold : sticks)
+        if (hold.id < 0)
+        {
+            hold.id = id;
+            return &hold;
+        }
+    return nullptr; // a third controller does not navigate the menu
+}
+
+// Releases whatever direction `hold` still holds and frees its entry.
+void SdlPresentation::Impl::releaseSticks(StickHold &hold)
+{
+    postStick(hold.left, false, RRV_PCSX2_GS_UI_KEY_GAMEPAD_DPAD_LEFT);
+    postStick(hold.right, false, RRV_PCSX2_GS_UI_KEY_GAMEPAD_DPAD_RIGHT);
+    postStick(hold.up, false, RRV_PCSX2_GS_UI_KEY_GAMEPAD_DPAD_UP);
+    postStick(hold.down, false, RRV_PCSX2_GS_UI_KEY_GAMEPAD_DPAD_DOWN);
+    hold = StickHold{};
 }
 
 void SdlPresentation::Impl::postStick(bool &held, bool now, uint32_t key)
@@ -1041,6 +1424,15 @@ void SdlPresentation::Impl::postStick(bool &held, bool now, uint32_t key)
 void SdlPresentation::Impl::routeMenuEvent(const SDL_Event &event)
 {
     using Input = fukami::menu::Input;
+    if (event.type == SDL_CONTROLLERDEVICEREMOVED)
+    {
+        // Drop the removed controller's stick state (releasing a direction it
+        // still held) so a third pad can take its entry.
+        for (StickHold &hold : sticks)
+            if (hold.id == event.cdevice.which)
+                releaseSticks(hold);
+        return;
+    }
     switch (event.type)
     {
     case SDL_KEYDOWN:
@@ -1081,15 +1473,18 @@ void SdlPresentation::Impl::routeMenuEvent(const SDL_Event &event)
         // maps it), with hysteresis so a resting stick never repeats.
         const float value = static_cast<float>(event.caxis.value) / 32767.0f;
         const auto held = [](bool was, float amount) { return was ? amount > 0.3f : amount > 0.5f; };
+        StickHold *hold = stickFor(event.caxis.which);
+        if (!hold)
+            return;
         if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX)
         {
-            postStick(stickLeft, held(stickLeft, -value), RRV_PCSX2_GS_UI_KEY_GAMEPAD_DPAD_LEFT);
-            postStick(stickRight, held(stickRight, value), RRV_PCSX2_GS_UI_KEY_GAMEPAD_DPAD_RIGHT);
+            postStick(hold->left, held(hold->left, -value), RRV_PCSX2_GS_UI_KEY_GAMEPAD_DPAD_LEFT);
+            postStick(hold->right, held(hold->right, value), RRV_PCSX2_GS_UI_KEY_GAMEPAD_DPAD_RIGHT);
         }
         else if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY)
         {
-            postStick(stickUp, held(stickUp, -value), RRV_PCSX2_GS_UI_KEY_GAMEPAD_DPAD_UP);
-            postStick(stickDown, held(stickDown, value), RRV_PCSX2_GS_UI_KEY_GAMEPAD_DPAD_DOWN);
+            postStick(hold->up, held(hold->up, -value), RRV_PCSX2_GS_UI_KEY_GAMEPAD_DPAD_UP);
+            postStick(hold->down, held(hold->down, value), RRV_PCSX2_GS_UI_KEY_GAMEPAD_DPAD_DOWN);
         }
         return;
     }
@@ -1165,7 +1560,7 @@ void SdlPresentation::Impl::serviceMenu()
     }
     // Requests made in the menu (GS owner thread) are carried out here.
     if (const int fullscreen = menu->takeFullscreenRequest(); fullscreen >= 0)
-        setWindowFullscreen(window, fullscreen == 1);
+        requestFullscreen(fullscreen == 1);
     if (menu->takeQuitRequest())
     {
         std::fprintf(stderr, "[fukami-menu] quit\n");
@@ -1207,6 +1602,9 @@ bool SdlPresentation::create(const char *title, std::string *error)
     if (const char *driver = std::getenv("SDL_VIDEODRIVER"); !driver || driver[0] == '\0')
         SDL_SetHint(SDL_HINT_VIDEODRIVER, "x11,wayland");
 #endif
+#if defined(_WIN32)
+    SDL_SetMainReady(); // SDL_MAIN_HANDLED: main() is the program's own entry point, not SDL_main
+#endif
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0)
     {
         if (error) *error = std::string("SDL initialization failed: ") + SDL_GetError();
@@ -1227,6 +1625,11 @@ bool SdlPresentation::create(const char *title, std::string *error)
     constexpr Uint32 kApiWindowFlag = 0u;
     constexpr const char *kApiName = "Vulkan";
 #endif
+#if defined(_WIN32)
+    // The window opens on SDL's first display, which is the primary one.
+    if (startFullscreen)
+        impl->applyDisplayRefresh(true, MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY));
+#endif
     impl->window = SDL_CreateWindow(title ? title : "Fukami", SDL_WINDOWPOS_CENTERED,
                                     SDL_WINDOWPOS_CENTERED, windowWidth, windowHeight,
                                     kApiWindowFlag | SDL_WINDOW_RESIZABLE |
@@ -1235,6 +1638,7 @@ bool SdlPresentation::create(const char *title, std::string *error)
     if (!impl->window)
     {
         if (error) *error = std::string("SDL ") + kApiName + " window creation failed: " + SDL_GetError();
+        impl->applyDisplayRefresh(false);
         SDL_Quit();
         return false;
     }
@@ -1263,6 +1667,7 @@ bool SdlPresentation::create(const char *title, std::string *error)
         if (SDL_GetWindowWMInfo(impl->window, &info) != SDL_TRUE)
         {
             if (error) *error = std::string("SDL window handle query failed: ") + SDL_GetError();
+            impl->applyDisplayRefresh(false);
             SDL_DestroyWindow(impl->window);
             SDL_Quit();
             return false;
@@ -1283,6 +1688,13 @@ bool SdlPresentation::create(const char *title, std::string *error)
             impl->nativeLayer = static_cast<void *>(info.info.wl.surface);
             break;
 #endif
+#if defined(_WIN32)
+        case SDL_SYSWM_WINDOWS:
+            impl->surfaceKind = rrv::gsbackend::NativeSurfaceKind::Win32;
+            impl->nativeView = static_cast<void *>(info.info.win.window);        // HWND
+            impl->nativeLayer = static_cast<void *>(info.info.win.hinstance);    // HINSTANCE
+            break;
+#endif
         default:
             break;
         }
@@ -1291,13 +1703,16 @@ bool SdlPresentation::create(const char *title, std::string *error)
         {
             if (error)
                 *error = "SDL video driver " + std::string(SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "?") +
-                         " gives no X11 or Wayland window handle";
+                         " gives no usable native window handle";
+            impl->applyDisplayRefresh(false);
             SDL_DestroyWindow(impl->window);
             SDL_Quit();
             return false;
         }
         std::fprintf(stderr, "[sdl] video driver %s, %s surface\n", SDL_GetCurrentVideoDriver(),
-                     impl->surfaceKind == rrv::gsbackend::NativeSurfaceKind::LinuxX11 ? "X11" : "Wayland");
+                     impl->surfaceKind == rrv::gsbackend::NativeSurfaceKind::Win32     ? "Win32"
+                     : impl->surfaceKind == rrv::gsbackend::NativeSurfaceKind::LinuxX11 ? "X11"
+                                                                                         : "Wayland");
     }
 #endif
     // The in-game menu reads/writes the launch's settings file (empty: none).
@@ -1305,6 +1720,7 @@ bool SdlPresentation::create(const char *title, std::string *error)
     // In the app, a setting the file does not have shows the app's bundled default (as the launcher used it).
     impl->menu = std::make_shared<fukami::menu::Menu>(fukami::app::iniPath(), fukami::app::defaultIniPath());
     impl->lastFullscreen = windowFullscreen(impl->window);
+    impl->applyDisplayRefresh(impl->lastFullscreen);
     impl->menu->fullscreenChanged(impl->lastFullscreen, false);
     impl->pad = std::make_shared<SdlHostPadBackend>(impl->window, impl->menu);
     impl->pad->refresh();
@@ -1331,9 +1747,10 @@ void SdlPresentation::destroy()
     if (m_impl->setOverlay)
         m_impl->setOverlay(nullptr, nullptr);
     if (m_impl->bridgeImage)
-        dlclose(m_impl->bridgeImage);
+        closeBridgeImage(m_impl->bridgeImage);
     m_impl->pad.reset();
     m_impl->menu.reset();
+    m_impl->applyDisplayRefresh(false);
 #if defined(__APPLE__)
     if (m_impl->metalView)
         SDL_Metal_DestroyView(m_impl->metalView);
@@ -1375,7 +1792,7 @@ void SdlPresentation::pumpEvents()
         else if (event.type == SDL_KEYDOWN && event.key.keysym.scancode == SDL_SCANCODE_F11 &&
                  event.key.repeat == 0)
         {
-            setWindowFullscreen(m_impl->window, !windowFullscreen(m_impl->window));
+            m_impl->requestFullscreen(!windowFullscreen(m_impl->window));
         }
         else if (event.type == SDL_KEYDOWN && event.key.keysym.scancode == SDL_SCANCODE_F &&
                  (event.key.keysym.mod & KMOD_CTRL) != 0 && (event.key.keysym.mod & KMOD_GUI) != 0 &&
@@ -1404,6 +1821,7 @@ void SdlPresentation::pumpEvents()
         // Any route: F11, Cmd+Ctrl+F, the green button, the menu bar, the menu.
         m_impl->lastFullscreen = fullscreen;
         std::fprintf(stderr, "[sdl] fullscreen=%d\n", fullscreen ? 1 : 0);
+        m_impl->applyDisplayRefresh(fullscreen);
         if (m_impl->menu)
             m_impl->menu->fullscreenChanged(fullscreen, !m_impl->testLifecycle);
     }

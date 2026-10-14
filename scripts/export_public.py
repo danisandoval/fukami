@@ -40,6 +40,7 @@ KEPT_PATCHES = [
     "tools/patches/pcsx2/*",
     "tools/patches/pcsx2-gs-bridge-target.patch",
     "tools/patches/pcsx2-gs-bridge-linux.patch",
+    "tools/patches/pcsx2-gs-bridge-windows-d3d11.patch",
     # The lock also pins the PCSX2 reference-capture patches (scripts/build_pcsx2_gt_capture.sh, pcsx2_debug.py).
     "tools/patches/pcsx2-gt-capture.patch",
     "tools/patches/pcsx2-gt-guest-trace.patch",

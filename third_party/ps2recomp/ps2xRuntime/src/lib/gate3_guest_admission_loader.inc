@@ -194,9 +194,16 @@ std::string PS2Runtime::gate3LoadBoundWorkloadV1(const std::string& path)
             throw std::runtime_error("Gate3 rtc_source host_boot requires storage persistent_user_card and no terminal_starts");
         const std::time_t now = std::time(nullptr);
         std::tm local{};
-        localtime_r(&now, &local);
         epoch = static_cast<int64_t>(now);
+#if defined(_WIN32)
+        // No tm_gmtoff in the Windows CRT: the local wall clock read as UTC, minus the UTC time itself, is the offset
+        // (daylight saving included).
+        localtime_s(&local, &now);
+        offset = static_cast<int32_t>((static_cast<int64_t>(_mkgmtime(&local)) - static_cast<int64_t>(now)) / 60);
+#else
+        localtime_r(&now, &local);
         offset = static_cast<int32_t>(local.tm_gmtoff / 60);
+#endif
     }
     const auto budget = std::chrono::milliseconds(*waitBudgetMs);
     // Host-only wait for user-owned CD data inside its verified extent, with one

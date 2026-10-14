@@ -41,6 +41,13 @@ force_functions = [
   "0x002191F8", "0x002224E0", "0x00237D78", "0x00237ED8", "0x0023DF50",
   "0x0023E3C8", "0x0023EEF0", "0x0023F238", "0x0024D1D8", "0x0024D290",
   "0x0024EBB8", "0x002B6210",
+  # VS mode menu: the dispatcher FUN_002B2088 calls its handlers through the 14-entry
+  # function-pointer table at 0x32FE28. 12 of the handlers were folded into neighbouring
+  # functions and had no dispatch entry, so "Function at address 0x2b1c88 not found" repeated
+  # every frame and nothing was drawn (VS mode black screen, public issue danisandoval/fukami#2).
+  # Takes effect when generated/rr5/output is regenerated (skill regen-recompiled-code).
+  "0x002B1C88", "0x002B1D88", "0x002B1D98", "0x002B1DA8", "0x002B4330", "0x002B4350",
+  "0x002B5000", "0x002B5020", "0x002B5AB8", "0x002B5AD8", "0x002B6048", "0x002B6068",
   # CD read-completion callback (registered via sceCdCallback@0x2C6DD0, arg reason==1)
   # folded into sub_00296E78 — must be a callable entry so the runtime can invoke it.
   "0x00296EB0",

@@ -50,6 +50,30 @@ if(APPLE)
     # directory is part of this graph; CMake derives RPATH from the imported prefix.
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
         "${RRV_SDL_PREFIX}/manifest.json")
+elseif(WIN32)
+    # Windows x86-64: the official SDL 2.32.10 Visual C++ package (SDL2.dll + SDL2.lib), installed once outside the
+    # disposable build trees by scripts/prepare_sdl.py, which pins its SHA-256 in the lock. Configure is offline and
+    # fails closed unless the installed files match the receipt.
+    set(RRV_SDL_ARCH "x86_64")
+    set(RRV_SDL_PREFIX "${CMAKE_SOURCE_DIR}/runtime-deps/sdl/${RRV_SDL_VERSION}/windows-x86_64")
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/prepare_sdl.py"
+            --verify --prefix "${RRV_SDL_PREFIX}" --platform windows-x86_64
+        RESULT_VARIABLE RRV_SDL_VERIFY_RESULT
+        OUTPUT_VARIABLE RRV_SDL_VERIFY_OUTPUT
+        ERROR_VARIABLE RRV_SDL_VERIFY_ERROR)
+    if(NOT RRV_SDL_VERIFY_RESULT EQUAL 0)
+        message(FATAL_ERROR
+            "Stable SDL installation is missing or invalid: ${RRV_SDL_VERIFY_ERROR}"
+            "Run py -3 scripts/prepare_sdl.py --prepare before configuring the product.")
+    endif()
+    add_library(SDL2::SDL2 SHARED IMPORTED)
+    set_target_properties(SDL2::SDL2 PROPERTIES
+        IMPORTED_LOCATION "${RRV_SDL_PREFIX}/bin/SDL2.dll"
+        IMPORTED_IMPLIB "${RRV_SDL_PREFIX}/lib/SDL2.lib"
+        INTERFACE_INCLUDE_DIRECTORIES "${RRV_SDL_PREFIX}/include/SDL2")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${RRV_SDL_PREFIX}/manifest.json")
 else()
     # Linux / Steam Deck (Gate 5): SDL 2.32.10 built from the same pinned
     # release by tools/linux-build (X11 + Wayland + Vulkan), found through

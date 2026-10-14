@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 project(RRV-Recomp VERSION 0.1.0 LANGUAGES CXX)
 
 include(CTest)
+include("${CMAKE_SOURCE_DIR}/cmake/RrvToolchainFlags.cmake")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -157,9 +158,11 @@ if(RRV_BUILD_LEGACY_LIVE)
 endif()
 
 if(RRV_BUILD_PRODUCT)
-    if(NOT APPLE AND NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$"))
+    if(NOT APPLE AND NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+       AND NOT (WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$" AND RRV_CLANG_CL))
         message(FATAL_ERROR
-            "rrv-product is a macOS Metal or Linux x86-64 Vulkan direct-present target; refusing a fallback presentation path")
+            "rrv-product is a macOS Metal, Linux x86-64 Vulkan or Windows x86-64 (clang-cl) Vulkan direct-present target; "
+            "refusing a fallback presentation path")
     endif()
     include("${CMAKE_SOURCE_DIR}/cmake/RrvProduct.cmake")
     return()

@@ -16,6 +16,8 @@
 #include <vector>
 #if defined(__APPLE__)
 #define RRV_FILE_MANAGER_NAME "Finder"
+#elif defined(_WIN32)
+#define RRV_FILE_MANAGER_NAME "Explorer"
 #else
 #define RRV_FILE_MANAGER_NAME "the file manager"
 #endif
@@ -30,7 +32,8 @@ std::string id(std::string_view section, std::string_view key)
 }
 
 // [timing] holds the host speed switches the menu shows (split_gs, pacer_spin); its other keys are ini only.
-constexpr std::string_view kSections[] = {"display", "rendering", "input", "game", "timing"};
+// "experimental" is not an ini section: it is the page of the specs marked experimental, whatever their section.
+constexpr std::string_view kSections[] = {"display", "rendering", "input", "game", "timing", "experimental"};
 
 const char *sectionTitle(std::string_view section)
 {
@@ -39,6 +42,7 @@ const char *sectionTitle(std::string_view section)
     if (section == "input") return "Input";
     if (section == "game") return "Game";
     if (section == "timing") return "Performance";
+    if (section == "experimental") return "Experimental";
     return "Other";
 }
 
@@ -52,6 +56,8 @@ std::string choiceName(const settings::Spec &spec, std::string_view choice)
         return choice == "0" ? std::string("Off") : std::string(choice) + "x";
     if (spec.key == "texture_filter")
         return choice == "ps2" ? "PS2 (stock)" : "Bilinear";
+    if (spec.key == "sprite_filter")
+        return choice == "ps2" ? "PS2 (stock)" : "Even";
     if (spec.key == "render_mode")
         return choice == "full" ? "Full frames" : "Fields";
     std::string name(choice);
@@ -287,7 +293,7 @@ void Menu::frame(const RrvPcsx2GsBridgeUi &ui)
         {
             ui.section(sectionTitle(section));
             for (const settings::Spec &spec : settings::schema())
-                if (spec.inMenu && spec.section == section)
+                if (spec.inMenu && (spec.experimental ? section == "experimental" : spec.section == section))
                     drawRow(ui, spec, row++);
         }
         if (!pending.empty())
@@ -368,6 +374,16 @@ void Menu::drawRow(const RrvPcsx2GsBridgeUi &ui, const settings::Spec &spec, int
     {
         const int min = static_cast<int>(spec.minValue), max = static_cast<int>(spec.maxValue);
         int number = static_cast<int>(std::clamp<long>(toLong(value, min), min, max));
+        if (spec.section == "rendering" && spec.key == "scale" && settings::steamDeck())
+        {
+            // Steam Deck: even scales only (docs/TESTING.md T-DECK-3X-HATCH). A list, because the menu's slider
+            // has no step; an odd value from the ini shows as the even one it runs as (settings::hostScale).
+            static const char *const kEven[] = {"2", "4", "6", "8"};
+            int index = std::clamp(settings::hostScale(number, true) / 2 - 1, 0, 3);
+            if (ui.combo(label.c_str(), &index, kEven, 4) && index >= 0 && index < 4)
+                change(ui, spec, kEven[index]);
+            break;
+        }
         if (ui.slider_int(label.c_str(), &number, min, max))
             change(ui, spec, std::to_string(number));
         break;

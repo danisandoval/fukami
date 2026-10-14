@@ -198,6 +198,8 @@ def load_toml(path: pathlib.Path) -> dict[str, object]:
             current[key] = value[1:-1]
         elif value in ("true", "false"):
             current[key] = value == "true"
+        elif value.isascii() and value.isdigit():  # e.g. [sdl_windows] size
+            current[key] = int(value)
         else:
             raise RuntimeError(f"unsupported lock value: {raw_line}")
     return result
@@ -305,7 +307,8 @@ def main() -> int:
         ps2recomp = lock["ps2recomp"]
         assert isinstance(ps2recomp, dict)
         problems.extend(verify_ps2recomp_compatible_patch(ps2recomp))
-        for patch_set in ("pcsx2_bridge_patches", "pcsx2_gt_capture_patches", "pcsx2_gt_debug_server_patch"):
+        for patch_set in ("pcsx2_bridge_patches", "pcsx2_bridge_windows_patches", "pcsx2_gt_capture_patches",
+                          "pcsx2_gt_debug_server_patch"):
             problems.extend(verify_patch_set(lock, patch_set))
         if problems:
             print("locked patch verification failed:", file=sys.stderr)
@@ -346,7 +349,8 @@ def main() -> int:
             problems.append(f"{name}: {problem}")
 
     if args.component in ("all", "pcsx2"):
-        for patch_set in ("pcsx2_bridge_patches", "pcsx2_gt_capture_patches", "pcsx2_gt_debug_server_patch"):
+        for patch_set in ("pcsx2_bridge_patches", "pcsx2_bridge_windows_patches", "pcsx2_gt_capture_patches",
+                          "pcsx2_gt_debug_server_patch"):
             problems.extend(verify_patch_set(lock, patch_set))
 
     if "ps2recomp" in components:

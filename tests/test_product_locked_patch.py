@@ -10,6 +10,8 @@ import tempfile
 import unittest
 
 sys.dont_write_bytecode = True
+from fs_support import make_dir_link
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("product_guard", ROOT / "scripts/check_product_direct.py")
 guard = importlib.util.module_from_spec(spec)
@@ -23,9 +25,9 @@ class LockedProducerPatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="rrv-locked-patch-") as tmp:
             root = pathlib.Path(tmp)
             for directory in ("src", "cmake"):
-                (root / directory).symlink_to(ROOT / directory, target_is_directory=True)
+                make_dir_link(root / directory, ROOT / directory)
             (root / "tools/patches").mkdir(parents=True)
-            (root / "tools/pcsx2-gs-bridge").symlink_to(ROOT / "tools/pcsx2-gs-bridge", target_is_directory=True)
+            make_dir_link(root / "tools/pcsx2-gs-bridge", ROOT / "tools/pcsx2-gs-bridge")
             # Keep the old hardcoded filename valid, so examining it would miss
             # the intentionally invalid selected patch.
             original = (ROOT / original_path).read_text()

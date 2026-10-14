@@ -2054,6 +2054,219 @@ void rrvCarLodReport() {
     std::fprintf(stderr, "[rr5-enhance] car LOD: largest list at a field end 0x%X (buffers 0x%X)\n", g_carLodMaxField,
                  g_carLodMaxFieldSize);
 }
+// RR5 fix (opt-in, owner direction 2026-10-08): car layers without a depth tie.
+// RRV_RR5_CAR_ZTIE=<units> (1..4096; unset or 0 = stock): the slack, in Z units per 2^20 of a vertex's Z.
+// Setting: [game] car_depth_fix (16).
+//
+// WHAT THE GAME DOES (func_227298, Ghidra + a RAM dump of a race field, docs/TESTING.md
+// T-DECK-3X-HATCH). A near car's body is transformed once (func_222AD0 opens two streams,
+// func_222EB8 fills them, func_222AF8 ends each with a DMA RET) and then drawn from the same bytes:
+//   * func_222D98(list) links a DMA CALL of the base stream into an ordering list. The car routine
+//     calls it twice for the same stream with a texture upload between the two (the paint, then a
+//     second layer loaded at the same texture and CLUT addresses). A list is last in, first out,
+//     so the second func_222D98 is the pass drawn first.
+//   * func_222D60(list) links a CALL of the other stream, the environment map: the same positions,
+//     drawn later with TEST_2 = alpha NEVER / FB_ONLY (colour only, never depth).
+// The second layer and the environment map test depth with GEQUAL against what the first pass
+// wrote, so they only land where their depth ties with it exactly. A GS reproduces its own depth; a
+// host GPU at a scale that is not a power of two need not (Steam Deck at 3x: one pixel in eleven
+// misses).
+//
+// WHAT THIS DOES, only at the body's call sites in func_227298 (by return address: the wheels use
+// the same two helpers for an alpha-mask pass of their own). The first pass is the stock game's.
+//   * The pass drawn later is CALLed from a copy of the stream with every vertex Z raised by
+//     Z * <units> / 2^20 (XYZ2 / XYZF2 / XYZ3 / XYZF3; PACKED, REGLIST and A+D). Same state, same
+//     order, depth written as the game does: where it lands, the depth is that much higher.
+//   * The environment-map stream is CALLed from a copy raised by twice that, so it has the same
+//     slack against either body pass.
+// The slack is proportional because the scenes are not alike: a race car has Z near 1.2 million and
+// spans about 300,000 units, the car of the selection screen has Z near 2,300 and spans about 1,000
+// (RAM dumps, 2026-10-09); there the slack is 0 and the stock picture has no hatch.
+// Forms tried on the Deck and withdrawn (docs/TESTING.md T-DECK-3X-HATCH): the body lowered with the
+// second pass's depth write masked (lenses and intakes lost their depth); both passes lowered by
+// fixed units and a fixed 16-unit raise (inner surfaces showed at the seams of the selection-screen
+// car, owner report); a depth-only draw before a colour-only copy (it changes the order translucent
+// parts of the stream blend in: a tail-light lens went dark).
+// It changes guest-visible data (display list bytes, the cursor, DMA sizes), so reference runs
+// never set it. It does nothing when a stream is not the shape seen (NEXT / REF / CNT tags ending in
+// RET, at most 0xFFFF quadwords, inside the list buffer), when a GIF packet does not parse to the
+// end, when the two calls use different lists, or when less than kCarZtieReserve bytes of list
+// would remain. RR5-specific (SLUS-20002).
+PS2Runtime::RecompiledFunction g_ztie222D98Orig = nullptr, g_ztie222AD0Orig = nullptr, g_ztie222D60Orig = nullptr;
+uint32_t g_carZtieUnits = 0, g_carZtieTimes = 1; // slack per 2^20 of Z, and the multiple of it being applied
+// Return addresses in func_227298: the second func_222D98 of the body (model type 0x11 at LOD 3, the
+// other models, the upper section of type 0x11) and the func_222D60 of the same three sections.
+constexpr uint32_t kCarZtieBodyRa[3] = {0x227FBCu, 0x228064u, 0x22818Cu};
+constexpr uint32_t kCarZtieEnvRa[3] = {0x227F80u, 0x228020u, 0x228130u};
+inline bool rrvCarZtieSite(const uint32_t (&sites)[3], uint32_t ra) { return ra == sites[0] || ra == sites[1] || ra == sites[2]; }
+constexpr uint32_t kCarZtieStream = 0x334B50u;   // gp - 0x5B20: the stream pair func_222AD0 opened
+constexpr uint32_t kCarZtieReserve = 0x100000u;
+struct CarZtieState { uint32_t stream = 0, list = 0, call = 0; } g_carZtie;
+struct CarZtieStats { uint64_t bodies = 0, envs = 0, bytes = 0, vertices = 0, shape = 0, parse = 0, room = 0, lists = 0; } g_carZtieStats;
+
+bool rrvCarZtieRaise(uint64_t& z, uint32_t bits, uint32_t shift) {
+    const uint64_t max = (1ull << bits) - 1ull, mask = max << shift;
+    const uint64_t v = (z & mask) >> shift;
+    z = (z & ~mask) | (std::min<uint64_t>(v + ((v * g_carZtieUnits * g_carZtieTimes) >> 20), max) << shift);
+    return true;
+}
+// Raises every vertex Z of the GIF packets in `data` (whole quadwords). False when they do not
+// parse to exactly the end.
+bool rrvCarZtieBias(std::vector<uint64_t>& data, uint64_t& vertices) {
+    const size_t qw = data.size() / 2u;
+    size_t at = 0;
+    while (at < qw) {
+        const uint64_t lo = data[at * 2u], regs = data[at * 2u + 1u];
+        const uint32_t nloop = lo & 0x7FFFu, flg = (lo >> 58) & 3u;
+        const uint32_t nreg = ((lo >> 60) & 15u) ? ((lo >> 60) & 15u) : 16u;
+        ++at;
+        if (flg == 0u) { // PACKED: one quadword per register
+            if (at + size_t(nloop) * nreg > qw) return false;
+            for (uint32_t i = 0; i < nloop; ++i)
+                for (uint32_t r = 0; r < nreg; ++r, ++at) {
+                    uint32_t reg = (regs >> (4u * r)) & 15u;
+                    uint64_t* q = &data[at * 2u];
+                    if (reg == 0xEu) { // A+D: the register number is in the high half
+                        reg = q[1] & 0xFFu;
+                        if (reg == 0x4u || reg == 0xCu) vertices += rrvCarZtieRaise(q[0], 24, 32);
+                        else if (reg == 0x5u || reg == 0xDu) vertices += rrvCarZtieRaise(q[0], 32, 32);
+                    } else if (reg == 0x4u || reg == 0xCu) vertices += rrvCarZtieRaise(q[1], 24, 4);
+                    else if (reg == 0x5u || reg == 0xDu) vertices += rrvCarZtieRaise(q[1], 32, 0);
+                }
+        } else if (flg == 1u) { // REGLIST: one doubleword per register, padded to a quadword
+            const size_t words = size_t(nloop) * nreg;
+            if (at + (words + 1u) / 2u > qw) return false;
+            for (size_t w = 0; w < words; ++w) {
+                const uint32_t reg = (regs >> (4u * (w % nreg))) & 15u;
+                uint64_t& v = data[at * 2u + w];
+                if (reg == 0x4u || reg == 0xCu) vertices += rrvCarZtieRaise(v, 24, 32);
+                else if (reg == 0x5u || reg == 0xDu) vertices += rrvCarZtieRaise(v, 32, 32);
+            }
+            at += (words + 1u) / 2u;
+        } else { // IMAGE
+            if (at + nloop > qw) return false;
+            at += nloop;
+        }
+    }
+    return at == qw;
+}
+
+// The list buffer of the field being built and the packet cursor in it.
+struct CarZtieList {
+    uint32_t base = 0, size = 0, cursorRaw = 0, cursor = 0;
+    bool valid = false;
+    explicit CarZtieList(uint8_t* rdram) {
+        const uint32_t buffer0 = rrvCarLodRead32(rdram, kCarLodDlBase0) & 0x0FFFFFFFu;
+        const uint32_t buffer1 = rrvCarLodRead32(rdram, kCarLodDlBase0 + 4u) & 0x0FFFFFFFu;
+        size = buffer1 - buffer0;
+        base = (rrvCarLodRead32(rdram, kCarLodDlIndex) & 1u) ? buffer1 : buffer0;
+        cursorRaw = rrvCarLodRead32(rdram, kCarLodDlCursor);
+        cursor = cursorRaw & 0x0FFFFFFFu;
+        valid = buffer1 > buffer0 && cursor >= base && cursor <= base + size && (cursor & 15u) == 0u;
+    }
+    bool inside(uint32_t addr, uint32_t bytes) const {
+        return valid && addr >= base && addr <= cursor && bytes <= cursor - addr && (addr & 15u) == 0u;
+    }
+    bool room(uint32_t need) const { return valid && base + size >= cursor + need && base + size - cursor - need >= kCarZtieReserve; }
+};
+// The quadwords of a finished stream, with every vertex raised. Empty when it is refused (counted).
+std::vector<uint64_t> rrvCarZtieCopy(uint8_t* rdram, const CarZtieList& dl, uint32_t stream, uint32_t times) {
+    std::vector<uint64_t> data;
+    bool ok = true;
+    for (uint32_t tag = stream, n = 0; ok; ++n) {
+        const uint32_t t0 = rrvCarLodRead32(rdram, tag), addr = rrvCarLodRead32(rdram, tag + 4u) & 0x0FFFFFFFu;
+        const uint32_t qwc = t0 & 0xFFFFu, id = (t0 >> 28) & 7u;
+        const uint32_t from = id == 3u ? addr : tag + 0x10u;
+        ok = n < 64u && dl.inside(tag, 0x10u) && (id == 1u || id == 2u || id == 3u || id == 6u) &&
+             dl.inside(from, qwc * 16u) && data.size() / 2u + qwc <= 0xFFFFu;
+        if (!ok) break;
+        if (qwc) {
+            const size_t old = data.size();
+            data.resize(old + size_t(qwc) * 2u);
+            std::memcpy(&data[old], getMemPtr(rdram, from), size_t(qwc) * 16u);
+        }
+        if (id == 6u) break;
+        tag = id == 2u ? addr : id == 1u ? tag + 0x10u + qwc * 16u : tag + 0x10u;
+    }
+    if (!ok || data.empty()) { ++g_carZtieStats.shape; return {}; }
+    uint64_t vertices = 0;
+    g_carZtieTimes = times;
+    if (!rrvCarZtieBias(data, vertices)) { ++g_carZtieStats.parse; return {}; }
+    g_carZtieStats.vertices += vertices;
+    return data;
+}
+// Writes [CNT][quadwords][RET] at the cursor and advances it. Returns the address of the CNT tag.
+uint32_t rrvCarZtieEmit(uint8_t* rdram, const CarZtieList& dl, const std::vector<uint64_t>& data) {
+    const uint32_t bytes = uint32_t(data.size()) * 8u;
+    uint8_t* out = getMemPtr(rdram, dl.cursor);
+    const uint64_t cnt[2] = {0x10000000ull | (data.size() / 2u), 0}, ret[2] = {0x60000000ull, 0};
+    std::memcpy(out, cnt, 16);
+    std::memcpy(out + 0x10u, data.data(), bytes);
+    std::memcpy(out + 0x10u + bytes, ret, 16);
+    const uint32_t advanced = dl.cursorRaw + 0x20u + bytes;
+    std::memcpy(getMemPtr(rdram, kCarLodDlCursor), &advanced, 4);
+    g_carZtieStats.bytes += 0x20u + bytes;
+    return dl.cursor;
+}
+
+void patch_0x222ad0_car_ztie(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    g_carZtie = {};
+    g_ztie222AD0Orig(rdram, ctx, runtime);
+}
+
+// The environment-map stream ([gp - 0x5B20] + 0): CALL a raised copy instead.
+void patch_0x222d60_car_ztie(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    const uint32_t pair = rrvCarLodRead32(rdram, kCarZtieStream);
+    const CarZtieList dl(rdram);
+    if (!rrvCarZtieSite(kCarZtieEnvRa, GPR_U32(ctx, 31)) || !dl.valid) return g_ztie222D60Orig(rdram, ctx, runtime);
+    const std::vector<uint64_t> data = rrvCarZtieCopy(rdram, dl, pair & 0x0FFFFFFFu, 2u);
+    if (data.empty()) return g_ztie222D60Orig(rdram, ctx, runtime);
+    if (!dl.room(uint32_t(data.size()) * 8u + 0x20u)) { ++g_carZtieStats.room; return g_ztie222D60Orig(rdram, ctx, runtime); }
+    const uint32_t copyPair = (pair & 0xF0000000u) | rrvCarZtieEmit(rdram, dl, data);
+    std::memcpy(getMemPtr(rdram, kCarZtieStream), &copyPair, 4); // for this one call
+    g_ztie222D60Orig(rdram, ctx, runtime);
+    std::memcpy(getMemPtr(rdram, kCarZtieStream), &pair, 4);
+    ++g_carZtieStats.envs;
+}
+
+void patch_0x222d98_car_ztie(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    const uint32_t list = GPR_U32(ctx, 4) & 0x0FFFFFFFu;
+    const uint32_t stream = (rrvCarLodRead32(rdram, kCarZtieStream) + 0x10u) & 0x0FFFFFFFu;
+    const CarZtieList dl(rdram);
+    const auto stock = [&](bool remember) {
+        g_carZtie = remember ? CarZtieState{stream, list, dl.cursor} : CarZtieState{};
+        g_ztie222D98Orig(rdram, ctx, runtime);
+    };
+    if (!dl.valid) return stock(false);
+    if (g_carZtie.stream != stream || !rrvCarZtieSite(kCarZtieBodyRa, GPR_U32(ctx, 31))) return stock(true);
+    if (g_carZtie.list != list) { ++g_carZtieStats.lists; return stock(false); }
+
+    // The CALL packet of the pass drawn later, already in the list: point it at a raised copy.
+    const uint32_t call = g_carZtie.call;
+    if (!dl.inside(call, 0x20u) || rrvCarLodRead32(rdram, call) != 0x50000000u ||
+        (rrvCarLodRead32(rdram, call + 4u) & 0x0FFFFFFFu) != stream) {
+        ++g_carZtieStats.shape;
+        return stock(false);
+    }
+    const std::vector<uint64_t> data = rrvCarZtieCopy(rdram, dl, stream, 1u);
+    if (data.empty()) return stock(false);
+    if (!dl.room(uint32_t(data.size()) * 8u + 0x20u)) { ++g_carZtieStats.room; return stock(false); }
+    const uint32_t copy = rrvCarZtieEmit(rdram, dl, data);
+    std::memcpy(getMemPtr(rdram, call + 4u), &copy, 4);
+    g_ztie222D98Orig(rdram, ctx, runtime); // the pass drawn first: stock
+    g_carZtie = {};
+    ++g_carZtieStats.bodies;
+}
+
+void rrvCarZtieReport() {
+    const CarZtieStats& s = g_carZtieStats;
+    std::fprintf(stderr, "[rr5-enhance] car depth tie: %llu second body passes raised, %llu environment passes raised "
+                         "(%llu bytes, %llu vertices); kept stock: %llu stream shape, %llu GIF parse, %llu list room, "
+                         "%llu other list\n",
+                 (unsigned long long)s.bodies, (unsigned long long)s.envs, (unsigned long long)s.bytes,
+                 (unsigned long long)s.vertices, (unsigned long long)s.shape, (unsigned long long)s.parse,
+                 (unsigned long long)s.room, (unsigned long long)s.lists);
+}
 } // namespace
 
 // RR5 enhancement (opt-in, owner direction 2026-09-27): real widescreen.
@@ -2109,6 +2322,44 @@ void rrvCarLodReport() {
 // ends, the next mode sets p[1] = 1.0 and the block is a gameplay camera
 // again, with the p[0] the gameplay path would have produced.
 // func_22CB88's other caller (func_2364F0) keeps the stock ay.
+// Main menu (issue fukami#2, 2026-10-11). The menu frame (func_24D290) builds
+// the camera with func_220E10, so everything drawn through the block is
+// widened with the gameplay camera. The Ai Fukami silhouette of that screen
+// (func_24EF48 screen 4 -> func_2364F0) uses func_22CB88's projection instead,
+// with ax 0.8 and ay 0.368, so it was drawn for 4:3 and shown stretched
+// (measured on 1.0.1-windows, field 4200: the same silhouette pixels at 4:3 and
+// 16:9, bounding box x 90..461, y 36..447). Inside func_2364F0 ax ([0x332F80])
+// is scaled by (4/3)/A for the call: the horizontal view grows like the
+// gameplay camera's and ay stays stock. The attract path (func_233240) is
+// unchanged. Not yet validated in the game.
+// Main menu dot background (same issue, 2026-10-11). The dots (func_276738 ->
+// func_275AA8: a lattice of 8x8 cells of 128 x 102 model units, x -512..512,
+// y -408..408, drawn through the camera block) are widened with the camera, but
+// the lattice only covers the 4:3 view, so at 16:9 a dot-less band was left
+// at the LEFT (the stock lattice fades out to the right, so there is no band
+// there; measured 2026-10-11: the +1024 copy changed no pixel, and the left band,
+// x 0..74 at 16:9, 0..47 at 16:10, 0..132 at 21:9, is filled by the -1024 copy
+// with a continuous seam). func_275AA8 takes no arguments (it builds a matrix from the
+// model block at [0x335030]: rotation at +0, translation at +0x10, which
+// func_276738 sets to 0,0,-1800 right before the call), writes the packets at
+// the cursor [0x3470A0] and flushes them (func_21FCE8). With widescreen on it is
+// run once more with the model's X translation moved by -1024 (8 whole cells,
+// so the lattice continues; the copy reaches -1536 against the 4:3 view's -512,
+// and the widest supported view, 21:9, needs -896). Nothing rotates or mirrors
+// the lattice (func_276738 writes rotation 0,0,0 and translation 0,0,-1800 once
+// per frame; func_275AA8's only caller is func_276738; the other writers of
+// [gp-0x5640] only set the pointer). The
+// stock run is LAST, so the global matrix at 0x1DE0E70 that every run writes
+// ends as the stock game leaves it. A copy writes at most 64 rows x 0xF0 bytes
+// (15 KB) into the display list, and nothing checks the list's end, so the
+// extra copy is only drawn while 0x20000 bytes remain. The extra run is
+// guest instructions like any other: it is charged one modeled cycle each,
+// so the menu field costs the game (roughly 64 cells x 4 vertices) more
+// work, as if it had drawn a wider mesh. Guest effect (measured 2026-10-11):
+// with widescreen on, RAM digests differ from the main menu onwards and do not
+// reconverge, while pixels (fields 705-5300, a race included) and modeled
+// cycles per start are identical to without; cause not identified (assumed
+// stale display-list memory).
 // RRV_RR5_WIDESCREEN_INTRO=gameplay (developer A/B) treats the intro as a
 // gameplay camera again; RRV_RR5_WIDESCREEN_LOG=1 logs every profile change
 // and, in the intro profile, every change of the X factor.
@@ -2118,6 +2369,7 @@ constexpr uint32_t kWsBlockP1 = 0x1DE0CB4u;
 constexpr uint32_t kWsBlockP2 = 0x1DE0CB8u;
 constexpr uint32_t kWsAttractP1Bits = 0x3F4CCCCDu; // 0.8f
 constexpr uint32_t kWsAttractAy = 0x332F84u;
+constexpr uint32_t kWsViewScreenAx = 0x332F80u;    // func_22CB88's ax, next to ay
 constexpr uint32_t kWsPacketCursor = 0x3470A0u;    // func_23D408 builds its packets here
 constexpr uint32_t kWsScenePhase = 0x334E94u;
 constexpr uint32_t kWsReaders[] = {0x220E10u, 0x21BF08u, 0x21B408u, 0x21B098u, 0x222620u,
@@ -2159,6 +2411,14 @@ bool g_wsIntroPath = false; // the intro profile is registered
 bool g_wsIntro = false;     // the block is the attract's camera
 bool g_wsLog = false;
 uint32_t g_wsAttractDepth = 0;
+PS2Runtime::RecompiledFunction g_wsMenuGirlOrig = nullptr;
+uint32_t g_wsMenuGirlDepth = 0; // inside func_2364F0 (the main-menu character)
+PS2Runtime::RecompiledFunction g_wsDotsOrig = nullptr;
+constexpr uint32_t kWsDotsEntry = 0x275AA8u;
+constexpr uint32_t kWsDotsModel = 0x335030u;       // [gp-0x5640]: the dots' model block (translation at +0x10)
+constexpr float kWsDotsStep = 1024.0f;             // 8 lattice cells of 128 model units
+constexpr uint32_t kWsDotsRoom = 0x20000u;         // display-list bytes needed for the extra run (it uses <= 0x3C00)
+bool g_wsDotsNoRoomLogged = false;
 uint32_t g_wsIntroP0 = 0;   // p[0] as the attract left it
 
 uint32_t rrvWsRead32(uint8_t* rdram, uint32_t addr) {
@@ -2229,9 +2489,23 @@ void patch_0x23e3c8_ws_attract(uint8_t* rdram, R5900Context* ctx, PS2Runtime* ru
     g_wsAttractOrig(rdram, ctx, runtime);
 }
 
-// func_22CB88 is the only reader of ay; the word is put back after the call.
+// func_2364F0 draws the main-menu character through func_22CB88; the depth
+// tells the viewscreen wrapper below that call is the menu's.
+void patch_0x2364f0_ws_menu_girl(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    struct Scope {
+        Scope() { ++g_wsMenuGirlDepth; }
+        ~Scope() { --g_wsMenuGirlDepth; }
+    } scope;
+    g_wsMenuGirlOrig(rdram, ctx, runtime);
+}
+
+// func_22CB88 is the only reader of ax and ay; the word is put back after the call.
+// Attract (only with the intro path registered): ay x 1/F. Main menu character
+// (inside func_2364F0, not attract): ax x F, F = (4/3)/A. Anything else: stock.
 void patch_0x22cb88_ws_viewscreen(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
-    uint8_t* p = g_wsAttractDepth > 0u ? getMemPtr(rdram, kWsAttractAy) : nullptr;
+    const bool attract = g_wsIntroPath && g_wsAttractDepth > 0u;
+    const bool menu = !attract && g_wsMenuGirlDepth > 0u;
+    uint8_t* p = attract ? getMemPtr(rdram, kWsAttractAy) : menu ? getMemPtr(rdram, kWsViewScreenAx) : nullptr;
     if (!p) {
         g_wsViewScreenOrig(rdram, ctx, runtime);
         return;
@@ -2242,11 +2516,88 @@ void patch_0x22cb88_ws_viewscreen(uint8_t* rdram, R5900Context* ctx, PS2Runtime*
         ~Restore() { std::memcpy(p, &bits, 4); }
     } restore{p, 0u};
     std::memcpy(&restore.bits, p, 4);
-    float ay;
-    std::memcpy(&ay, p, 4);
-    ay *= 1.0f / g_wsFactor;
-    std::memcpy(p, &ay, 4);
+    float v;
+    std::memcpy(&v, p, 4);
+    v *= attract ? 1.0f / g_wsFactor : g_wsFactor;
+    std::memcpy(p, &v, 4);
     g_wsViewScreenOrig(rdram, ctx, runtime);
+}
+
+// The character transformers (func_22D390 picks one per part: func_22E7A8, func_22EE78, func_22EAA8,
+// func_22F370; arguments obj, part, positions) leave one 16-byte entry per vertex at `positions`
+// (0x1E24FE0): X, Y, Z as integers, X and Y in 12.4 GS units, and func_22D810 copies the low 16 bits
+// of X and Y into the XYZ words. A coordinate above 4095.9375 therefore wraps. The stock cinematic
+// stays inside: measured on the hip close-up (attract fields 1869-1874), part 14 of the character (601
+// vertices, a hand below the frame, close to the camera) reaches Y 3792 with the stock ay; with the intro
+// profile's ay x4/3 (16:9) it reaches 2048 + (3792 - 2048) x 4/3 = 4373, wraps to the top of the screen
+// and its triangles cover the right side of the picture from top to bottom (dark, six fields).
+// In the intro profile X and Y are clamped to the GS range after each transformer. A clamped vertex is
+// more than 1900 pixels outside the 640x224 window, so only the far end of a triangle that already
+// leaves the screen moves. Stock, gameplay and the main menu are untouched (their values are stock).
+constexpr uint32_t kWsCharTransformers[] = {0x22E7A8u, 0x22EE78u, 0x22EAA8u, 0x22F370u};
+constexpr uint32_t kWsCharTransformerCount = sizeof(kWsCharTransformers) / sizeof(kWsCharTransformers[0]);
+PS2Runtime::RecompiledFunction g_wsCharOrig[kWsCharTransformerCount] = {};
+uint32_t g_wsCharClamped = 0;
+
+template <uint32_t I>
+void patch_ws_char_transform(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    const uint32_t part = GPR_U32(ctx, 5), positions = GPR_U32(ctx, 6);
+    g_wsCharOrig[I](rdram, ctx, runtime);
+    if (g_wsAttractDepth == 0u) return;
+    const uint8_t* pp = getMemPtr(rdram, part + 0x6Eu);
+    if (!pp) return;
+    uint16_t count;
+    std::memcpy(&count, pp, 2);
+    uint8_t* v = getMemPtr(rdram, positions);
+    if (!v || !getMemPtr(rdram, positions + count * 16u)) return;
+    for (uint32_t i = 0; i < count; ++i, v += 16) {
+        int32_t xy[2];
+        std::memcpy(xy, v, 8);
+        const int32_t x = std::clamp(xy[0], 0, 0xFFFF), y = std::clamp(xy[1], 0, 0xFFFF);
+        if (x == xy[0] && y == xy[1]) continue;
+        xy[0] = x;
+        xy[1] = y;
+        std::memcpy(v, xy, 8);
+        if (g_wsLog && g_wsCharClamped++ == 0u)
+            std::fprintf(stderr, "[rr5-enhance] widescreen intro: character vertex outside the GS range clamped "
+                                 "(func_%06X, first of this run)\n", kWsCharTransformers[I]);
+    }
+}
+constexpr PS2Runtime::RecompiledFunction kWsCharPatches[] = {
+    patch_ws_char_transform<0>, patch_ws_char_transform<1>, patch_ws_char_transform<2>, patch_ws_char_transform<3>};
+static_assert(sizeof(kWsCharPatches) / sizeof(kWsCharPatches[0]) == kWsCharTransformerCount);
+
+// func_275AA8, the main-menu dot lattice: one more run shifted by -1024 model units in X (see the
+// long comment above), then the stock run. It takes no arguments, so every run is entered with the pc
+// the caller used and ends with the caller's return address in the pc.
+void patch_0x275aa8_ws_menu_dots(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    const uint32_t entry = ctx->pc, ra = GPR_U32(ctx, 31);
+    const uint32_t model = rrvCarLodRead32(rdram, kWsDotsModel);
+    uint8_t* tx = model ? getMemPtr(rdram, model + 0x10u) : nullptr;
+    if (entry != kWsDotsEntry || !tx) return g_wsDotsOrig(rdram, ctx, runtime);
+    if (rrvCarLodRoomLeft(rdram) < kWsDotsRoom) {
+        if (!std::exchange(g_wsDotsNoRoomLogged, true))
+            std::fprintf(stderr, "[rr5-enhance] widescreen menu: dot background kept stock (display list nearly full)\n");
+        return g_wsDotsOrig(rdram, ctx, runtime);
+    }
+    struct Restore {
+        uint8_t* p;
+        uint32_t bits;
+        ~Restore() { std::memcpy(p, &bits, 4); }
+    } restore{tx, 0u};
+    std::memcpy(&restore.bits, tx, 4);
+    float stock;
+    std::memcpy(&stock, tx, 4);
+    for (const float dx : {-kWsDotsStep}) {
+        const float x = stock + dx;
+        std::memcpy(tx, &x, 4);
+        ctx->pc = entry;
+        g_wsDotsOrig(rdram, ctx, runtime);
+        if (ctx->pc != ra) return; // a run that did not return to the caller: leave it as it is
+    }
+    std::memcpy(tx, &restore.bits, 4);
+    ctx->pc = entry;
+    g_wsDotsOrig(rdram, ctx, runtime); // the stock run last: the global matrix ends as the stock game leaves it
 }
 
 // One bar: GIF tag 0x5122400000008001 (one tristrip, PRIM 0x244), registers
@@ -2397,6 +2748,84 @@ void patch_0x21d0b0_draw_distance(uint8_t* rdram, R5900Context* ctx, PS2Runtime*
     rrvDdWrite32(rdram, 0x1DE08A4u, nearCount + extraCount);
 }
 } // namespace
+
+// Diagnostic (developer, RRV_RR5_VISIBILITY_LOG=1): the scenery visibility choice of every func_21D0B0 call.
+// Its four callers (func_21D850, func_21D930, func_21DA10, func_21DAF0: the race, the attract cinematic and the
+// two-player views) all take the section and octant from func_21AE80: section = course position / 20, octant =
+// (int)((double)(heading / [gp-0x7924]) + 0.5) % 8 with the game's soft-float double routines, heading being
+// [0x1DE0E14] with [gp-0x7928] added when negative. The line gives the call number, the attract scene, the caller's
+// return address, the section and octant the game passed, the octant the host computes from the same heading, and the
+// list sizes as the game left them; it is printed when any of them changes. Nothing is written to guest memory.
+namespace {
+PS2Runtime::RecompiledFunction g_vis21D0B0Orig = nullptr;
+
+void patch_0x21d0b0_visibility_log(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    static uint64_t calls = 0;
+    static uint32_t last[5] = {~0u, ~0u, ~0u, ~0u, ~0u};
+    const uint32_t section = GPR_U32(ctx, 4), octant = GPR_U32(ctx, 5), ra = GPR_U32(ctx, 31);
+    float heading, wrap, step;
+    const uint32_t headingBits = rrvDdRead32(rdram, 0x1DE0E14u);
+    const uint32_t wrapBits = rrvDdRead32(rdram, 0x332D48u), stepBits = rrvDdRead32(rdram, 0x332D4Cu);
+    std::memcpy(&heading, &headingBits, 4);
+    std::memcpy(&wrap, &wrapBits, 4);
+    std::memcpy(&step, &stepBits, 4);
+    g_vis21D0B0Orig(rdram, ctx, runtime);
+    ++calls;
+    const float h = heading < 0.0f ? heading + wrap : heading;
+    const double turns = static_cast<double>(h / step) + 0.5;
+    const int hostOctant = static_cast<int>(turns) % 8;
+    const uint32_t count = rrvDdRead32(rdram, 0x1DE08A0u), nearCount = rrvDdRead32(rdram, 0x1DE08A4u);
+    const uint32_t scene = rrvDdRead32(rdram, 0x334E94u);
+    if (section == last[0] && octant == last[1] && count == last[2] && nearCount == last[3] && scene == last[4] &&
+        static_cast<uint32_t>(hostOctant) == octant)
+        return;
+    last[0] = section, last[1] = octant, last[2] = count, last[3] = nearCount, last[4] = scene;
+    std::fprintf(stderr, "[rr5-vis] call %llu scene %u ra %06X section %u octant %u host octant %d (heading %.6f %08X, "
+                         "turns %.6f) blocks %u near %u\n",
+                 static_cast<unsigned long long>(calls), scene, ra, section, octant, hostOctant, heading, headingBits,
+                 turns, count, nearCount);
+}
+
+// Experiment (developer, RRV_RR5_VISIBILITY_SIDES=1): the baked list changes whenever the camera heading crosses an
+// octant boundary (every 45 degrees), and a block that is in one octant's list and not in the next appears or
+// disappears while it is on screen. This adds the blocks of the two neighbouring octants' lists of the same section
+// to the clipped (near) group, as the draw distance does for the sections ahead, so a turn of the camera no longer
+// changes what is drawn until it has turned a further 45 degrees. It changes what the guest draws.
+PS2Runtime::RecompiledFunction g_sides21D0B0Orig = nullptr;
+
+void patch_0x21d0b0_octant_sides(uint8_t* rdram, R5900Context* ctx, PS2Runtime* runtime) {
+    const uint32_t section = GPR_U32(ctx, 4), octant = GPR_U32(ctx, 5) & 7u;
+    g_sides21D0B0Orig(rdram, ctx, runtime);
+    const uint32_t count = std::min(rrvDdRead32(rdram, 0x1DE08A0u), 0x100u);
+    const uint32_t nearCount = std::min(rrvDdRead32(rdram, 0x1DE08A4u), count);
+    uint32_t blocks[0x100], extra[0x100], extraCount = 0;
+    for (uint32_t i = 0; i < count; ++i) blocks[i] = rrvDdRead32(rdram, 0x1DE08A8u + i * 4u);
+    auto present = [&](uint32_t b) {
+        for (uint32_t i = 0; i < count; ++i) if (blocks[i] == b) return true;
+        for (uint32_t i = 0; i < extraCount; ++i) if (extra[i] == b) return true;
+        return false;
+    };
+    for (const uint32_t side : {(octant + 1u) & 7u, (octant + 7u) & 7u}) {
+        uint32_t list = 0, n = 0;
+        if (!rrvDdEntry(rdram, section, side, &list, &n)) continue;
+        for (uint32_t i = 0; i < n && count + extraCount < 0x100u; ++i) {
+            const uint8_t* p = getMemPtr(rdram, list + i * 2u);
+            if (!p) break;
+            uint16_t b;
+            std::memcpy(&b, p, 2);
+            if (!present(b)) extra[extraCount++] = b;
+        }
+    }
+    if (extraCount == 0u) return;
+    // Original near group, the neighbours' blocks (clipped group), original far group.
+    uint32_t out = nearCount;
+    for (uint32_t i = 0; i < extraCount; ++i) rrvDdWrite32(rdram, 0x1DE08A8u + (out++) * 4u, extra[i]);
+    for (uint32_t i = nearCount; i < count; ++i) rrvDdWrite32(rdram, 0x1DE08A8u + (out++) * 4u, blocks[i]);
+    rrvDdWrite32(rdram, 0x1DE08A0u, count + extraCount);
+    rrvDdWrite32(rdram, 0x1DE08A4u, nearCount + extraCount);
+}
+} // namespace
+
 // RR5 enhancement (opt-in, owner direction 2026-09-30): fast unpack.
 // func_221D68 is the game's LZSS unpacker (called only from func_222258). It
 // can stop when the available input (a2, 0 = all of it) runs short and resume
@@ -2936,15 +3365,28 @@ template <size_t... I>
 constexpr std::array<Fn, sizeof...(I)> thunks(std::index_sequence<I...>) { return {&thunk<I>...}; }
 void registerAll(PS2Runtime& runtime) {
     static constexpr auto table = thunks(std::make_index_sequence<kCount>{});
-    size_t n = 0;
-    for (size_t i = 0; i < kCount; ++i) {
+    size_t n = 0, wrapped = 0;
+    // RRV_RR5_NATIVE_COUNT=N (developer): only the first N functions of the list, to find the one behind
+    // a difference by halving.
+    size_t count = kCount;
+    if (const char* v = std::getenv("RRV_RR5_NATIVE_COUNT"); v && v[0])
+        count = std::min<size_t>(kCount, static_cast<size_t>(std::strtoull(v, nullptr, 10)));
+    for (size_t i = 0; i < count; ++i) {
         const Entry& e = rrv_native_entries[i];
+        if (!runtime.hasFunction(e.address)) continue;
         // Only replace the generated original, never another patch.
-        if (!runtime.hasFunction(e.address) || runtime.lookupFunction(e.address) != e.original) continue;
+        if (runtime.lookupFunction(e.address) != e.original) {
+            // A widescreen reader wrapper (patch_ws_reader) holds the address and calls the function it
+            // replaced through a saved pointer: that call takes the native version.
+            for (uint32_t r = 0; r < kWsReaderCount; ++r)
+                if (kWsReaders[r] == e.address && g_wsReaderOrig[r] == e.original) { g_wsReaderOrig[r] = table[i]; ++wrapped; }
+            continue;
+        }
         runtime.registerFunction(e.address, table[i]);
         ++n;
     }
-    std::fprintf(stderr, "[rr5-native] native hot functions: %zu of %zu registered\n", n, kCount);
+    std::fprintf(stderr, "[rr5-native] native hot functions: %zu of %zu registered, %zu more behind a widescreen wrapper\n",
+                 n, kCount, wrapped);
     std::fprintf(stderr, "[rr5-car] native vertex block loop (func_222EB8): %s\n",
                  !rrv_car::kEnabled ? "off (RRV_RR5_NATIVE_BUILDER=0)" : rrv_car::kVerify ? "verify" : "on");
     static const bool atExit = [] { std::atexit([] {
@@ -3137,6 +3579,41 @@ void registerPatches(PS2Runtime& runtime)
         }
     }
 
+    if (const char* e = std::getenv("RRV_RR5_CAR_ZTIE"); e && e[0]) {
+        const long units = std::strtol(e, nullptr, 10);
+        if (units >= 1 && units <= 4096 && runtime.hasFunction(0x222D98u) && runtime.hasFunction(0x222AD0u) &&
+            runtime.hasFunction(0x222D60u)) {
+            g_carZtieUnits = static_cast<uint32_t>(units);
+            g_ztie222D98Orig = runtime.lookupFunction(0x222D98u);
+            g_ztie222AD0Orig = runtime.lookupFunction(0x222AD0u);
+            g_ztie222D60Orig = runtime.lookupFunction(0x222D60u);
+            runtime.registerFunction(0x222D98u, patch_0x222d98_car_ztie);
+            runtime.registerFunction(0x222AD0u, patch_0x222ad0_car_ztie);
+            runtime.registerFunction(0x222D60u, patch_0x222d60_car_ztie);
+            std::atexit(rrvCarZtieReport);
+            std::fprintf(stderr, "[rr5-enhance] car depth tie: the car's second layer is drawn %u Z units per 2^20 in "
+                                 "front, its environment map twice that (func_227298)\n", g_carZtieUnits);
+        }
+    }
+
+    // Before the draw distance, which chains to whatever func_21D0B0 is at that point.
+    if (const char* e = std::getenv("RRV_RR5_VISIBILITY_LOG"); e && e[0] && e[0] != '0') {
+        if (runtime.hasFunction(0x21D0B0u)) {
+            g_vis21D0B0Orig = runtime.lookupFunction(0x21D0B0u);
+            runtime.registerFunction(0x21D0B0u, patch_0x21d0b0_visibility_log);
+            std::fprintf(stderr, "[rr5-vis] logging the scenery visibility choice (func_21D0B0)\n");
+        }
+    }
+
+    if (const char* e = std::getenv("RRV_RR5_VISIBILITY_SIDES"); e && e[0] && e[0] != '0') {
+        if (runtime.hasFunction(0x21D0B0u)) {
+            g_sides21D0B0Orig = runtime.lookupFunction(0x21D0B0u);
+            runtime.registerFunction(0x21D0B0u, patch_0x21d0b0_octant_sides);
+            std::fprintf(stderr, "[rr5-vis] experiment: the neighbouring octants' scenery blocks are drawn too "
+                                 "(func_21D0B0; clipped group)\n");
+        }
+    }
+
     if (const char* e = std::getenv("RRV_RR5_DRAW_DISTANCE"); e && e[0]) {
         const long n = std::strtol(e, nullptr, 10);
         g_dd21D0B0Orig = runtime.hasFunction(0x21D0B0u) ? runtime.lookupFunction(0x21D0B0u) : nullptr;
@@ -3179,14 +3656,38 @@ void registerPatches(PS2Runtime& runtime)
             if (g_wsIntroPath) {
                 g_wsAttractOrig = runtime.lookupFunction(0x23E3C8u);
                 runtime.registerFunction(0x23E3C8u, patch_0x23e3c8_ws_attract);
-                g_wsViewScreenOrig = runtime.lookupFunction(0x22CB88u);
-                runtime.registerFunction(0x22CB88u, patch_0x22cb88_ws_viewscreen);
                 g_wsBarsOrig = runtime.lookupFunction(0x23D408u);
                 runtime.registerFunction(0x23D408u, patch_0x23d408_ws_bars);
                 std::fprintf(stderr, "[rr5-enhance] widescreen intro: attract camera keeps p[0], p[2] and ay x%.4f, "
                                      "no letterbox (func_23E3C8, func_22CB88, func_23D408)\n", 1.0f / g_wsFactor);
+                uint32_t clamps = 0;
+                for (uint32_t i = 0; i < kWsCharTransformerCount; ++i) {
+                    if (!runtime.hasFunction(kWsCharTransformers[i])) continue;
+                    g_wsCharOrig[i] = runtime.lookupFunction(kWsCharTransformers[i]);
+                    runtime.registerFunction(kWsCharTransformers[i], kWsCharPatches[i]);
+                    ++clamps;
+                }
+                std::fprintf(stderr, "[rr5-enhance] widescreen intro: character vertices kept inside the GS range "
+                                     "(%u of %u transformers)\n", clamps, kWsCharTransformerCount);
             } else {
                 std::fprintf(stderr, "[rr5-enhance] widescreen intro: off, the attract uses the gameplay camera path\n");
+            }
+            // Main-menu character (func_2364F0 -> func_22CB88): registered with widescreen whatever the
+            // intro profile; the viewscreen wrapper scales ay for the attract only when g_wsIntroPath.
+            if (runtime.hasFunction(0x22CB88u) && runtime.hasFunction(0x2364F0u)) {
+                g_wsViewScreenOrig = runtime.lookupFunction(0x22CB88u);
+                runtime.registerFunction(0x22CB88u, patch_0x22cb88_ws_viewscreen);
+                g_wsMenuGirlOrig = runtime.lookupFunction(0x2364F0u);
+                runtime.registerFunction(0x2364F0u, patch_0x2364f0_ws_menu_girl);
+                std::fprintf(stderr, "[rr5-enhance] widescreen menu: character view ax x%.4f (func_2364F0, func_22CB88)\n",
+                             g_wsFactor);
+            }
+            // Main-menu dot lattice (func_275AA8): one more run at X -1024.
+            if (runtime.hasFunction(kWsDotsEntry)) {
+                g_wsDotsOrig = runtime.lookupFunction(kWsDotsEntry);
+                runtime.registerFunction(kWsDotsEntry, patch_0x275aa8_ws_menu_dots);
+                std::fprintf(stderr, "[rr5-enhance] widescreen menu: dot background drawn at X -1024, 0 "
+                                     "(func_275AA8)\n");
             }
         }
     }

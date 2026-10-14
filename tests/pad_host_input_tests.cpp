@@ -21,6 +21,9 @@ namespace
 {
 constexpr uint32_t kDmaAddress = 0x1000u;
 constexpr uint32_t kPacketAddress = 0x1100u;
+constexpr uint32_t kDmaAddress1 = 0x1200u;    // port 1
+constexpr uint32_t kPacketAddress1 = 0x1300u; // port 1
+constexpr uint32_t kActuatorAddress = 0x1400u;
 constexpr int32_t kPadStateDisconnected = 0;
 constexpr int32_t kPadStateStable = 6;
 constexpr uint8_t kPadModeDigital = 0x41u;
@@ -112,21 +115,37 @@ uint32_t call(PadCall fn, uint8_t *ram, PS2Runtime &runtime, uint32_t a0 = 0,
     return returnValue(ctx);
 }
 
+// Two PS2 ports: `state` is port 0, `second` is port 1 (disconnected unless a test connects it).
 class FakeHostPadBackend final : public HostPadBackend
 {
 public:
     HostPadState state{};
+    HostPadState second{};
     HostPadCapabilities caps{true, true, false};
+    HostPadCapabilities secondCaps{true, true, true};
+    std::array<HostPadRumble, 2> rumble{};
+    std::array<unsigned, 2> rumbleCalls{};
 
     HostPadState snapshot(unsigned port) override
     {
-        return port == 0u ? state : HostPadState{};
+        return port == 0u ? state : port == 1u ? second : HostPadState{};
     }
 
     HostPadCapabilities capabilities(unsigned port) const override
     {
-        return port == 0u ? caps : HostPadCapabilities{};
+        return port == 0u ? caps : port == 1u ? secondCaps : HostPadCapabilities{};
     }
+
+    void setRumble(unsigned port, HostPadRumble value) override
+    {
+        if (port < rumble.size())
+        {
+            rumble[port] = value;
+            ++rumbleCalls[port];
+        }
+    }
+
+    void stopRumble(unsigned port) override { setRumble(port, HostPadRumble{}); }
 };
 
 class PadHarness
@@ -167,6 +186,28 @@ public:
     int32_t state()
     {
         return static_cast<int32_t>(call(ps2_stubs::scePadGetState, ram.data(), runtime()));
+    }
+
+    // Port 1 is opened on demand: the harness opens port 0 only.
+    void openSecondPort()
+    {
+        checkEqual(call(ps2_stubs::scePadPortOpen, ram.data(), runtime(), 1, 0, kDmaAddress1),
+                   1u, "scePadPortOpen succeeds for port 1");
+    }
+
+    std::array<uint8_t, 32> readSecond()
+    {
+        std::memset(ram.data() + kPacketAddress1, 0xa5, 32);
+        checkEqual(call(ps2_stubs::scePadRead, ram.data(), runtime(), 1, 0, kPacketAddress1),
+                   1u, "scePadRead succeeds for an open port 1");
+        std::array<uint8_t, 32> packet{};
+        std::memcpy(packet.data(), ram.data() + kPacketAddress1, packet.size());
+        return packet;
+    }
+
+    int32_t secondState()
+    {
+        return static_cast<int32_t>(call(ps2_stubs::scePadGetState, ram.data(), runtime(), 1));
     }
 
     PS2Runtime &runtime() { return *m_runtime; }
@@ -215,6 +256,66 @@ void testConnectionAndReconnect(PadHarness &harness)
     checkEqual(harness.state(), kPadStateStable, "reconnect returns to stable");
     packet = harness.read();
     check((packet[3] & (1u << 6)) == 0u, "reconnected fake reaches guest packet");
+}
+
+// Two controllers: the second one answers on PS2 port 1 (player 2), independent of port 0.
+void testSecondPort()
+{
+    PadHarness harness;
+    harness.openSecondPort();
+
+    // Only port 0 present: port 1 is open but disconnected and reads neutral.
+    harness.backend->state.connected = true;
+    harness.backend->state.deviceId = 0x1111u;
+    checkEqual(harness.state(), kPadStateStable, "port 0 is stable with one controller");
+    checkEqual(harness.secondState(), kPadStateDisconnected,
+               "port 1 is disconnected when only port 0 is present");
+    checkNeutralPacket(harness.readSecond(), "a disconnected port 1 reads a neutral packet");
+
+    // The second controller connects: stable on port 1, and stays stable across reads.
+    harness.backend->second.connected = true;
+    harness.backend->second.deviceId = 0x2222u;
+    checkEqual(harness.secondState(), kPadStateStable, "port 1 is stable when its controller is connected");
+    checkEqual(harness.secondState(), kPadStateStable, "port 1 stays stable on the next poll");
+    checkEqual(harness.state(), kPadStateStable, "port 0 is unchanged by port 1 connecting");
+
+    // The two packets are independent.
+    harness.backend->state.pressedButtons = HostPadButtonStart;
+    harness.backend->second.pressedButtons = HostPadButtonCross;
+    harness.backend->second.leftX = 1.0f;
+    auto first = harness.read();
+    auto second = harness.readSecond();
+    check((first[2] & (1u << 3)) == 0u && (first[3] & (1u << 6)) != 0u, "port 0 packet holds only port 0 input");
+    check((second[3] & (1u << 6)) == 0u && (second[2] & (1u << 3)) != 0u, "port 1 packet holds only port 1 input");
+    checkEqual(first[6], uint8_t{128}, "port 0 left stick is not moved by port 1");
+    checkEqual(second[6], uint8_t{255}, "port 1 left stick reaches its own packet");
+
+    // Port 0 leaving does not disturb port 1 (slots never shift).
+    harness.backend->state = {};
+    checkEqual(harness.state(), kPadStateDisconnected, "port 0 disconnects on its own");
+    checkEqual(harness.secondState(), kPadStateStable, "port 1 stays stable when port 0 is removed");
+    second = harness.readSecond();
+    check((second[3] & (1u << 6)) == 0u, "port 1 keeps its input when port 0 is removed");
+
+    // Rumble reaches only the port that was written.
+    auto *ram = harness.ram.data();
+    const uint8_t align[6] = {0u, 1u, 0xffu, 0xffu, 0xffu, 0xffu}; // small motor in byte 0, large in byte 1
+    std::memcpy(ram + kActuatorAddress, align, sizeof(align));
+    checkEqual(call(ps2_stubs::scePadSetActAlign, ram, harness.runtime(), 1, 0, kActuatorAddress), 1u,
+               "scePadSetActAlign succeeds for port 1");
+    const uint8_t motors[6] = {1u, 255u, 0u, 0u, 0u, 0u};
+    std::memcpy(ram + kActuatorAddress, motors, sizeof(motors));
+    checkEqual(call(ps2_stubs::scePadSetActDirect, ram, harness.runtime(), 1, 0, kActuatorAddress), 1u,
+               "scePadSetActDirect succeeds for port 1");
+    checkEqual(harness.backend->rumbleCalls[1], 1u, "port 1 actuator write reaches setRumble(1)");
+    checkEqual(harness.backend->rumbleCalls[0], 0u, "port 1 actuator write does not reach setRumble(0)");
+    check(harness.backend->rumble[1].lowFrequency == 1.0f && harness.backend->rumble[1].highFrequency == 1.0f,
+          "port 1 motor levels arrive intact");
+
+    checkEqual(call(ps2_stubs::scePadSetActDirect, ram, harness.runtime(), 0, 0, kActuatorAddress), 1u,
+               "scePadSetActDirect succeeds for port 0");
+    checkEqual(harness.backend->rumbleCalls[0], 1u, "port 0 actuator write reaches setRumble(0)");
+    checkEqual(harness.backend->rumbleCalls[1], 1u, "port 0 actuator write does not reach setRumble(1)");
 }
 
 void testButtonsAxesAndDeadzone(PadHarness &harness)
@@ -555,6 +656,7 @@ int main()
 #if defined(RRV_PAD_PRESSURE_FIX) && RRV_PAD_PRESSURE_FIX
     testSetButtonInfoNegotiation();
 #endif
+    testSecondPort();
     PadHarness harness;
     testConnectionAndReconnect(harness);
     testButtonsAxesAndDeadzone(harness);

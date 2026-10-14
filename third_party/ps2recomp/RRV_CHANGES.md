@@ -88,6 +88,16 @@ Paths are relative to `third_party/ps2recomp/`. "Overlays" are those whose trans
   `src/lib/ps2_vu1.cpp`: SPDX / PCSX2 provenance header lines added (they adapt PCSX2 logic); no code change.
 - `CMakeLists.txt`: `ps2xStudio` (upstream's GUI) and `ps2xTest` (its tests) are added only if their directories exist. The product never builds
   it, and the public Fukami export leaves it out (its bundled fonts carry no licence file).
+- `ps2xRuntime/cmake/ReleaseMode.cmake` (Windows port): a clang-cl branch ahead of the `MSVC` one. clang-cl sets `MSVC` too, and
+  that branch is for cl.exe (`/fp:fast`, `/GL`, `/LTCG`): fast-math would break the bit-exact guest FPU/VU results. clang-cl gets
+  `/O2`-class options only; ThinLTO comes from `INTERPROCEDURAL_OPTIMIZATION_RELEASE` (`-flto=thin`).
+- Windows port, runtime sources (clang-cl, MSVC ABI): `ps2xRuntime/include/ThreadNaming.h` includes `windows.h` instead of
+  declaring the Win32 calls by hand (the declarations clashed with the real header); `src/lib/gate3_temporal_runtime.inc`
+  reads the thread CPU time with `GetThreadTimes` where it used `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` and the process CPU
+  time with `GetProcessTimes` where it used `getrusage` (start-proc-cpu.txt);
+  `src/lib/gate3_guest_admission_loader.inc` takes the UTC offset from `localtime_s` + `_mkgmtime` where it used
+  `tm_gmtoff`; `src/lib/Kernel/Stubs/MemoryCard.cpp` flushes a saved file with `_commit` (opened `r+b`, because
+  `FlushFileBuffers` needs write access) where it used `fsync`.
 - `ps2xRuntime/include/ps2_runtime.h`, `src/lib/gate3_guest_admission_runtime.inc`: `gate3ChargeNamedHleV1` keeps the
   cost entry it found for a name's address (64 slots, the text compared on every use) instead of building a
   `std::string` and walking the map on every call. Same cost, same order of service; host time only.

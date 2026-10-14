@@ -37,16 +37,43 @@ target_include_directories(rrv-ring-copy-tests PRIVATE
     "${CMAKE_SOURCE_DIR}/third_party/ps2recomp/ps2xRuntime/include")
 add_test(NAME rrv-ring-copy COMMAND rrv-ring-copy-tests)
 
+# rrv_hle::vu_exact (src/hle/rrv_vu_exact.h): the libvu0 host arithmetic (round toward zero, no denormals) and the
+# sceVu0MulMatrix body, bit for bit against the comparison-and-nextafterf formulation they replace.
+add_executable(rrv-vu-exact-tests
+    "${CMAKE_SOURCE_DIR}/tests/vu_exact_tests.cpp")
+target_include_directories(rrv-vu-exact-tests PRIVATE "${CMAKE_SOURCE_DIR}/src/hle")
+add_test(NAME rrv-vu-exact COMMAND rrv-vu-exact-tests)
+
 # rrv::host::CursorIdle (src/host/rrv_cursor_idle.h): when the full-screen product window hides the pointer.
 add_executable(rrv-cursor-idle-tests
     "${CMAKE_SOURCE_DIR}/tests/cursor_idle_tests.cpp")
 target_include_directories(rrv-cursor-idle-tests PRIVATE "${CMAKE_SOURCE_DIR}/src/host")
 add_test(NAME rrv-cursor-idle COMMAND rrv-cursor-idle-tests)
 
+# rrv::host::displayrefresh (src/host/rrv_display_refresh.h): the multiple of 60 Hz a full-screen window asks the display for.
+add_executable(rrv-display-refresh-tests
+    "${CMAKE_SOURCE_DIR}/tests/display_refresh_tests.cpp")
+target_include_directories(rrv-display-refresh-tests PRIVATE "${CMAKE_SOURCE_DIR}/src/host")
+add_test(NAME rrv-display-refresh COMMAND rrv-display-refresh-tests)
+
+# rrv::audio::RateControl, StereoResampler (src/audio/rrv_audio_rate_control.h): the jitter buffer's output follows its fill.
+add_executable(rrv-audio-rate-control-tests
+    "${CMAKE_SOURCE_DIR}/tests/audio_rate_control_tests.cpp")
+target_include_directories(rrv-audio-rate-control-tests PRIVATE "${CMAKE_SOURCE_DIR}/src/audio")
+add_test(NAME rrv-audio-rate-control COMMAND rrv-audio-rate-control-tests)
+
+# rrv::host::padslots (src/host/rrv_pad_slots.h): which controller is PS2 port 0 and which is port 1 (two stable slots).
+add_executable(rrv-pad-slots-tests
+    "${CMAKE_SOURCE_DIR}/tests/pad_slots_tests.cpp")
+target_include_directories(rrv-pad-slots-tests PRIVATE "${CMAKE_SOURCE_DIR}/src/host")
+add_test(NAME rrv-pad-slots COMMAND rrv-pad-slots-tests)
+
 # VU lean entry (VU1Interpreter::aotLean, src/vu-aot/rrv_vu_aot_engine.inc) against execute(), on real
 # instruction sequences from the AOT catalogue, for both units. Compiles the runtime's VU source whole
 # (with three external symbols stubbed), so it needs the committed catalogue and a SIMD backend: native SSE
 # on x86-64, or the locked sse2neon checkout on ARM64.
+rrv_flag_fp_contract_off(_rrv_fp_contract_off)
+rrv_flag_march_x86_64_v3(_rrv_march_x86_64_v3)
 set(_rrv_vu_lean_sse2neon "")
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
     set(_rrv_vu_lean_ok TRUE)
@@ -68,12 +95,12 @@ if(_rrv_vu_lean_ok AND EXISTS "${CMAKE_SOURCE_DIR}/generated/rr5/vu/rrv_vu_aot_b
         "${CMAKE_SOURCE_DIR}/src/vu-aot/compat" "${CMAKE_SOURCE_DIR}/generated/rr5/vu")
     target_compile_definitions(rrv-vu-lean-diff-tests PRIVATE PS2X_RRV_FIELD_ONLY=1 RRV_GS_FIELD_ONLY=1)
     # The same flags the runtime's VU source is built with: no FMA contraction (the VU FMAC rounds twice).
-    target_compile_options(rrv-vu-lean-diff-tests PRIVATE -ffp-contract=off)
+    target_compile_options(rrv-vu-lean-diff-tests PRIVATE ${_rrv_fp_contract_off})
     if(_rrv_vu_lean_sse2neon)
         target_compile_definitions(rrv-vu-lean-diff-tests PRIVATE USE_SSE2NEON)
         target_include_directories(rrv-vu-lean-diff-tests PRIVATE "${_rrv_vu_lean_sse2neon}")
     else()
-        target_compile_options(rrv-vu-lean-diff-tests PRIVATE -march=x86-64-v3)
+        target_compile_options(rrv-vu-lean-diff-tests PRIVATE ${_rrv_march_x86_64_v3})
     endif()
     target_link_libraries(rrv-vu-lean-diff-tests PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
     add_test(NAME rrv-vu-lean-diff COMMAND rrv-vu-lean-diff-tests)
@@ -87,11 +114,11 @@ if(_rrv_vu_lean_ok AND EXISTS "${CMAKE_SOURCE_DIR}/generated/rr5/vu/rrv_vu_aot_b
         get_target_property(_rrv_vu_prog_includes rrv-vu-lean-diff-tests INCLUDE_DIRECTORIES)
         target_include_directories(rrv-vu-prog-diff-tests PRIVATE ${_rrv_vu_prog_includes})
         target_compile_definitions(rrv-vu-prog-diff-tests PRIVATE PS2X_RRV_FIELD_ONLY=1 RRV_GS_FIELD_ONLY=1)
-        target_compile_options(rrv-vu-prog-diff-tests PRIVATE -ffp-contract=off)
+        target_compile_options(rrv-vu-prog-diff-tests PRIVATE ${_rrv_fp_contract_off})
         if(_rrv_vu_lean_sse2neon)
             target_compile_definitions(rrv-vu-prog-diff-tests PRIVATE USE_SSE2NEON)
         else()
-            target_compile_options(rrv-vu-prog-diff-tests PRIVATE -march=x86-64-v3)
+            target_compile_options(rrv-vu-prog-diff-tests PRIVATE ${_rrv_march_x86_64_v3})
         endif()
         target_link_libraries(rrv-vu-prog-diff-tests PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
         add_test(NAME rrv-vu-prog-diff COMMAND rrv-vu-prog-diff-tests)
@@ -106,7 +133,7 @@ if(_rrv_vu_lean_ok AND EXISTS "${CMAKE_SOURCE_DIR}/generated/rr5/vu/rrv_vu_aot_b
     if(_rrv_vu_lean_sse2neon)
         target_compile_definitions(rrv-special-address-tests PRIVATE USE_SSE2NEON)
     else()
-        target_compile_options(rrv-special-address-tests PRIVATE -march=x86-64-v3)
+        target_compile_options(rrv-special-address-tests PRIVATE ${_rrv_march_x86_64_v3})
     endif()
     add_test(NAME rrv-special-address COMMAND rrv-special-address-tests)
 endif()
@@ -248,6 +275,14 @@ if(Python3_Interpreter_FOUND)
                 --build-root "${CMAKE_SOURCE_DIR}/build/adr0006-integration/feedback-fixture")
         set_tests_properties(rrv-resource-package rrv-resource-package-build rrv-resource-package-lifecycle rrv-adr0006-feedback-fixture
             PROPERTIES LABELS "g1-h1e-native")
+    elseif(WIN32 AND CMAKE_GENERATOR STREQUAL "Ninja" AND CMAKE_BUILD_TYPE STREQUAL "Release")
+        # Windows x86-64: the producer's path-based backend (scripts/resource_package_fs.py). The macOS tests above
+        # also need fcntl, os.uname and the renameatx_np exchange; this one is portable and runs here.
+        add_test(NAME rrv-resource-package
+            COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tests/test_resource_package.py")
+        add_test(NAME rrv-resource-package-win
+            COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_SOURCE_DIR}/tests/test_resource_package_win.py")
+        set_tests_properties(rrv-resource-package rrv-resource-package-win PROPERTIES LABELS "g1-h1e-native")
     endif()
     set(RRV_CANONICAL_RECEIPT_FIXTURE
         "${CMAKE_CURRENT_BINARY_DIR}/canonical-receipt-parser-fixture.bin")
@@ -350,6 +385,10 @@ set(RRV_ASSET_FREE_REQUIRED_TARGETS
     rrv-fp-rounding-tests
     rrv-ring-copy-tests
     rrv-cursor-idle-tests
+    rrv-pad-slots-tests
+    rrv-display-refresh-tests
+    rrv-audio-rate-control-tests
+    rrv-vu-exact-tests
     rrv-launch-env)
 foreach(RRV_ASSET_FREE_TARGET IN LISTS RRV_ASSET_FREE_REQUIRED_TARGETS)
     # a target of the harness file is absent from a public checkout (scripts/asset_free_suite.json is pruned to match)
@@ -374,7 +413,7 @@ rrv_set_existing_tests_properties(
     rrv-gate3-ee-timers rrv-gate3-intc rrv-gate3-guest-rtc
     rrv-gate3-compile-workload rrv-gate3-hle-cost-inventory rrv-pad-rumble
     rrv-wait-idle rrv-vu-eatan rrv-vu-aot rrv-vu-prog rrv-make-replay rrv-check-docs rrv-launch-env-golden rrv-source-ownership rrv-ee-native-gen rrv-pcsx2-patch-series rrv-fukami-settings rrv-fukami-menu
-    rrv-fp-rounding rrv-ring-copy rrv-cursor-idle rrv-vu-codegen-writers
+    rrv-fp-rounding rrv-ring-copy rrv-cursor-idle rrv-pad-slots rrv-display-refresh rrv-audio-rate-control rrv-vu-exact rrv-vu-codegen-writers
     PROPERTIES LABELS portable-asset-free)
 rrv_set_existing_tests_properties(
     rrv-asset-free-runner-self-test rrv-m2-initial-state-controls

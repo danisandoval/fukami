@@ -16,6 +16,8 @@
 #include <thread>
 #include <type_traits>
 #include <utility>
+
+#include "rrv_thread_name.h"
 #if defined(__linux__)
 #include <pthread.h>
 #endif
@@ -232,9 +234,7 @@ private:
     static const Worker*& tCurrent() { static thread_local const Worker* current = nullptr; return current; }
     void run() noexcept
     {
-#if defined(__linux__)
-        pthread_setname_np(pthread_self(), limits_.threadName); // [cpu] log (Gate 5)
-#endif
+        rrv::setCurrentThreadName(limits_.threadName); // [cpu] log (Gate 5); Windows thread description
         { std::lock_guard lock(mutex_); owner_ = std::this_thread::get_id(); }
         tCurrent() = this;
         try

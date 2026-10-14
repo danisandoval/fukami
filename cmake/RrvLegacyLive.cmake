@@ -112,6 +112,29 @@ if(UNIX AND NOT APPLE)
     endif()
     set(RRV_BRIDGE_LINUX_VERIFY_ARGS --expected-linux-bridge-patch-sha256 "${RRV_BRIDGE_LINUX_PATCH_SHA256}")
 endif()
+# Windows: the Vulkan bridge stacks the ordered [[pcsx2_bridge_windows_patches]] of the lock on the target patch. Every
+# file must match its pin; the pins are handed to the manifest verifier in order.
+set(RRV_BRIDGE_WINDOWS_VERIFY_ARGS)
+set(RRV_BRIDGE_WINDOWS_PATCH_FILES)
+if(WIN32)
+    string(REGEX MATCHALL "\\[\\[pcsx2_bridge_windows_patches\\]\\][\r\n]+path = \"[^\"]+\"[\r\n]+sha256 = \"[0-9a-f]+\""
+        _rrv_windows_patch_blocks "${RRV_DEPENDENCY_LOCK_TEXT}")
+    if(NOT _rrv_windows_patch_blocks)
+        message(FATAL_ERROR "dependencies.lock.toml lacks [[pcsx2_bridge_windows_patches]] (Windows bridge patch pins)")
+    endif()
+    foreach(_rrv_windows_patch_block IN LISTS _rrv_windows_patch_blocks)
+        string(REGEX MATCH "path = \"([^\"]+)\"" _rrv_unused "${_rrv_windows_patch_block}")
+        set(_rrv_windows_patch_path "${CMAKE_MATCH_1}")
+        string(REGEX MATCH "sha256 = \"([0-9a-f]+)\"" _rrv_unused "${_rrv_windows_patch_block}")
+        set(_rrv_windows_patch_pin "${CMAKE_MATCH_1}")
+        file(SHA256 "${CMAKE_SOURCE_DIR}/${_rrv_windows_patch_path}" _rrv_windows_patch_actual)
+        if(NOT _rrv_windows_patch_actual STREQUAL _rrv_windows_patch_pin)
+            message(FATAL_ERROR "${_rrv_windows_patch_path} does not match its locked SHA-256")
+        endif()
+        list(APPEND RRV_BRIDGE_WINDOWS_VERIFY_ARGS --expected-windows-bridge-patch-sha256 "${_rrv_windows_patch_pin}")
+        list(APPEND RRV_BRIDGE_WINDOWS_PATCH_FILES "${CMAKE_SOURCE_DIR}/${_rrv_windows_patch_path}")
+    endforeach()
+endif()
 
 if(RRV_PRODUCT_OWNED_SOURCE)
     # The runtime and recompiler are ordinary source in this repository; the producer
@@ -195,6 +218,7 @@ execute_process(
         --expected-pcsx2-commit "${RRV_PCSX2_COMMIT}"
         --expected-bridge-patch-sha256 "${RRV_BRIDGE_PATCH_SHA256}"
         ${RRV_BRIDGE_LINUX_VERIFY_ARGS}
+        ${RRV_BRIDGE_WINDOWS_VERIFY_ARGS}
     RESULT_VARIABLE RRV_BRIDGE_VERIFY_RESULT
     OUTPUT_VARIABLE RRV_BRIDGE_VERIFY_OUTPUT
     ERROR_VARIABLE RRV_BRIDGE_VERIFY_ERROR)
@@ -275,6 +299,13 @@ if(RRV_BRIDGE_LINUX_PATCH_SHA256)
         "${CMAKE_SOURCE_DIR}/tools/patches/pcsx2-gs-bridge-linux.patch")
     set(RRV_METAL_PROVENANCE_SOURCES_JSON "\"bridge-linux-patch\":${RRV_BRIDGE_LINUX_PATCH_JSON},")
 endif()
+set(_rrv_windows_patch_index 0)
+foreach(_rrv_windows_patch_file IN LISTS RRV_BRIDGE_WINDOWS_PATCH_FILES)
+    math(EXPR _rrv_windows_patch_index "${_rrv_windows_patch_index} + 1")
+    rrv_resource_package_json_quote(_rrv_windows_patch_json "${_rrv_windows_patch_file}")
+    string(APPEND RRV_METAL_PROVENANCE_SOURCES_JSON
+        "\"bridge-windows-patch-${_rrv_windows_patch_index}\":${_rrv_windows_patch_json},")
+endforeach()
 if(_rrv_metal_manifest_paths)
     set(RRV_METAL_PROVENANCE_SOURCES_JSON
         "\"metal-verifier-manifest\":${RRV_METAL_VERIFIER_MANIFEST_JSON},\"metal-source-manifest\":${RRV_METAL_SOURCE_MANIFEST_JSON},")
@@ -283,6 +314,25 @@ file(WRITE "${RRV_RESOURCE_PACKAGE_INPUT}"
     "{\"schema\":\"rrv-resource-package-input-v1\",\"bridge\":${RRV_BRIDGE_LIBRARY_NAME_JSON},\"entries\":[{\"path\":${RRV_BRIDGE_LIBRARY_NAME_JSON},\"source\":${RRV_SOURCE_BRIDGE_PATH_JSON}}")
 file(GLOB_RECURSE RRV_RESOURCE_PACKAGE_RESOURCE_FILES LIST_DIRECTORIES false
     RELATIVE "${RRV_SOURCE_BRIDGE_RESOURCES}" "${RRV_SOURCE_BRIDGE_RESOURCES}/*")
+# Windows: the DLLs staged beside the bridge DLL (manifest runtime_libraries) are loaded into the process with it, so
+# they are package payload next to it and covered by the same inventory.
+if(WIN32)
+    string(JSON RRV_BRIDGE_LIBRARY_DIRECTORY GET "${RRV_BRIDGE_MANIFEST_TEXT}" runtime_libraries directory)
+    if(NOT IS_ABSOLUTE "${RRV_BRIDGE_LIBRARY_DIRECTORY}")
+        set(RRV_BRIDGE_LIBRARY_DIRECTORY "${CMAKE_SOURCE_DIR}/${RRV_BRIDGE_LIBRARY_DIRECTORY}")
+    endif()
+    string(JSON RRV_BRIDGE_LIBRARY_COUNT LENGTH "${RRV_BRIDGE_MANIFEST_TEXT}" runtime_libraries files)
+    math(EXPR RRV_BRIDGE_LIBRARY_LAST "${RRV_BRIDGE_LIBRARY_COUNT} - 1")
+    foreach(RRV_BRIDGE_LIBRARY_INDEX RANGE ${RRV_BRIDGE_LIBRARY_LAST})
+        string(JSON RRV_BRIDGE_LIBRARY_FILE GET "${RRV_BRIDGE_MANIFEST_TEXT}" runtime_libraries files
+            ${RRV_BRIDGE_LIBRARY_INDEX} path)
+        rrv_resource_package_json_quote(RRV_BRIDGE_LIBRARY_FILE_JSON "${RRV_BRIDGE_LIBRARY_FILE}")
+        rrv_resource_package_json_quote(RRV_BRIDGE_LIBRARY_SOURCE_JSON
+            "${RRV_BRIDGE_LIBRARY_DIRECTORY}/${RRV_BRIDGE_LIBRARY_FILE}")
+        string(APPEND RRV_RESOURCE_PACKAGE_INPUT_ENTRIES
+            ",{\"path\":${RRV_BRIDGE_LIBRARY_FILE_JSON},\"source\":${RRV_BRIDGE_LIBRARY_SOURCE_JSON}}")
+    endforeach()
+endif()
 foreach(RRV_RESOURCE_PACKAGE_RESOURCE IN LISTS RRV_RESOURCE_PACKAGE_RESOURCE_FILES)
     rrv_resource_package_json_quote(RRV_RESOURCE_PACKAGE_RESOURCE_PATH_JSON
         "resources/${RRV_RESOURCE_PACKAGE_RESOURCE}")
@@ -305,6 +355,7 @@ add_custom_target(rrv-adr0006-bridge-provenance
         --expected-pcsx2-commit "${RRV_PCSX2_COMMIT}"
         --expected-bridge-patch-sha256 "${RRV_BRIDGE_PATCH_SHA256}"
         ${RRV_BRIDGE_LINUX_VERIFY_ARGS}
+        ${RRV_BRIDGE_WINDOWS_VERIFY_ARGS}
     VERBATIM)
 add_dependencies(rrv-resource-package-producer rrv-adr0006-bridge-provenance)
 
@@ -477,8 +528,9 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
     # ARM64 already does; the files that must round twice like the VU FMAC are
     # compiled with -ffp-contract=off on both. Checked by RAM digests against
     # the macOS runtime (docs/TESTING.md T-LINUX-DECK).
-    add_compile_options(-march=x86-64-v3)
-    target_compile_options(ps2_runtime PUBLIC -march=x86-64-v3)
+    rrv_flag_march_x86_64_v3(_rrv_march_x86_64_v3)
+    add_compile_options(${_rrv_march_x86_64_v3})
+    target_compile_options(ps2_runtime PUBLIC ${_rrv_march_x86_64_v3})
 endif()
 
 # One configuration for every variant of the backend library, so a variant
@@ -672,8 +724,9 @@ if(RRV_RPC_MEMORY_SAFETY AND BUILD_TESTING)
         "${RRV_PS2RECOMP_SOURCE_DIR}/ps2xRuntime/src/lib/Kernel")
     # Stubs/Common.h appears earlier in ps2_runtime's transitive -I list.
     # -iquote selects the effective Syscalls/Common.h for this native test.
-    target_compile_options(rrv-rpc-memory-safety-tests PRIVATE
-        "-iquote${CMAKE_BINARY_DIR}/rpc-memory-safety-overlay/ps2xRuntime/src/lib/Kernel/Syscalls")
+    rrv_flag_iquote(_rrv_rpc_iquote
+        "${CMAKE_BINARY_DIR}/rpc-memory-safety-overlay/ps2xRuntime/src/lib/Kernel/Syscalls")
+    target_compile_options(rrv-rpc-memory-safety-tests PRIVATE ${_rrv_rpc_iquote})
     target_link_libraries(rrv-rpc-memory-safety-tests PRIVATE
         ps2_runtime rrv_legacy_gs_backend rrv_legacy_gs_record
         rrv_legacy_snapshot rrv_legacy_vu_compat)

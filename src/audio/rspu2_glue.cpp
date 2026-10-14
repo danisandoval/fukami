@@ -18,6 +18,7 @@
 //  * guest writes into the IOP window reach the driver in guest order.
 #include "ps2_runtime.h"
 #include "runtime/ps2_memory.h"
+#include "rrv_audio_rate_control.h"
 #include "rspu2_driver.h"
 
 #include <algorithm>
@@ -110,9 +111,18 @@ uint32_t word(const std::vector<uint8_t>& bytes, size_t index)
 // for 1024 at a time, so playback starts (and restarts after running dry)
 // only once kPrimeFrames are queued; beyond kMaxFrames the oldest are dropped
 // so latency cannot grow with host/guest drift.
+// RRV_AUDIO_RATE_CONTROL=1 (set with `[display] sync_to_display`, where the guest
+// runs at the display's rate): the output is resampled by a ratio within 0.5 %
+// of 1 that keeps the fill at kPrimeFrames, so that drift neither drops frames
+// nor runs the buffer dry (rrv_audio_rate_control.h). The display then holds the
+// game's starts back through the present, and they come less evenly (a 60 Hz
+// display, 5 minutes: 172 start intervals over 20.9 ms against 27, and the buffer
+// ran dry 5 times at 2048 frames), so playback starts at and aims for
+// kLockedPrimeFrames.
 struct Jitter
 {
     static constexpr size_t kPrimeFrames = 2048; // ~43 ms
+    static constexpr size_t kLockedPrimeFrames = 3072; // 64 ms, with rate control
     static constexpr size_t kMaxFrames = 9600;   // 200 ms
     std::vector<float> fifo = std::vector<float>(kMaxFrames * 2 * 2);
     size_t head = 0, count = 0; // in frames
@@ -128,6 +138,10 @@ struct Jitter
     // so real-time playback starts primed and empty at start N.
     std::atomic<bool> fastForward{false};
     uint64_t fastForwardFrames = 0;
+    bool rateControl = envOn("RRV_AUDIO_RATE_CONTROL");
+    size_t primeFrames() const { return rateControl ? kLockedPrimeFrames : kPrimeFrames; }
+    rrv::audio::RateControl rate;
+    rrv::audio::StereoResampler resampler;
 };
 Jitter& jitter()
 {
@@ -154,6 +168,7 @@ size_t jitterPull(void*, float* stereo, size_t frames)
         j.head = j.count = 0;
         j.priming = true;
         j.pulled = false;
+        j.rate.reset();
         return 0;
     }
     for (;;)
@@ -181,23 +196,40 @@ size_t jitterPull(void*, float* stereo, size_t frames)
         --j.count;
         ++j.droppedFrames;
     }
-    if (j.priming && j.count >= Jitter::kPrimeFrames)
+    if (j.priming && j.count >= j.primeFrames())
         j.priming = false;
     size_t out = 0;
     if (!j.priming)
     {
-        out = std::min(frames, j.count);
-        for (size_t i = 0; i < out; ++i)
+        if (j.rateControl)
         {
-            const size_t at = (j.head + i) % capacity;
-            stereo[i * 2] = j.fifo[at * 2];
-            stereo[i * 2 + 1] = j.fifo[at * 2 + 1];
+            const double ratio = j.rate.update(j.count, j.primeFrames());
+            // The ring's frames in order: up to its end, then from its start.
+            while (out < frames && j.count)
+            {
+                size_t used = 0;
+                out += j.resampler.process(&j.fifo[j.head * 2], std::min(j.count, capacity - j.head), stereo + out * 2,
+                                           frames - out, ratio, used);
+                j.head = (j.head + used) % capacity;
+                j.count -= used;
+            }
         }
-        j.head = (j.head + out) % capacity;
-        j.count -= out;
+        else
+        {
+            out = std::min(frames, j.count);
+            for (size_t i = 0; i < out; ++i)
+            {
+                const size_t at = (j.head + i) % capacity;
+                stereo[i * 2] = j.fifo[at * 2];
+                stereo[i * 2 + 1] = j.fifo[at * 2 + 1];
+            }
+            j.head = (j.head + out) % capacity;
+            j.count -= out;
+        }
         if (out < frames)
         {
             j.priming = true;
+            j.rate.reset();
             if (j.reprimes < 32)
                 j.reprimeMs[j.reprimes] = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - j.firstPull).count());
@@ -262,6 +294,9 @@ rrv::rspu2::Driver& ensureDriver(PS2Runtime* runtime)
                     std::fprintf(stderr, " %u", jt.reprimeMs[i]);
                 std::fprintf(stderr, "\n");
             }
+            if (const auto& jt = jitter(); jt.rateControl)
+                std::fprintf(stderr, "[gate8-audio] rate control: ratio %.5f to %.5f, last %.5f\n", jt.rate.lowest,
+                             jt.rate.highest, jt.rate.ratio);
             if (const auto& jt = jitter(); jt.fastForwardFrames)
                 std::fprintf(stderr, "[gate8-audio] fast-forward discarded %llu frames\n",
                              (unsigned long long)jt.fastForwardFrames);

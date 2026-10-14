@@ -3340,3 +3340,992 @@ index d8d30f3..626bb68 100644
  			[m_current_render_cmdbuf presentDrawable:m_current_drawable];
  		else
  			[m_current_render_cmdbuf addScheduledHandler:[drawable = std::move(m_current_drawable)](id<MTLCommandBuffer>){
+diff --git a/pcsx2/GS/GS.cpp b/pcsx2/GS/GS.cpp
+index dab6413..b3def9a 100644
+--- a/pcsx2/GS/GS.cpp
++++ b/pcsx2/GS/GS.cpp
+@@ -92,6 +92,23 @@ void GSRrvSetRoundSpriteUOnly(bool u_only)
+ 	GSState::s_rrv_round_sprite_u_only = u_only;
+ }
+ 
++void GSRrvSetNativeBlurCopy(u32 scratch_block)
++{
++	GSState::s_rrv_native_blur_block = scratch_block;
++	GSState::s_rrv_native_blur_draws[0].store(0, std::memory_order_relaxed);
++	GSState::s_rrv_native_blur_draws[1].store(0, std::memory_order_relaxed);
++}
++
++u32 GSRrvNativeBlurCopyBlock()
++{
++	return GSState::s_rrv_native_blur_block;
++}
++
++u64 GSRrvGetNativeBlurCopyCount(u32 pass)
++{
++	return (pass == 1 || pass == 2) ? GSState::s_rrv_native_blur_draws[pass - 1].load(std::memory_order_relaxed) : 0;
++}
++
+ void GSRrvSetDropLargeSTTriangles(bool drop)
+ {
+ 	GSState::s_rrv_drop_large_st_triangles = drop;
+diff --git a/pcsx2/GS/GS.h b/pcsx2/GS/GS.h
+index 30838bd..d9ef60d 100644
+--- a/pcsx2/GS/GS.h
++++ b/pcsx2/GS/GS.h
+@@ -100,6 +100,26 @@ u64 GSRrvGetFieldOfyCanonicalCount();
+ // rows, so rounding V to the native field texel grid would drop the rows the
+ // other field shows. 1:1 sprites (post-processing page strips) keep V rounding.
+ void GSRrvSetRoundSpriteUOnly(bool u_only);
++// RRV RR5 extension (fukami#2, 2026-10-11): depth-of-field blur that keeps its
++// native size at an internal scale above 1. RR5 blurs by framebuffer feedback
++// through a scratch target (FBP 210 = block 0x1a40): a forward pass copies the
++// frame into it with a half-texel bilinear average, a return pass blends it back
++// with a half-texel bilinear average the other way. At scale N both targets are
++// N times larger and each resample is a 2-tap average of HOST texels, so the blur
++// is 1/N as wide on screen. With `scratch_block` non-zero (and the scale above
++// 1), a draw that matches the pattern in GSRendererHW::Draw() (1:1 same-width
++// 32-bit copy of 32x16 sprites into / out of that block, UV = XY + 1 texel
++// forward and + 0 return, the return blending Cs with Cd by Ad) is drawn from a
++// box-downsampled native-size copy of its source (PCSX2's m_downscale_source
++// path: the forward from the frame, the return from the scratch target as the
++// forward draws left it) and both passes align their texture coordinates to
++// half a NATIVE pixel (forward samples that copy at c + 0.5, return at c - 0.5
++// for a host pixel centre c in native pixels), so each round trip is the native
++// [1 2 1] / 4 kernel at every scale. 0 (the default) = stock.
++// The counts are monotonic totals of matched draws (pass 1 forward, 2 return).
++void GSRrvSetNativeBlurCopy(u32 scratch_block);
++u32 GSRrvNativeBlurCopyBlock();
++u64 GSRrvGetNativeBlurCopyCount(u32 pass);
+ // RRV Gate-6 extension: when set, UserHacks_RewriteLargeST also collapses
+ // every triangle whose ST it had to rewrite (degenerate Q), so it draws nothing.
+ void GSRrvSetDropLargeSTTriangles(bool drop);
+diff --git a/pcsx2/GS/GSState.cpp b/pcsx2/GS/GSState.cpp
+index ca7a11a..f126d8e 100644
+--- a/pcsx2/GS/GSState.cpp
++++ b/pcsx2/GS/GSState.cpp
+@@ -28,6 +28,8 @@ std::atomic<u64> GSState::s_rrv_ofy_canonical_count{0};
+ bool GSState::s_rrv_round_sprite_u_only = false;
+ bool GSState::s_rrv_drop_large_st_triangles = false;
+ std::atomic<u64> GSState::s_rrv_dropped_large_st_triangles{0};
++u32 GSState::s_rrv_native_blur_block = 0;
++std::atomic<u64> GSState::s_rrv_native_blur_draws[2] = {0, 0};
+ 
+ static __fi bool IsAutoFlushEnabled()
+ {
+diff --git a/pcsx2/GS/GSState.h b/pcsx2/GS/GSState.h
+index 1c73d15..cffb4e4 100644
+--- a/pcsx2/GS/GSState.h
++++ b/pcsx2/GS/GSState.h
+@@ -327,6 +327,9 @@ public:
+ 	static bool s_rrv_round_sprite_u_only;
+ 	static bool s_rrv_drop_large_st_triangles;
+ 	static std::atomic<u64> s_rrv_dropped_large_st_triangles;
++	// RRV native-size blur copy, see GSRrvSetNativeBlurCopy(). Block 0 = off.
++	static u32 s_rrv_native_blur_block;
++	static std::atomic<u64> s_rrv_native_blur_draws[2]; // [0] forward, [1] return
+ 
+ 	GSPerfMon m_perfmon_frame; // Track stat across a frame.
+ 	GSPerfMon m_perfmon_draw;  // Track stat across a draw.
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+index a22f6eb..4ea39f1 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+@@ -1276,6 +1276,28 @@ void GSRendererHW::ConvertSpriteTextureShuffle(GSTextureCache::Target* rt, GSTex
+ 
+ GSVector4 GSRendererHW::RealignTargetTextureCoordinate(const GSTextureCache::Source* tex)
+ {
++	// RRV native-size blur copy (see Draw(), GSRrvSetNativeBlurCopy). Both passes
++	// are drawn from a box-downsampled NATIVE-size copy of their source (the
++	// forward from the frame, the return from the scratch target) and sample it at
++	// a host pixel's centre c (in native pixels) moved by half a native pixel: the
++	// stock mapping sends GS coordinate p to the first host pixel of native pixel
++	// p, so a sample at p + off lands off a host texel centre; subtracting
++	// (0.5 - 0.5 / N) texels (8 - 8 / N in the 1/16 texel UV units) from the UV of
++	// a forward draw (off = +1) and of a return draw (off = 0) gives samples at
++	// c + 0.5 (forward: scratch = bilinear(S, c + 0.5), S = native copy of the
++	// frame) and c - 0.5 (return: frame = bilinear(T, c - 0.5) blended by Ad, T =
++	// native copy of the scratch target). The two shifts cancel (no drift) and a
++	// round trip is the native [1 2 1] / 4 kernel. (Measured 2026-10-11 on
++	// a0408bf, where only the forward was a native copy: the return sampled the
++	// N-times scratch at c - 0.5, which for even N is exactly a host texel centre,
++	// so it only shifted back, the frame got bilinear(S, c) and a round trip was
++	// not [1 2 1] / 4.)
++	if (m_rrv_blur_pass != 0)
++	{
++		const float o = 8.0f - 8.0f / GetUpscaleMultiplier();
++		return GSVector4(o, o, 0.0f, 0.0f);
++	}
++
+ 	if (GSConfig.UserHacks_HalfPixelOffset <= GSHalfPixelOffset::Normal ||
+ 		GSConfig.UserHacks_HalfPixelOffset >= GSHalfPixelOffset::Native ||
+ 		GetUpscaleMultiplier() == 1.0f || m_downscale_source || tex->GetScale() == 1.0f ||
+@@ -3667,6 +3689,7 @@ void GSRendererHW::Draw()
+ 	bool scaled_copy = false;
+ 	int scale_draw = IsScalingDraw(src, m_primitive_covers_without_gaps != NoGapsType::GapsFound);
+ 	m_downscale_source = false;
++	m_rrv_blur_pass = 0;
+ 
+ 	if (GSConfig.UserHacks_NativeScaling != GSNativeScaling::Off)
+ 	{
+@@ -3707,6 +3730,73 @@ void GSRendererHW::Draw()
+ 	{
+ 		target_scale = src->m_from_target->GetScale();
+ 	}
++
++	// RRV RR5 extension (fukami#2, 2026-10-11): the depth-of-field blur keeps its
++	// native width at an internal scale above 1. The guest (FUN_00240cb0
++	// -> FUN_00240a48, called from func_233240 via FUN_00240ca0; also FUN_002429d0
++	// and FUN_002aaa60) blurs by feedback through FBP 210 (block 0x1a40), 1 to 5
++	// round trips per field (5 on the memory-card save screen via FUN_002aaa60,
++	// script-driven counts via FUN_002429d0, 3 in the attract) of 280 sprites of
++	// 32x16 (FST, TEX1 linear, CLAMP, CT32, FBW 10). Seen firing (2026-10-11, the
++	// RRV_PCSX2_GS_FULL_DOF_LOG log): the attract (fields 378-3286), the
++	// "SELECT SAVE FILE / Now saving" screen (1471-1537) and the pre-race fly-by
++	// (2984-3153, 3308-3704); not reached: the replay camera (FUN_002413d8) and the
++	// VS-menu caller; nothing in other menus, car select, the race or pause.
++	//   forward: FRAME = block, TEX0 = the frame, UV = XY + 1.0 texel (U0 = 16),
++	//            no blend: a half-texel 2x2 average;
++	//   return:  FRAME = the frame, TEX0 = block, UV = XY + 0, ABE with
++	//            A=Cs B=Cd C=Ad D=Cd (weighted by a depth-built destination-alpha
++	//            mask): the average the other way.
++	// Per round trip a [1 2 1] / 4 kernel in native pixels. At scale N both targets
++	// are N times larger and every resample is a 2-tap bilinear of HOST texels, so
++	// the blur is 1/N as wide (measured on field 1140: background detail 1.44x and
++	// 1.67x of the 1x frame at 2x and 4x; no stock setting fixes it). Both passes
++	// are made from a box-downsampled native-size copy of their source (the
++	// m_downscale_source path stock PCSX2 uses for native scaling: the draw then
++	// samples a native texture): the forward from the frame, the return from the
++	// scratch target. HandleTextureHazards takes that copy per draw, from the
++	// target's live texture (no cache across draws or passes), so a return draw
++	// sees what the forward draws of its round trip wrote; the destination alpha
++	// of the return's blend is read from the N-times frame, unaffected. (a0408bf
++	// copied only the forward: the return then sampled the N-times scratch at a
++	// host texel centre and a round trip was not the native kernel.) Both passes
++	// align their texture coordinates to half a native pixel
++	// (RealignTargetTextureCoordinate). The pattern is
++	// narrow (exactly this block, a 1:1 same-width CT32 copy of 32x16 sprites, U/V
++	// offset exactly 16 or 0, that blend) so other users of FBP 210 (the bloom
++	// chain, FUN_00247730 and FUN_00226460) do not match. Off at scale 1 and when
++	// GSRrvSetNativeBlurCopy() is 0.
++	if (const u32 blur_block = s_rrv_native_blur_block;
++		blur_block != 0 && src && src->m_from_target && m_vertex->next >= 2 &&
++		src->m_from_target->GetScale() > 1.0f && std::floor(src->m_from_target->GetScale()) == src->m_from_target->GetScale() &&
++		src->m_from_target->GetScale() == target_scale &&
++		m_vt.m_primclass == GS_SPRITE_CLASS && PRIM->TME && PRIM->FST && m_vt.IsRealLinear() &&
++		!m_texture_shuffle && !m_channel_shuffle &&
++		m_cached_ctx.TEX0.PSM == PSMCT32 && m_cached_ctx.FRAME.PSM == PSMCT32 &&
++		m_cached_ctx.TEX0.TBW == m_cached_ctx.FRAME.FBW)
++	{
++		const GSVertex* v = &m_vertex->buff[0];
++		const int ox = m_context->XYOFFSET.OFX, oy = m_context->XYOFFSET.OFY;
++		const int du = static_cast<int>(v[0].U) - (static_cast<int>(v[0].XYZ.X) - ox);
++		const int dv = static_cast<int>(v[0].V) - (static_cast<int>(v[0].XYZ.Y) - oy);
++		const bool sprite_32x16 = (static_cast<int>(v[1].XYZ.X) - static_cast<int>(v[0].XYZ.X)) == (32 << 4) &&
++		                          (static_cast<int>(v[1].XYZ.Y) - static_cast<int>(v[0].XYZ.Y)) == (16 << 4);
++		if (sprite_32x16 && m_cached_ctx.FRAME.Block() == blur_block && m_cached_ctx.TEX0.TBP0 != blur_block &&
++			du == 16 && dv == 16 && !PRIM->ABE)
++		{
++			m_rrv_blur_pass = 1;
++			m_downscale_source = true;
++			s_rrv_native_blur_draws[0].fetch_add(1, std::memory_order_relaxed);
++		}
++		else if (sprite_32x16 && m_cached_ctx.TEX0.TBP0 == blur_block && m_cached_ctx.FRAME.Block() != blur_block &&
++				 du == 0 && dv == 0 && PRIM->ABE && m_context->ALPHA.A == 0 && m_context->ALPHA.B == 1 &&
++				 m_context->ALPHA.C == 1 && m_context->ALPHA.D == 1)
++		{
++			m_rrv_blur_pass = 2;
++			m_downscale_source = true;
++			s_rrv_native_blur_draws[1].fetch_add(1, std::memory_order_relaxed);
++		}
++	}
+ 	// This upscaling hack is for games which construct P8 textures by drawing a bunch of small sprites in C32,
+ 	// then reinterpreting it as P8. We need to keep the off-screen intermediate textures at native resolution,
+ 	// but not propagate that through to the normal render targets. Test Case: Crash Wrath of Cortex.
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.h b/pcsx2/GS/Renderers/HW/GSRendererHW.h
+index 4ee9d55..d60756a 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.h
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.h
+@@ -306,6 +306,10 @@ private:
+ 
+ 	bool m_process_texture = false;
+ 	bool m_downscale_source = false;
++	// RRV native-size blur copy (GSRrvSetNativeBlurCopy): 1 forward pass, 2 return
++	// pass of the current draw, 0 none. Set in Draw(), read when the texture
++	// offset is computed (RealignTargetTextureCoordinate).
++	u8 m_rrv_blur_pass = 0;
+ 
+ 	TextureShuffleInfo m_texture_shuffle;
+ 
+diff --git a/bin/resources/shaders/dx11/tfx.fx b/bin/resources/shaders/dx11/tfx.fx
+index 528ef12c5..4935685c1 100644
+--- a/bin/resources/shaders/dx11/tfx.fx
++++ b/bin/resources/shaders/dx11/tfx.fx
+@@ -10,6 +10,7 @@
+ #define SHUFFLE_READWRITE 3
+ 
+ #ifndef VS_TME
++#define VS_RRV_SNAP 0
+ #define VS_IIP 0
+ #define VS_TME 1
+ #define VS_FST 1
+@@ -75,6 +76,7 @@
+ #define PS_FBA 0
+ #define PS_FBMASK 0
+ #define PS_LTF 1
++#define PS_SPRITE_COV 0
+ #define PS_TCOFFSETHACK 0
+ #define PS_POINT_SAMPLER 0
+ #define PS_REGION_RECT 0
+@@ -279,7 +281,7 @@ cbuffer cb1
+ 	float _pad0_cb1;
+ 	float _pad1_cb1;
+ 	float LineCovScale;
+-	float _pad2_cb1;
++	float SpriteCov;
+ 	float _pad3_cb1;
+ 	float _pad4_cb1;
+ };
+@@ -919,6 +921,18 @@ float4 sample_color(float2 st, float uv_w, int2 xy)
+ 
+ 		if(PS_LTF)
+ 		{
++#if PS_SPRITE_COV
++			// RRV sprite coverage (GSRrvSetSpriteCoverage, PS_SPRITE_COV): a point-sampled
++			// 2D draw. The interpolated UV is the one of the host pixel's first corner
++			// (the vertex shader put the edges on pixel centres), so SpriteCov host
++			// pixels further is the pixel's centre; the pixel is then cov texels wide
++			// and takes each of the two texels it lies over by the share under it (the
++			// bilinear weight below, sharpened by 1 / cov). Its own shader variant: the
++			// other filtered draws compile the stock code, bit for bit.
++			float2 st_step = ddx(st) + ddy(st);
++			st += SpriteCov * st_step;
++#endif
++
+ 			uv = st.xyxy + HalfTexel;
+ 			dd = frac(uv.xy * WH.zw);
+ 
+@@ -926,6 +940,11 @@ float4 sample_color(float2 st, float uv_w, int2 xy)
+ 			{
+ 				dd = clamp(dd, (float2)0.0f, (float2)0.9999999f);
+ 			}
++
++#if PS_SPRITE_COV
++			float2 cov = clamp(abs(st_step) * WH.zw, (float2)0.0001f, (float2)2.0f);
++			dd = saturate((dd - 0.5f) / cov + 0.5f);
++#endif
+ 		}
+ 		else
+ 		{
+@@ -1651,6 +1670,22 @@ cbuffer cb2
+ 	uint _cb2_pad1;
+ };
+ 
++// RRV sprite coverage (GSRrvSetSpriteCoverage, VS_RRV_SNAP; PointSize is then
++// half the target size in host pixels): an edge goes to the centre of the
++// first host pixel it covers, less 1/64 pixel so the pixel stays covered. The
++// same pixels are drawn, and every pixel's interpolated UV is the one of its
++// own first corner whatever fraction of a host pixel the edge was at (half
++// rows, the bridge's 4:3 HUD), which is what the pixel shader's texel weights
++// assume. `t` is the position with Y down.
++#if VS_RRV_SNAP
++float2 rrv_snap(float2 t)
++{
++	float2 pixel = (t + 1.0f) * PointSize;
++	pixel = ceil(pixel - 0.5f) + (0.5f - 1.0f / 64.0f);
++	return pixel / PointSize - 1.0f;
++}
++#endif
++
+ VS_OUTPUT vs_main(VS_INPUT input)
+ {
+ 	// Clamp to max depth, gs doesn't wrap
+@@ -1666,6 +1701,12 @@ VS_OUTPUT vs_main(VS_INPUT input)
+ 	output.p = float4(input.p, input.z, 1.0f) - float4(0.05f, 0.05f, 0, 0);
+ 
+ 	output.p.xy = output.p.xy * float2(VertexScale.x, -VertexScale.y) - float2(VertexOffset.x, -VertexOffset.y);
++#if VS_RRV_SNAP
++	{
++		float2 snapped = rrv_snap(float2(output.p.x, -output.p.y));
++		output.p.xy = float2(snapped.x, -snapped.y);
++	}
++#endif
+ 	output.p.z *= exp2(-32.0f);		// integer->float depth
+ 
+ 	if(VS_TME)
+diff --git a/bin/resources/shaders/vulkan/tfx.glsl b/bin/resources/shaders/vulkan/tfx.glsl
+index 7e4909faa..923a39606 100644
+--- a/bin/resources/shaders/vulkan/tfx.glsl
++++ b/bin/resources/shaders/vulkan/tfx.glsl
+@@ -42,6 +42,22 @@ layout(location = 0) out VSOutput
+ 	flat uint interior; // 1 for triangle interior; 0 for edge;
+ } vsOut;
+ 
++// RRV sprite coverage (GSRrvSetSpriteCoverage, VS_RRV_SNAP; PointSize is then
++// half the target size in host pixels): an edge goes to the centre of the
++// first host pixel it covers, less 1/64 pixel so the pixel stays covered. The
++// same pixels are drawn, and every pixel's interpolated UV is the one of its
++// own first corner whatever fraction of a host pixel the edge was at (half
++// rows, the bridge's 4:3 HUD), which is what the pixel shader's texel weights
++// assume. `t` is the position with Y down.
++#if VS_RRV_SNAP
++vec2 rrv_snap(vec2 t)
++{
++	vec2 pixel = (t + 1.0f) * PointSize;
++	pixel = ceil(pixel - 0.5f) + (0.5f - 1.0f / 64.0f);
++	return pixel / PointSize - 1.0f;
++}
++#endif
++
+ #if VS_EXPAND == VS_EXPAND_NONE
+ 
+ layout(location = 0) in vec2 a_st;
+@@ -66,6 +82,9 @@ void main()
+ 	gl_Position.xy = gl_Position.xy * vec2(VertexScale.x, -VertexScale.y) - vec2(VertexOffset.x, -VertexOffset.y);
+ 	gl_Position.z *= exp2(-32.0f);		// integer->float depth
+ 	gl_Position.y = -gl_Position.y;
++#if VS_RRV_SNAP
++	gl_Position.xy = rrv_snap(gl_Position.xy);
++#endif
+ 
+ 	#if VS_TME
+ 		vec2 uv = a_uv - TextureOffset;
+@@ -164,6 +183,9 @@ ProcessedVertex load_vertex(uint index)
+ 	vtx.p.xy = vtx.p.xy * vec2(VertexScale.x, -VertexScale.y) - vec2(VertexOffset.x, -VertexOffset.y);
+ 	vtx.p.z *= exp2(-32.0f);		// integer->float depth
+ 	vtx.p.y = -vtx.p.y;
++#if VS_RRV_SNAP
++	vtx.p.xy = rrv_snap(vtx.p.xy);
++#endif
+ 
+ 	#if VS_TME
+ 		vec2 uv = a_uv - TextureOffset;
+@@ -620,7 +642,7 @@ layout(std140, set = 0, binding = 1) uniform cb1
+ 	float _pad0_cb1;
+ 	float _pad1_cb1;
+ 	float LineCovScale;
+-	float _pad2_cb1;
++	float SpriteCov;
+ 	float _pad3_cb1;
+ 	float _pad4_cb1;
+ };
+@@ -1273,6 +1295,18 @@ vec4 sample_color(vec2 st)
+ 
+ 		#if PS_LTF
+ 		{
++#if PS_SPRITE_COV
++			// RRV sprite coverage (GSRrvSetSpriteCoverage, PS_SPRITE_COV): a point-sampled
++			// 2D draw. The interpolated UV is the one of the host pixel's first corner
++			// (the vertex shader put the edges on pixel centres), so SpriteCov host
++			// pixels further is the pixel's centre; the pixel is then cov texels wide
++			// and takes each of the two texels it lies over by the share under it (the
++			// bilinear weight below, sharpened by 1 / cov). Its own shader variant: the
++			// other filtered draws compile the stock code, bit for bit.
++			vec2 st_step = dFdx(st) + dFdy(st);
++			st += SpriteCov * st_step;
++#endif
++
+ 			uv = st.xyxy + HalfTexel;
+ 			dd = fract(uv.xy * WH.zw);
+ 
+@@ -1281,6 +1315,11 @@ vec4 sample_color(vec2 st)
+ 				dd = clamp(dd, vec2(0.0f), vec2(0.9999999f));
+ 			}
+ 			#endif
++
++#if PS_SPRITE_COV
++			vec2 cov = clamp(abs(st_step) * WH.zw, vec2(0.0001f), vec2(2.0f));
++			dd = clamp((dd - 0.5f) / cov + 0.5f, vec2(0.0f), vec2(1.0f));
++#endif
+ 		}
+ 		#else
+ 		{
+diff --git a/pcsx2/GS/GS.cpp b/pcsx2/GS/GS.cpp
+index 7735010e8..280d67797 100644
+--- a/pcsx2/GS/GS.cpp
++++ b/pcsx2/GS/GS.cpp
+@@ -22,6 +22,7 @@
+ #include "GS/Renderers/HW/GSTextureReplacements.h"
+ #include "VMManager.h"
+ 
++#include <unordered_set>
+ #include <atomic>
+ #include <cstring>
+ 
+@@ -110,6 +111,35 @@ u64 GSRrvGetNativeBlurCopyCount(u32 pass)
+ 	return (pass == 1 || pass == 2) ? GSState::s_rrv_native_blur_draws[pass - 1].load(std::memory_order_relaxed) : 0;
+ }
+ 
++void GSRrvSetSpriteCoverage(bool on)
++{
++	GSState::s_rrv_sprite_coverage = on;
++	GSState::s_rrv_sprite_coverage_draws.store(0, std::memory_order_relaxed);
++}
++
++u64 GSRrvGetSpriteCoverageDraws()
++{
++	return GSState::s_rrv_sprite_coverage_draws.load(std::memory_order_relaxed);
++}
++
++// Written and read on the GS thread only (the bridge submits and flushes there).
++static std::unordered_set<u64> s_rrv_aligned_sprites;
++
++void GSRrvMarkAlignedSprite(u64 key)
++{
++	s_rrv_aligned_sprites.insert(key);
++}
++
++bool GSRrvIsAlignedSprite(u64 key)
++{
++	return !s_rrv_aligned_sprites.empty() && s_rrv_aligned_sprites.count(key) != 0;
++}
++
++void GSRrvClearAlignedSprites()
++{
++	s_rrv_aligned_sprites.clear();
++}
++
+ void GSRrvSetDropLargeSTTriangles(bool drop)
+ {
+ 	GSState::s_rrv_drop_large_st_triangles = drop;
+diff --git a/pcsx2/GS/GS.h b/pcsx2/GS/GS.h
+index caf77d36c..f511d6f17 100644
+--- a/pcsx2/GS/GS.h
++++ b/pcsx2/GS/GS.h
+@@ -120,6 +120,38 @@ void GSRrvSetRoundSpriteUOnly(bool u_only);
+ void GSRrvSetNativeBlurCopy(u32 scratch_block);
+ u32 GSRrvNativeBlurCopyBlock();
+ u64 GSRrvGetNativeBlurCopyCount(u32 pass);
++// RRV sprite coverage: point-sampled 2D at every output scale. RR5 draws its
++// HUD, menus, text and logos as FST sprites and as two-triangle rectangles with
++// TEX1 NEAREST; a host pixel then takes one texel, so a texel is as many host
++// pixels wide as the ratio rounds to: even only when one texel covers a whole
++// number of host pixels (fonts are full-height textures in half-height field
++// sprites, 2 / N rows per texel at scale N: rows dropped at 1, strokes of 1
++// and 2 rows at 3; 0.75 N columns per texel under the bridge's 4:3 HUD on a
++// wide picture, where the stock texel rounding of a moved sprite also takes
++// the wrong first and last texel). When set, such a draw that reads guest
++// memory (not a render target) has each host pixel take the average of the
++// texels under its own area (the shader's 4-tap path with weights from the UV
++// derivatives, SpriteCov in the pixel constants); sprites keep the texels the
++// RoundSprite fix finds, now at scale 1 too. A texel boundary on a host pixel
++// boundary gives the stock picture; anywhere else the pixel is the exact mix.
++// Draws that sample render targets, linear draws and 3D are untouched. Off
++// (the default) = stock. The count is the monotonic total of draws it applied
++// to.
++void GSRrvSetSpriteCoverage(bool on);
++u64 GSRrvGetSpriteCoverageDraws();
++// A sprite the bridge has moved (its X is no longer the game's) cannot have the
++// texels it spans found from its position, so the bridge finds them from the
++// game's coordinates, writes them to U and marks the sprite: RoundSpriteOffset()
++// then leaves the U of a sprite with exactly these X and U ends alone (V is
++// still found from Y). The marks are cleared by the bridge once a field's draws
++// are flushed. Used only under sprite coverage.
++inline u64 GSRrvSpriteKey(u16 x0, u16 x1, u16 u0, u16 u1)
++{
++	return static_cast<u64>(x0) | (static_cast<u64>(x1) << 16) | (static_cast<u64>(u0) << 32) | (static_cast<u64>(u1) << 48);
++}
++void GSRrvMarkAlignedSprite(u64 key);
++bool GSRrvIsAlignedSprite(u64 key);
++void GSRrvClearAlignedSprites();
+ // RRV Gate-6 extension: when set, UserHacks_RewriteLargeST also collapses
+ // every triangle whose ST it had to rewrite (degenerate Q), so it draws nothing.
+ void GSRrvSetDropLargeSTTriangles(bool drop);
+diff --git a/pcsx2/GS/GSState.cpp b/pcsx2/GS/GSState.cpp
+index f126d8e1c..5886f69e4 100644
+--- a/pcsx2/GS/GSState.cpp
++++ b/pcsx2/GS/GSState.cpp
+@@ -30,6 +30,8 @@ bool GSState::s_rrv_drop_large_st_triangles = false;
+ std::atomic<u64> GSState::s_rrv_dropped_large_st_triangles{0};
+ u32 GSState::s_rrv_native_blur_block = 0;
+ std::atomic<u64> GSState::s_rrv_native_blur_draws[2] = {0, 0};
++bool GSState::s_rrv_sprite_coverage = false;
++std::atomic<u64> GSState::s_rrv_sprite_coverage_draws{0};
+ 
+ static __fi bool IsAutoFlushEnabled()
+ {
+diff --git a/pcsx2/GS/GSState.h b/pcsx2/GS/GSState.h
+index cffb4e497..21963fd40 100644
+--- a/pcsx2/GS/GSState.h
++++ b/pcsx2/GS/GSState.h
+@@ -330,6 +330,9 @@ public:
+ 	// RRV native-size blur copy, see GSRrvSetNativeBlurCopy(). Block 0 = off.
+ 	static u32 s_rrv_native_blur_block;
+ 	static std::atomic<u64> s_rrv_native_blur_draws[2]; // [0] forward, [1] return
++	// RRV sprite coverage, see GSRrvSetSpriteCoverage().
++	static bool s_rrv_sprite_coverage;
++	static std::atomic<u64> s_rrv_sprite_coverage_draws;
+ 
+ 	GSPerfMon m_perfmon_frame; // Track stat across a frame.
+ 	GSPerfMon m_perfmon_draw;  // Track stat across a draw.
+diff --git a/pcsx2/GS/Renderers/Common/GSDevice.h b/pcsx2/GS/Renderers/Common/GSDevice.h
+index 9ef0233ef..df3b932f0 100644
+--- a/pcsx2/GS/Renderers/Common/GSDevice.h
++++ b/pcsx2/GS/Renderers/Common/GSDevice.h
+@@ -685,7 +685,7 @@ struct alignas(16) GSHWDrawConfig
+ 				u8 iip : 1;
+ 				u8 point_size : 1;		///< Set when points need to be expanded without VS expanding.
+ 				VSExpand expand : 3;
+-				u8 _free : 1;
++				u8 rrv_snap : 1;		///< RRV sprite coverage: edges on host pixel centres (GSRrvSetSpriteCoverage).
+ 			};
+ 			u8 key;
+ 		};
+@@ -797,6 +797,9 @@ struct alignas(16) GSHWDrawConfig
+ 				// ROVs
+ 				u32 rov_color : 1;
+ 				PS_ROV_DEPTH rov_depth : 2;
++
++				// RRV sprite coverage (GSRrvSetSpriteCoverage): texel weights by area, with ltf.
++				u32 sprite_cov : 1;
+ 			};
+ 
+ 			struct
+@@ -1125,7 +1128,7 @@ struct alignas(16) GSHWDrawConfig
+ 
+ 		GSVector4 ScaleFactor;
+ 		float LineCovScale;
+-		float _pad0;
++		float SpriteCov; // RRV sprite coverage (GSRrvSetSpriteCoverage): 0 off, else the UV shift in host pixels.
+ 		float _pad1;
+ 		float _pad2;
+ 
+diff --git a/pcsx2/GS/Renderers/DX11/GSDevice11.cpp b/pcsx2/GS/Renderers/DX11/GSDevice11.cpp
+index d12043cdd..e1d324319 100644
+--- a/pcsx2/GS/Renderers/DX11/GSDevice11.cpp
++++ b/pcsx2/GS/Renderers/DX11/GSDevice11.cpp
+@@ -2074,6 +2074,7 @@ void GSDevice11::SetupVS(VSSelector sel, const GSHWDrawConfig::VSConstantBuffer*
+ 		sm.AddMacro("VS_TME", sel.tme);
+ 		sm.AddMacro("VS_FST", sel.fst);
+ 		sm.AddMacro("VS_IIP", sel.iip);
++		sm.AddMacro("VS_RRV_SNAP", sel.rrv_snap);
+ 		sm.AddMacro("VS_EXPAND", static_cast<int>(sel.expand));
+ 
+ 		static constexpr const D3D11_INPUT_ELEMENT_DESC layout[] =
+@@ -2141,6 +2142,7 @@ void GSDevice11::SetupPS(const PSSelector& sel, const GSHWDrawConfig::PSConstant
+ 		sm.AddMacro("PS_FBA", sel.fba);
+ 		sm.AddMacro("PS_FBMASK", sel.fbmask);
+ 		sm.AddMacro("PS_LTF", sel.ltf);
++		sm.AddMacro("PS_SPRITE_COV", sel.sprite_cov);
+ 		sm.AddMacro("PS_TCOFFSETHACK", sel.tcoffsethack);
+ 		sm.AddMacro("PS_POINT_SAMPLER", sel.point_sampler);
+ 		sm.AddMacro("PS_REGION_RECT", sel.region_rect);
+diff --git a/pcsx2/GS/Renderers/DX12/GSDevice12.cpp b/pcsx2/GS/Renderers/DX12/GSDevice12.cpp
+index 8541f266a..3f6afe24f 100644
+--- a/pcsx2/GS/Renderers/DX12/GSDevice12.cpp
++++ b/pcsx2/GS/Renderers/DX12/GSDevice12.cpp
+@@ -3217,6 +3217,7 @@ const ID3DBlob* GSDevice12::GetTFXVertexShader(GSHWDrawConfig::VSSelector sel)
+ 	sm.AddMacro("VS_TME", sel.tme);
+ 	sm.AddMacro("VS_FST", sel.fst);
+ 	sm.AddMacro("VS_IIP", sel.iip);
++	sm.AddMacro("VS_RRV_SNAP", sel.rrv_snap);
+ 	sm.AddMacro("VS_EXPAND", static_cast<int>(sel.expand));
+ 
+ 	const char* entry_point = (sel.expand != GSHWDrawConfig::VSExpand::None) ? "vs_main_expand" : "vs_main";
+@@ -3254,6 +3255,7 @@ const ID3DBlob* GSDevice12::GetTFXPixelShader(const GSHWDrawConfig::PSSelector&
+ 	sm.AddMacro("PS_FBA", sel.fba);
+ 	sm.AddMacro("PS_FBMASK", sel.fbmask);
+ 	sm.AddMacro("PS_LTF", sel.ltf);
++	sm.AddMacro("PS_SPRITE_COV", sel.sprite_cov);
+ 	sm.AddMacro("PS_TCOFFSETHACK", sel.tcoffsethack);
+ 	sm.AddMacro("PS_POINT_SAMPLER", sel.point_sampler);
+ 	sm.AddMacro("PS_REGION_RECT", sel.region_rect);
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+index 1237e08ad..da3bca82d 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.cpp
+@@ -2653,6 +2653,98 @@ bool GSRendererHW::CanUseSwSpriteRender()
+ 	return true;
+ }
+ 
++// RRV sprite coverage (GSRrvSetSpriteCoverage). True when every triangle of the
++// draw is half of an axis-aligned rectangle whose texture coordinates run with
++// the axes (one U or S for one X, one V or T for one Y; the caller has checked
++// that Q is constant for STQ): RR5 draws most of its HUD as such two-triangle
++// strips. A triangle qualifies with exactly one vertical and one horizontal
++// edge, so a rotated piece (the rev needle) or a degenerate triangle does not.
++bool GSRendererHW::RrvTrianglesAreTexelQuads()
++{
++	const u32 count = m_index->tail;
++	if (count < 3 || (count % 3) != 0 || count > 3 * 2048)
++		return false;
++
++	const GSVertex* v = &m_vertex->buff[0];
++	const u16* idx = m_index->buff;
++	const bool fst = PRIM->FST;
++	for (u32 i = 0; i < count; i += 3)
++	{
++		const GSVertex* t[3] = {&v[idx[i]], &v[idx[i + 1]], &v[idx[i + 2]]};
++		u32 vertical = 0, horizontal = 0;
++		for (u32 e = 0; e < 3; e++)
++		{
++			const GSVertex& p = *t[e];
++			const GSVertex& q = *t[(e + 1) % 3];
++			const bool same_x = p.XYZ.X == q.XYZ.X;
++			const bool same_y = p.XYZ.Y == q.XYZ.Y;
++			if (same_x == same_y)
++			{
++				if (same_x)
++					return false; // two vertices in one place
++				continue; // the diagonal
++			}
++			if (same_x)
++			{
++				if (fst ? (p.U != q.U) : (p.ST.S != q.ST.S))
++					return false;
++				vertical++;
++			}
++			else
++			{
++				if (fst ? (p.V != q.V) : (p.ST.T != q.ST.T))
++					return false;
++				horizontal++;
++			}
++		}
++		if (vertical != 1 || horizontal != 1)
++			return false;
++	}
++	return true;
++}
++
++// RRV sprite coverage (GSRrvSetSpriteCoverage), linear FST sprites from guest
++// memory above scale 1. The GS samples such a sprite once per native pixel:
++// the first at the sprite's first texture coordinate, the last one step
++// before its second (RR5's title logo: U 0.5 to 448.5 over 448 pixels, read at
++// 0.5, 1.5 ... 447.5, texels 0 to 447 of an atlas). The S host pixels inside
++// the last native pixel continue past that, up to (S - 1) / S of a step, and
++// show the atlas texel next to the piece: a line at the right end or under
++// the title, PRESS START BUTTON, the namco logo and the copyright line
++// (owner report 2026-10-13; attract field 3900 at scale 4, with either
++// sprite filter and before this patch series). So the coordinate of the far
++// vertex is pulled in until the last host pixel reads what the last native
++// pixel does, or one texel before the end where a step is more than a texel
++// (the title's V: 49 texel rows in 24.5 field rows, the other field reads the
++// rows in between). The picture is the native one resampled, narrower by one
++// step in S * length (0.17% on the title). Several sprites of one draw each
++// get their own end, which a clamp in the shader could not give them.
++void GSRendererHW::RrvLinearSpriteEdges(float scale)
++{
++	const u32 count = m_vertex->next;
++	GSVertex* v = &m_vertex->buff[0];
++	const auto fit = [scale](int pa, int pb, u16& ta, u16& tb) {
++		u16& end = pb >= pa ? tb : ta;
++		const int start = pb >= pa ? ta : tb;
++		const float length = static_cast<float>(std::abs(pb - pa)) / 16.0f;
++		const float span = static_cast<float>(std::abs(static_cast<int>(end) - start)) / 16.0f;
++		if (length <= 1.0f || span <= 1.0f)
++			return;
++		const float fitted = (span - std::min(span / length, 1.0f)) * length / (length - 1.0f / scale);
++		// Less than the 1/16 texel a coordinate can hold (a magnified sprite: the
++		// title's flare, 15.5 texels over 580 pixels): nothing shows, left as it is.
++		if (span - fitted < 1.0f / 16.0f)
++			return;
++		const int texels = static_cast<int>(std::floor(fitted * 16.0f));
++		end = static_cast<u16>(end >= start ? start + texels : start - texels);
++	};
++	for (u32 i = 0; i + 1 < count; i += 2)
++	{
++		fit(v[i].XYZ.X, v[i + 1].XYZ.X, v[i].U, v[i + 1].U);
++		fit(v[i].XYZ.Y, v[i + 1].XYZ.Y, v[i].V, v[i + 1].V);
++	}
++}
++
+ template <bool linear>
+ void GSRendererHW::RoundSpriteOffset()
+ {
+@@ -2729,6 +2821,10 @@ void GSRendererHW::RoundSpriteOffset()
+ 				v[i + 1].U -= 8;
+ 			}
+ 		}
++		else if (m_rrv_sprite_cov && GSRrvIsAlignedSprite(GSRrvSpriteKey(v[i].XYZ.X, v[i + 1].XYZ.X, v[i].U, v[i + 1].U)))
++		{
++			; // RRV sprite coverage: the bridge moved this sprite and has put its U on the texels it spans.
++		}
+ 		else
+ 		{
+ 			if (tx0 <= tx1)
+@@ -2738,7 +2834,8 @@ void GSRendererHW::RoundSpriteOffset()
+ 			}
+ 			else
+ 			{
+-				v[i].U = tx0 + 15;
++				// RRV sprite coverage: the exact end of the texel (the shader weights by area).
++				v[i].U = tx0 + (m_rrv_sprite_cov ? 16 : 15);
+ 				v[i + 1].U = tx1;
+ 			}
+ 		}
+@@ -2764,7 +2861,7 @@ void GSRendererHW::RoundSpriteOffset()
+ 			}
+ 			else
+ 			{
+-				v[i].V = ty0 + 15;
++				v[i].V = ty0 + (m_rrv_sprite_cov ? 16 : 15);
+ 				v[i + 1].V = ty1;
+ 			}
+ 		}
+@@ -2787,7 +2884,7 @@ void GSRendererHW::RoundSpriteOffset()
+ 			}
+ 			else
+ 			{
+-				v[i].V = pty0 + 15;
++				v[i].V = pty0 + (m_rrv_sprite_cov ? 16 : 15);
+ 				v[i + 1].V = pty1;
+ 			}
+ 		}
+@@ -5206,6 +5303,37 @@ void GSRendererHW::Draw()
+ 	// Note: second hack corrects only the texture coordinate
+ 	// Be careful to not correct downscaled targets, this can get messy and break post processing
+ 	// but it still needs to adjust native stuff from memory as it's not been compensated for upscaling (Dragon Quest 8 font for example).
++	// RRV sprite coverage (GSRrvSetSpriteCoverage): a point-sampled draw from
++	// guest memory of FST sprites or of axis-aligned textured rectangles made of
++	// two triangles at one depth, at every scale (1 included). The vertex shader
++	// puts the edges of such a draw on host pixel centres (DetermineVSConfig),
++	// so that the interpolated UV of a host pixel is the one of its first
++	// corner and the pixel shader can weight the texels under the pixel
++	// (EmulateTextureSampler). The edge position assumes the stock mapping of GS
++	// coordinate p to the first host pixel of native pixel p, which is what
++	// every half-pixel-offset mode below Native without the offset hack gives,
++	// and scale 1.
++	const bool rrv_cov = s_rrv_sprite_coverage && PRIM->TME && !PRIM->AA1 && m_process_texture && !m_vt.IsLinear() && rt && src &&
++	                     !src->m_target && !src->m_from_target && !GSLocalMemory::m_psm[m_cached_ctx.TEX0.PSM].depth &&
++	                     !m_channel_shuffle && !m_texture_shuffle && !IsMipMapDraw() && rt->OffsetHack_modxy <= 1.0f &&
++	                     (rt->GetScale() == 1.0f ? GSConfig.UserHacks_HalfPixelOffset != GSHalfPixelOffset::NativeWTexOffset :
++	                                               GSConfig.UserHacks_HalfPixelOffset < GSHalfPixelOffset::Native);
++	const bool rrv_cov_sprite = rrv_cov && m_vt.m_primclass == GS_SPRITE_CLASS && PRIM->FST;
++	m_rrv_sprite_cov = rrv_cov_sprite || (rrv_cov && m_vt.m_primclass == GS_TRIANGLE_CLASS && m_vt.m_eq.z &&
++	                                         (PRIM->FST || m_vt.m_eq.q) && RrvTrianglesAreTexelQuads());
++	if (m_rrv_sprite_cov)
++		s_rrv_sprite_coverage_draws.fetch_add(1, std::memory_order_relaxed);
++	// The texels a sprite spans are the ones the RoundSprite fix finds on the
++	// native pixel grid (below, above scale 1); at scale 1 it is run here.
++	if (rrv_cov_sprite && !(CanUpscale() && rt->GetScale() > 1.0f))
++		RoundSpriteOffset<false>();
++	// Linear sprites keep the stock sampling; only their far ends are fitted.
++	if (s_rrv_sprite_coverage && PRIM->TME && PRIM->FST && m_process_texture && m_vt.IsLinear() &&
++		m_vt.m_primclass == GS_SPRITE_CLASS && rt && src && !src->m_target && !src->m_from_target &&
++		!GSLocalMemory::m_psm[m_cached_ctx.TEX0.PSM].depth && !m_channel_shuffle && !m_texture_shuffle &&
++		CanUpscale() && rt->GetScale() > 1.0f && GSConfig.UserHacks_RoundSprite <= 1)
++		RrvLinearSpriteEdges(rt->GetScale());
++
+ 	if (CanUpscale() && (m_vt.m_primclass == GS_SPRITE_CLASS) && rt && rt->GetScale() > 1.0f)
+ 	{
+ 		const u32 count = vtx_buff.next;
+@@ -5238,7 +5366,7 @@ void GSRendererHW::Draw()
+ 		// Noting to do if no texture is sampled
+ 		if (PRIM->FST && draw_sprite_tex && m_process_texture)
+ 		{
+-			if ((GSConfig.UserHacks_RoundSprite > 1) || (GSConfig.UserHacks_RoundSprite == 1 && !m_vt.IsLinear()))
++			if ((GSConfig.UserHacks_RoundSprite > 1) || (GSConfig.UserHacks_RoundSprite == 1 && !m_vt.IsLinear()) || rrv_cov_sprite)
+ 			{
+ 				if (m_vt.IsLinear())
+ 					RoundSpriteOffset<true>();
+@@ -6338,6 +6466,25 @@ void GSRendererHW::DetermineVSConfig(GSTextureCache::Target* rt, float rtscale,
+ 	m_conf.cb_vs.vertex_offset = GSVector2(ox * sx + ox2 + 1, oy * sy + oy2 + 1);
+ 
+ 	m_conf.vs.iip = !IsFlatShaded();
++
++	// RRV sprite coverage (GSRrvSetSpriteCoverage): the vertex shader puts the
++	// edges of the draw on host pixel centres (rrv_snap in the shaders, its own
++	// vertex shader variant). It needs the target size in host pixels; sprites
++	// and plain triangles do not use PointSize, so that carries it. The Metal
++	// vertex shaders are built once per selector, so there the draw is marked in
++	// the constants instead (LineAA1Width < 0, also unused by these draws). The
++	// vertex constants persist between draws: the mark is cleared here for every
++	// other draw.
++	m_conf.vs.rrv_snap = m_rrv_sprite_cov;
++	if (m_rrv_sprite_cov)
++	{
++		m_conf.cb_vs.point_size = GSVector2(static_cast<float>(rtsize.x) * 0.5f, static_cast<float>(rtsize.y) * 0.5f);
++		m_conf.cb_vs.line_aa1_width = -1.0f;
++	}
++	else if (m_conf.cb_vs.line_aa1_width < 0.0f)
++	{
++		m_conf.cb_vs.line_aa1_width = 0.0f;
++	}
+ }
+ 
+ void GSRendererHW::DetermineBarriers(GSTextureCache::Target* rt, GSTextureCache::Source* tex)
+@@ -8325,6 +8472,20 @@ __ri void GSRendererHW::EmulateTextureSampler(const GSTextureCache::Target* rt,
+ 	m_conf.ps.tcc = m_cached_ctx.TEX0.TCC;
+ 
+ 	m_conf.ps.ltf = bilinear && shader_emulated_sampler;
++	// RRV sprite coverage (GSRrvSetSpriteCoverage): the shader's 4-tap path with
++	// a point sampler; SpriteCov turns its bilinear weights into the share of
++	// each texel under the host pixel and is the UV shift to that pixel's centre
++	// (half a host pixel less the 1/64 the vertex shader keeps the edge before
++	// the pixel centre). The constants persist between draws, so it is written
++	// for every textured draw. A draw that misses a condition here keeps the
++	// stock point sampling.
++	const bool sprite_cov = m_rrv_sprite_cov && !bilinear && !tex->m_target && !m_conf.ps.shuffle && !target_region && !psm.depth;
++	m_conf.cb_ps.SpriteCov = sprite_cov ? (0.5f - 1.0f / 64.0f) : 0.0f;
++	if (sprite_cov)
++	{
++		m_conf.ps.ltf = 1;
++		m_conf.ps.sprite_cov = 1;
++	}
+ 	m_conf.ps.point_sampler = g_gs_device->Features().broken_point_sampler && GSConfig.GPUPaletteConversion && !target_region && (!bilinear || shader_emulated_sampler);
+ 
+ 	const int tw = static_cast<int>(1 << m_cached_ctx.TEX0.TW);
+@@ -8429,7 +8590,7 @@ __ri void GSRendererHW::EmulateTextureSampler(const GSTextureCache::Target* rt,
+ 	}
+ 	else
+ 	{
+-		m_conf.sampler.biln = bilinear;
++		m_conf.sampler.biln = bilinear && !sprite_cov;
+ 		// Aniso filtering doesn't work with textureLod so use texture (automatic_lod) instead.
+ 		// Enable aniso only for triangles. Sprites are flat so aniso is likely useless (it would save perf for others primitives).
+ 		const bool anisotropic = m_vt.m_primclass == GS_TRIANGLE_CLASS && !trilinear_manual;
+diff --git a/pcsx2/GS/Renderers/HW/GSRendererHW.h b/pcsx2/GS/Renderers/HW/GSRendererHW.h
+index d60756a03..dacfc6b13 100644
+--- a/pcsx2/GS/Renderers/HW/GSRendererHW.h
++++ b/pcsx2/GS/Renderers/HW/GSRendererHW.h
+@@ -211,6 +211,8 @@ private:
+ 
+ 	template <bool linear>
+ 	void RoundSpriteOffset();
++	bool RrvTrianglesAreTexelQuads();
++	void RrvLinearSpriteEdges(float scale);
+ 
+ 	void DrawPrims(GSTextureCache::Target* rt, GSTextureCache::Target* ds, GSTextureCache::Source* tex, const TextureMinMaxResult& tmm);
+ 
+@@ -310,6 +312,11 @@ private:
+ 	// pass of the current draw, 0 none. Set in Draw(), read when the texture
+ 	// offset is computed (RealignTargetTextureCoordinate).
+ 	u8 m_rrv_blur_pass = 0;
++	// RRV sprite coverage (GSRrvSetSpriteCoverage): the current draw is a
++	// point-sampled draw of FST sprites or textured rectangles from guest
++	// memory. Set in Draw(), read by RoundSpriteOffset() and when the sampler
++	// is set up (EmulateTextureSampler).
++	bool m_rrv_sprite_cov = false;
+ 
+ 	TextureShuffleInfo m_texture_shuffle;
+ 
+diff --git a/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm b/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
+index 626bb6821..763721edf 100644
+--- a/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
++++ b/pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm
+@@ -2429,6 +2429,7 @@ void GSDeviceMTL::MRESetHWPipelineState(GSHWDrawConfig::VSSelector vssel, GSHWDr
+ 		setFnConstantI(m_fn_constants, pssel.sw_aniso,              GSMTLConstantIndex_PS_SW_ANISO);
+ 		setFnConstantB(m_fn_constants, pssel.rov_color,             GSMTLConstantIndex_PS_ROV_COLOR);
+ 		setFnConstantI(m_fn_constants, pssel.rov_depth,             GSMTLConstantIndex_PS_ROV_DEPTH);
++		setFnConstantB(m_fn_constants, pssel.sprite_cov,            GSMTLConstantIndex_PS_SPRITE_COV);
+ 		bool eft = pssel.HasColorROV() && !pssel.HasDepthROV() && !pssel.HasDepthOutput();
+ 		auto newps = LoadShader(eft ? @"ps_main_rov_eft" : @"ps_main");
+ 		ps = newps;
+diff --git a/pcsx2/GS/Renderers/Metal/GSMTLSharedHeader.h b/pcsx2/GS/Renderers/Metal/GSMTLSharedHeader.h
+index 2ce37f93e..722eff0f1 100644
+--- a/pcsx2/GS/Renderers/Metal/GSMTLSharedHeader.h
++++ b/pcsx2/GS/Renderers/Metal/GSMTLSharedHeader.h
+@@ -142,7 +142,7 @@ struct GSMTLMainPSUniform
+ 	vector_float4 scale_factor;
+ 
+ 	float line_cov_scale;
+-	float _pad0;
++	float sprite_cov; // RRV sprite coverage (GSRrvSetSpriteCoverage)
+ 	float _pad1;
+ 	float _pad2;
+ };
+@@ -231,4 +231,5 @@ enum GSMTLFnConstants
+ 	GSMTLConstantIndex_PS_SW_ANISO,
+ 	GSMTLConstantIndex_PS_ROV_COLOR,
+ 	GSMTLConstantIndex_PS_ROV_DEPTH,
++	GSMTLConstantIndex_PS_SPRITE_COV, // RRV sprite coverage (GSRrvSetSpriteCoverage)
+ };
+diff --git a/pcsx2/GS/Renderers/Metal/tfx.metal b/pcsx2/GS/Renderers/Metal/tfx.metal
+index 95c772cb3..c990ae00b 100644
+--- a/pcsx2/GS/Renderers/Metal/tfx.metal
++++ b/pcsx2/GS/Renderers/Metal/tfx.metal
+@@ -78,6 +78,7 @@ constant uint PS_AA1_RAW            [[function_constant(GSMTLConstantIndex_PS_AA
+ constant bool PS_ABE                [[function_constant(GSMTLConstantIndex_PS_ABE)]];
+ constant uint PS_SW_ANISO           [[function_constant(GSMTLConstantIndex_PS_SW_ANISO)]];
+ constant bool PS_ROV_COLOR          [[function_constant(GSMTLConstantIndex_PS_ROV_COLOR)]];
++constant bool PS_SPRITE_COV         [[function_constant(GSMTLConstantIndex_PS_SPRITE_COV)]];
+ constant uint PS_ROV_DEPTH_RAW      [[function_constant(GSMTLConstantIndex_PS_ROV_DEPTH)]];
+ 
+ using GSShader::VSExpand;
+@@ -226,6 +227,20 @@ static void texture_coord(thread const MainVSIn& v, thread MainVSOut& out, const
+ 	}
+ }
+ 
++// RRV sprite coverage (GSRrvSetSpriteCoverage, line_aa1_width < 0 marks the draw here; point_size is then
++// half the target size in host pixels): an edge goes to the centre of the
++// first host pixel it covers, less 1/64 pixel so the pixel stays covered. The
++// same pixels are drawn, and every pixel's interpolated UV is the one of its
++// own first corner whatever fraction of a host pixel the edge was at (half
++// rows, the bridge's 4:3 HUD), which is what the pixel shader's texel weights
++// assume. `t` is the position with Y down.
++static float2 rrv_snap(float2 t, constant GSMTLMainVSUniform& cb)
++{
++	float2 pixel = (t + 1.f) * cb.point_size;
++	pixel = ceil(pixel - 0.5f) + (0.5f - 1.f / 64.f);
++	return pixel / cb.point_size - 1.f;
++}
++
+ static MainVSOut vs_main_run(thread const MainVSIn& v, constant GSMTLMainVSUniform& cb)
+ {
+ 	constexpr float exp_min32 = 0x1p-32;
+@@ -234,6 +249,11 @@ static MainVSOut vs_main_run(thread const MainVSIn& v, constant GSMTLMainVSUnifo
+ 	uint z = min(v.z, cb.max_depth);
+ 	out.p.xy = float2(v.p) - float2(0.05, 0.05);
+ 	out.p.xy = out.p.xy * float2(cb.vertex_scale.x, -cb.vertex_scale.y) - float2(cb.vertex_offset.x, -cb.vertex_offset.y);
++	if (cb.line_aa1_width < 0.f)
++	{
++		float2 snapped = rrv_snap(float2(out.p.x, -out.p.y), cb);
++		out.p.xy = float2(snapped.x, -snapped.y);
++	}
+ 	out.p.w = 1;
+ 	out.p.z = float(z) * exp_min32;
+ 
+@@ -1135,6 +1155,20 @@ struct PSMain
+ 			float4 uv;
+ 			if (PS_LTF)
+ 			{
++				// RRV sprite coverage (GSRrvSetSpriteCoverage, PS_SPRITE_COV): a point-sampled
++				// 2D draw. The interpolated UV is the one of the host pixel's first corner
++				// (the vertex shader put the edges on pixel centres), so SpriteCov host
++				// pixels further is the pixel's centre; the pixel is then cov texels wide
++				// and takes each of the two texels it lies over by the share under it (the
++				// bilinear weight below, sharpened by 1 / cov). Its own shader variant: the
++				// other filtered draws compile the stock code, bit for bit.
++				float2 st_step = float2(0.f);
++				if (PS_SPRITE_COV)
++				{
++					st_step = dfdx(st) + dfdy(st);
++					st += cb.sprite_cov * st_step;
++				}
++
+ 				uv = st.xyxy + cb.half_texel;
+ 				dd = fract(uv.xy * cb.wh.zw);
+ 				if (!FST)
+@@ -1143,6 +1177,12 @@ struct PSMain
+ 					// I suspect that uv isn't a standard number, so fract is outside of the [0;1] range
+ 					dd = saturate(dd);
+ 				}
++
++				if (PS_SPRITE_COV)
++				{
++					float2 cov = clamp(abs(st_step) * cb.wh.zw, float2(0.0001f), float2(2.f));
++					dd = saturate((dd - 0.5f) / cov + 0.5f);
++				}
+ 			}
+ 			else
+ 			{
+diff --git a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
+index bc48d5697..e82ab89fc 100644
+--- a/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
++++ b/pcsx2/GS/Renderers/Vulkan/GSDeviceVK.cpp
+@@ -4971,6 +4971,7 @@ VkShaderModule GSDeviceVK::GetTFXVertexShader(GSHWDrawConfig::VSSelector sel)
+ 	AddMacro(ss, "VS_TME", sel.tme);
+ 	AddMacro(ss, "VS_FST", sel.fst);
+ 	AddMacro(ss, "VS_IIP", sel.iip);
++	AddMacro(ss, "VS_RRV_SNAP", sel.rrv_snap);
+ 	AddMacro(ss, "VS_POINT_SIZE", sel.point_size);
+ 	AddMacro(ss, "VS_EXPAND", static_cast<int>(sel.expand));
+ 	AddMacro(ss, "VS_PROVOKING_VERTEX_LAST", static_cast<int>(m_features.provoking_vertex_last));
+@@ -5015,6 +5016,7 @@ VkShaderModule GSDeviceVK::GetTFXFragmentShader(const GSHWDrawConfig::PSSelector
+ 	AddMacro(ss, "PS_A_MASKED", sel.a_masked);
+ 	AddMacro(ss, "PS_FBA", sel.fba);
+ 	AddMacro(ss, "PS_LTF", sel.ltf);
++	AddMacro(ss, "PS_SPRITE_COV", sel.sprite_cov);
+ 	AddMacro(ss, "PS_AUTOMATIC_LOD", sel.automatic_lod);
+ 	AddMacro(ss, "PS_MANUAL_LOD", sel.manual_lod);
+ 	AddMacro(ss, "PS_COLCLIP", sel.colclip);

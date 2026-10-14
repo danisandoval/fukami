@@ -133,6 +133,22 @@
     {
       "name": "rrv-cursor-idle",
       "target": "rrv-cursor-idle-tests"
+    },
+    {
+      "name": "rrv-pad-slots",
+      "target": "rrv-pad-slots-tests"
+    },
+    {
+      "name": "rrv-display-refresh",
+      "target": "rrv-display-refresh-tests"
+    },
+    {
+      "name": "rrv-audio-rate-control",
+      "target": "rrv-audio-rate-control-tests"
+    },
+    {
+      "name": "rrv-vu-exact",
+      "target": "rrv-vu-exact-tests"
     }
   ],
   "input_dependent": [
