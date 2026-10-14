@@ -1,7 +1,7 @@
 # Fukami
 
-**Fukami** is a native port of **Ridge Racer V** (PlayStation 2, USA, `SLUS-20002`) for macOS (Apple silicon) and
-Linux (Steam Deck) (Windows coming soon), made by static recompilation: the game's MIPS code is translated ahead of time into C++ and
+**Fukami** is a native port of **Ridge Racer V** (PlayStation 2, USA, `SLUS-20002`) for Windows, macOS (Apple silicon) and
+Linux (Steam Deck), made by static recompilation: the game's MIPS code is translated ahead of time into C++ and
 compiled into a normal application, with a PS2 hardware layer (the GS from [PCSX2](https://pcsx2.net/)) underneath.
 It is **not an emulator** and it cannot run any other game.
 
@@ -25,16 +25,17 @@ It is **not an emulator** and it cannot run any other game.
 
 | | |
 |---|---|
+| **Windows** | Windows 10 or 11, x86-64, a GPU with Direct3D 11 or Vulkan, and the Microsoft Visual C++ Redistributable (x64). |
 | **macOS** | Apple silicon (M1 or later); the minimum macOS version is in each release's notes. |
 | **Steam Deck / SteamOS** | SteamOS 3.7 or later. Other Linux x86-64 distributions are untested. |
 | **Game** | Ridge Racer V (USA) as a **CHD** file (or a `.cue`/`.bin` pair) made from your own disc. About 500 MB of free disk space. |
-
-Windows is planned; see the [roadmap](docs/ROADMAP.md).
 
 ## Install
 
 Download the latest build from the [Releases](https://github.com/danisandoval/fukami/releases) page (and only from there):
 
+- **Windows:** unzip `Fukami-<version>-windows-x86_64.zip` anywhere and run **Fukami.exe**. Settings and saves go to
+  `%LOCALAPPDATA%\Fukami`.
 - **macOS:** unzip `Fukami-<version>-macos-arm64.zip`, move **Fukami** to Applications, then right-click it and choose
   **Open** the first time (the app is not notarised yet).
 - **Steam Deck:** in Desktop Mode, extract `Fukami-<version>-linux-x86_64.tar.gz` and run `./install.sh`; it adds

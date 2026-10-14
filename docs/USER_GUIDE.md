@@ -1,17 +1,26 @@
 # Fukami user guide
 
-Fukami plays Ridge Racer V (USA, `SLUS-20002`) natively on macOS (Apple silicon) and on the Steam Deck.
+Fukami plays Ridge Racer V (USA, `SLUS-20002`) natively on Windows, macOS (Apple silicon) and the Steam Deck.
 **No game data is included: you need your own copy of the game.** Fukami is not affiliated with or endorsed by
 Bandai Namco or Sony.
 
 ## What you need
 
-- A Mac with Apple silicon (M1 or later), or a Steam Deck (SteamOS 3.7+).
+- A Windows 10/11 PC (x86-64), a Mac with Apple silicon (M1 or later), or a Steam Deck (SteamOS 3.7+).
 - Your own copy of Ridge Racer V (USA) as a **CHD** file, made from your disc, or a `.cue`/`.bin` pair (see the README, "Getting your CHD").
 - About 500 MB of free space for the game files, plus your saves.
 - Optional: a game controller (DualShock 4/5, Xbox or any SDL-supported pad).
 
 Only the USA disc is supported. A different release or a damaged dump is refused with a message; nothing is written.
+
+## Windows
+
+1. Install the Microsoft Visual C++ Redistributable (x64) if you do not have it.
+2. Unzip `Fukami-<version>-windows-x86_64.zip` to any folder and run **Fukami.exe**.
+3. Fukami asks for your disc image (the CHD, or the `.cue` of a `.cue`/`.bin` pair); you can also drop it on Fukami.exe.
+   It checks the disc and unpacks the game files once into `%LOCALAPPDATA%\Fukami`, where your settings and saves live too.
+4. The game starts fullscreen. Direct3D 11 is used by default; if it does not start or misbehaves with your graphics
+   driver, set **Graphics API** to Vulkan in the menu.
 
 ## macOS
 

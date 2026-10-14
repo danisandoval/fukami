@@ -7,7 +7,7 @@ to build from source. **The repository contains no game code**: you generate it 
 |---|---|
 | macOS (Apple silicon) | native, steps 1–6 below |
 | Steam Deck / Linux x86-64 | in a Linux container, [step 7](#7-steam-deck--linux) |
-| Windows | not yet; see the [roadmap](docs/ROADMAP.md) |
+| Windows x86-64 | release builds available; build steps not documented yet |
 
 ## 0. Tools
 
