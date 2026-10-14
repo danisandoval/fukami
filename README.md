@@ -14,7 +14,7 @@ It is **not an emulator** and it cannot run any other game.
 - Native 60 fps progressive output; the game's logic still sees the exact PS2 timing.
 - Internal resolution up to 8x, PCSX2 anti-aliasing emulation, FXAA, CAS sharpening, anisotropic filtering, mipmaps.
 - **Real widescreen** (16:9, 16:10, 21:9): the game's camera renders a wider view, not a stretched picture. The
-  intro keeps its own letterboxed framing.
+  intro fills the wide screen in its own view.
 - Optional enhancements: more cars at full detail (car LOD), longer draw distance, faster loading.
 - Controller support (SDL game controllers, rumble) and keyboard; in-game settings menu (Esc / F1 / Guide button).
 - Saves to a real memory-card file, safe against power loss.
